@@ -209,6 +209,12 @@ public class OpenAppTool extends BaseTool {
             case "slack": return "com.Slack";
             case "wechat": return "com.tencent.mm";
             case "line": return "jp.naver.line.android";
+            case "blinkit": case "grofers": return "com.grofers.customerapp";
+            case "zepto": return "com.zepto.customer";
+            case "swiggy": case "instamart": return "in.swiggy.android";
+            case "zomato": return "com.application.zomato";
+            case "amazon": return "com.amazon.mShop.android.shopping";
+            case "flipkart": return "com.flipkart.android";
             default: break;
         }
         // Try to find by searching installed app labels AND package names

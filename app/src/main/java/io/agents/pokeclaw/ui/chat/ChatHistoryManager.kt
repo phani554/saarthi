@@ -240,6 +240,17 @@ object ChatHistoryManager {
     }
 
     /**
+     * Delete all saved chat files and clear SQLite index.
+     */
+    fun clearAllHistory(context: Context) {
+        try {
+            val dir = getChatDir(context)
+            dir.listFiles()?.forEach { it.delete() }
+            ChatDatabase(context).writableDatabase.execSQL("DELETE FROM conversations")
+        } catch (_: Exception) {}
+    }
+
+    /**
      * List all saved conversations, newest first.
      */
     fun listConversations(context: Context): List<ConversationSummary> {

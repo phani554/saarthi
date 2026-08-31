@@ -76,12 +76,13 @@ public class SendMessageTool extends BaseTool {
             return ToolResult.error("Accessibility service is not running");
         }
 
-        String contact = requireString(params, "contact");
+        String rawContact = requireString(params, "contact");
+        String contact = io.agents.pokeclaw.agent.knowledge.ContactAliasResolver.INSTANCE.resolve(rawContact);
         String message = requireString(params, "message");
         Object appParam = params.get("app");
         String app = appParam != null ? appParam.toString() : "WhatsApp";
 
-        XLog.i(TAG, "Sending '" + message + "' to " + contact + " via " + app);
+        XLog.i(TAG, "Sending '" + message + "' to " + contact + " (raw='" + rawContact + "') via " + app);
 
         try {
             // Step 1: Resolve and open the messaging app
@@ -282,12 +283,25 @@ public class SendMessageTool extends BaseTool {
         // Focus + click + set text
         best.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
         best.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-        Thread.sleep(500);
+        Thread.sleep(300);
 
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message);
         boolean ok = best.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-        XLog.i(TAG, "typeInBottomEditText: setText='" + message + "' at y=" + bestY + " result=" + ok);
+
+        // Also set primary clip and paste to ensure TextWatcher listeners fire in messaging apps (converts Mic -> Send button)
+        try {
+            android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
+                    service.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            if (clipboard != null) {
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("send_msg", message));
+                best.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+            }
+        } catch (Exception e) {
+            XLog.w(TAG, "typeInBottomEditText: paste fallback error", e);
+        }
+
+        XLog.i(TAG, "typeInBottomEditText: setText/paste='" + message + "' at y=" + bestY + " result=" + ok);
         return ok;
     }
 

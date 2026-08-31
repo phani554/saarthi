@@ -660,10 +660,15 @@ public class AutoReplyManager {
         }
     }
 
+    private String getSystemPromptWithMemory() {
+        String memory = io.agents.pokeclaw.agent.knowledge.MemoryManager.INSTANCE.getMemoryPromptSection();
+        return REPLY_SYSTEM_PROMPT + memory;
+    }
+
     private String generateReplyCloud(String prompt) {
-        XLog.i(TAG, "generateReplyCloud: using LlmSessionManager");
+        XLog.i(TAG, "generateReplyCloud: using LlmSessionManager with user memory");
         String reply = io.agents.pokeclaw.agent.llm.LlmSessionManager.INSTANCE.singleShotCloud(
-            REPLY_SYSTEM_PROMPT, prompt, 0.7
+            getSystemPromptWithMemory(), prompt, 0.7
         );
         if (reply != null) {
             reply = reply.replaceAll("^[\"']|[\"']$", "").trim();
@@ -673,9 +678,9 @@ public class AutoReplyManager {
     }
 
     private String generateReplyLocal(String prompt) {
-        XLog.i(TAG, "generateReplyLocal: using LlmSessionManager");
+        XLog.i(TAG, "generateReplyLocal: using LlmSessionManager with user memory");
         String reply = io.agents.pokeclaw.agent.llm.LlmSessionManager.INSTANCE.singleShotLocal(
-            REPLY_SYSTEM_PROMPT, prompt, 0.7
+            getSystemPromptWithMemory(), prompt, 0.7
         );
         if (reply != null) {
             reply = reply.replaceAll("^[\"']|[\"']$", "").trim();

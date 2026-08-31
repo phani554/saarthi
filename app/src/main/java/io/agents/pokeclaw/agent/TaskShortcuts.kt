@@ -212,7 +212,7 @@ object TaskShortcuts {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 // Request screenshot via accessibility service if available
-                val svc = io.agents.pokeclaw.service.ClawAccessibilityService.getInstance()
+                val svc = io.agents.pokeclaw.service.ClawAccessibilityService.getConnectedInstance(3000L)
                 if (svc != null) {
                     svc.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
                     XLog.i(TAG, "Shortcut: screenshot via accessibility service")
@@ -232,7 +232,7 @@ object TaskShortcuts {
 
     private fun pressHome(context: Context): String {
         return try {
-            val svc = io.agents.pokeclaw.service.ClawAccessibilityService.getInstance()
+            val svc = io.agents.pokeclaw.service.ClawAccessibilityService.getConnectedInstance(3000L)
             if (svc != null) {
                 svc.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_HOME)
                 XLog.i(TAG, "Shortcut: pressed Home")
@@ -254,7 +254,7 @@ object TaskShortcuts {
 
     private fun pressBack(context: Context): String {
         return try {
-            val svc = io.agents.pokeclaw.service.ClawAccessibilityService.getInstance()
+            val svc = io.agents.pokeclaw.service.ClawAccessibilityService.getConnectedInstance(3000L)
             if (svc != null) {
                 svc.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK)
                 XLog.i(TAG, "Shortcut: pressed Back")

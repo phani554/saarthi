@@ -69,9 +69,10 @@ public class AutoReplyTool extends BaseTool {
         }
 
         if (action.equals("on") || action.equals("enable") || action.equals("start")) {
-            String contact = params.containsKey("contact")
+            String rawContact = params.containsKey("contact")
                     ? String.valueOf(params.get("contact")).trim()
                     : "";
+            String contact = io.agents.pokeclaw.agent.knowledge.ContactAliasResolver.INSTANCE.resolve(rawContact);
             String app = params.containsKey("app")
                     ? String.valueOf(params.get("app")).trim()
                     : "WhatsApp";

@@ -243,6 +243,11 @@ public final class ContactListUiUtils {
         }
     }
 
+    public static String cleanSearchQuery(String raw) {
+        if (raw == null) return "";
+        return raw.replaceAll("(?i)^(?:group|contact|chat|user)\\s+", "").trim();
+    }
+
     private static SearchAttemptResult trySearchAndClick(
         ClawAccessibilityService service,
         String rawQuery,
@@ -250,6 +255,7 @@ public final class ContactListUiUtils {
         Set<String> digitAliases,
         long settleMs
     ) throws InterruptedException {
+        String cleanQuery = cleanSearchQuery(rawQuery);
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
         if (root == null) {
             return SearchAttemptResult.SEARCH_UI_MISSING;
@@ -276,7 +282,7 @@ public final class ContactListUiUtils {
             return tappedSearchAction ? SearchAttemptResult.SEARCH_UI_MISSING : SearchAttemptResult.NO_MATCH;
         }
 
-        if (!setText(searchField, rawQuery)) {
+        if (!setText(searchField, cleanQuery)) {
             XLog.i(TAG, "trySearchAndClick: failed to type query into search field");
             return SearchAttemptResult.TYPE_FAILED;
         }
@@ -311,9 +317,24 @@ public final class ContactListUiUtils {
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
         boolean success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-        if (!success) return false;
 
         CharSequence currentText = node.getText();
+        if (success && currentText != null && currentText.toString().contains(text)) {
+            return true;
+        }
+
+        // Try clipboard paste fallback for custom search fields
+        try {
+            android.content.Context ctx = io.agents.pokeclaw.ClawApplication.Companion.getInstance();
+            android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
+                    ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            if (clipboard != null) {
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("search_query", text));
+                node.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+            }
+        } catch (Exception ignored) {}
+
+        currentText = node.getText();
         return currentText != null && currentText.toString().contains(text);
     }
 

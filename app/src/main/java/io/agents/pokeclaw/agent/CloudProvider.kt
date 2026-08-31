@@ -42,6 +42,18 @@ enum class CloudProvider(
             CloudModel("gpt-4.1-nano", "GPT-4.1 Nano", 0.10, 0.40, ModelTier.LITE, 1_000_000),
         )
     ),
+    OPENROUTER(
+        displayName = "OpenRouter",
+        defaultBaseUrl = "https://openrouter.ai/api/v1",
+        models = listOf(
+            CloudModel("zhipuai/glm-4-flash", "GLM 4 Flash", 0.06, 0.06, ModelTier.FAST, 128_000, recommended = true),
+            CloudModel("deepseek/deepseek-chat", "DeepSeek V3", 0.14, 0.28, ModelTier.SMART, 64_000),
+            CloudModel("qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B", 0.35, 0.40, ModelTier.SMART, 128_000),
+            CloudModel("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B", 0.12, 0.30, ModelTier.SMART, 128_000),
+            CloudModel("google/gemini-2.5-flash", "Gemini 2.5 Flash", 0.075, 0.30, ModelTier.FAST, 1_000_000),
+        ),
+        showBaseUrl = true
+    ),
     ANTHROPIC(
         displayName = "Anthropic",
         defaultBaseUrl = "https://api.anthropic.com/v1",

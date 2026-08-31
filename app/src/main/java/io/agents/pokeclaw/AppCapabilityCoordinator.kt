@@ -118,22 +118,12 @@ object AppCapabilityCoordinator {
         lastInterruptedAt: Long = 0L,
         lastDisconnectedAt: Long,
     ): ServiceBindingState {
+        if (running) return ServiceBindingState.READY
         if (!enabled) return ServiceBindingState.DISABLED
         if (pendingRepair) return ServiceBindingState.CONNECTING
 
         val now = System.currentTimeMillis()
         val lastHealthyAt = maxOf(lastConnectedAt, lastHeartbeatAt)
-
-        if (running) {
-            if (lastInterruptedAt > lastHealthyAt) {
-                return if (now - lastInterruptedAt <= ACCESSIBILITY_INTERRUPT_GRACE_MS) {
-                    ServiceBindingState.CONNECTING
-                } else {
-                    ServiceBindingState.DEGRADED
-                }
-            }
-            return ServiceBindingState.READY
-        }
 
         if (lastHealthyAt <= 0L) return ServiceBindingState.CONNECTING
 

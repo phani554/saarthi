@@ -306,6 +306,7 @@ class ChatSessionController(
     }
 
     fun sendChat(text: String) {
+        io.agents.pokeclaw.agent.knowledge.MemoryManager.learnFromMessage(text)
         addUser(text)
         uiState.isAwaitingReply.value = true
         uiState.messages.add(ChatMessage(ChatMessage.Role.ASSISTANT, "..."))
@@ -351,8 +352,9 @@ class ChatSessionController(
                 }
             } catch (e: Exception) {
                 XLog.e(TAG, "Chat error", e)
+                val friendlyError = io.agents.pokeclaw.agent.DefaultAgentService.formatLlmError(e.message)
                 postToMain {
-                    replaceTypingIndicator("Error: ${e.message}")
+                    replaceTypingIndicator(friendlyError)
                     uiState.isAwaitingReply.value = false
                 }
             }
@@ -523,8 +525,9 @@ class ChatSessionController(
     }
 
     private fun buildConversationConfig(systemPrompt: String? = null): ConversationConfig {
+        val effectivePrompt = (systemPrompt ?: BASE_SYSTEM_PROMPT) + io.agents.pokeclaw.agent.knowledge.MemoryManager.getMemoryPromptSection()
         return ConversationConfig(
-            systemInstruction = Contents.of(systemPrompt ?: BASE_SYSTEM_PROMPT),
+            systemInstruction = Contents.of(effectivePrompt),
             samplerConfig = SamplerConfig(topK = 64, topP = 0.95, temperature = 0.7)
         )
     }
@@ -546,7 +549,8 @@ class ChatSessionController(
 
     private fun rebuildCloudHistoryFromVisibleMessages() {
         cloudHistory.clear()
-        cloudHistory.add(SystemMessage.from(BASE_SYSTEM_PROMPT))
+        val sysPrompt = BASE_SYSTEM_PROMPT + io.agents.pokeclaw.agent.knowledge.MemoryManager.getMemoryPromptSection()
+        cloudHistory.add(SystemMessage.from(sysPrompt))
         uiState.messages.forEach { msg ->
             when (msg.role) {
                 ChatMessage.Role.USER -> cloudHistory.add(UserMessage.from(msg.content))

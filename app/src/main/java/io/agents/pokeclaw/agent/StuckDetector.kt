@@ -174,10 +174,8 @@ class StuckDetector(private val windowSize: Int = 8) {
         return when (level) {
             RecoveryLevel.HINT ->
                 "[System Notice] $base"
-            RecoveryLevel.STRATEGY_SWITCH ->
-                "[System Warning] You have been stuck for multiple rounds. $base If you cannot make progress, call finish and explain what went wrong."
-            RecoveryLevel.AUTO_KILL ->
-                "" // caller handles auto-kill
+            RecoveryLevel.STRATEGY_SWITCH, RecoveryLevel.AUTO_KILL ->
+                "[System Warning] You appear stuck on this screen step. Try pressing system_key(key=\"back\"), or call finish asking the user for guidance or to complete the step manually."
         }
     }
 

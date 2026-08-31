@@ -275,13 +275,8 @@ public class InputTextTool extends BaseTool {
             if (child == null) continue;
             AccessibilityNodeInfo result = findFirstEditable(child);
             if (result != null) {
-                // Don't recycle child if it's the result itself
-                if (result != child) {
-                    child.recycle();
-                }
                 return result;
             }
-            child.recycle();
         }
         return null;
     }

@@ -21,6 +21,7 @@ import io.agents.pokeclaw.tool.ToolRegistry
 import io.agents.pokeclaw.tool.impl.GetScreenInfoTool
 import io.agents.pokeclaw.tool.ToolResult
 import io.agents.pokeclaw.utils.XLog
+import io.agents.pokeclaw.agent.knowledge.MemoryManager
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import dev.langchain4j.data.message.AiMessage
@@ -54,14 +55,19 @@ class DefaultAgentService : AgentService {
          * Shorter than Cloud prompt but includes essential rules.
          * Task-only — chat is handled separately.
          */
-        private const val LOCAL_TASK_PROMPT = """You are a phone assistant. You control an Android phone using tools. The user gave you a task — complete it.
+        private const val LOCAL_TASK_PROMPT = """You are a phone assistant. You control an Android phone using tools. The user gave you a task or information.
 
 ## How to work
-1. Call get_screen_info to see what's on screen
-2. Decide which tool to use
-3. Call the tool
-4. Check the result, then decide next step
-5. When done, call finish(summary="what you did or found")
+1. **Informational statements / facts** (e.g. "my address is X", "my favorite milk is Y", "remember that Z", "for group W, reply..."):
+   - Do NOT call get_screen_info, open_app, or any phone UI tools!
+   - Confirm you have noted and remembered the information.
+   - Immediately call finish(summary="Got it! I've noted that [information].")
+
+2. **Phone action tasks** (e.g. "open WhatsApp and send hi to Mom", "order milk on Blinkit"):
+   - Call get_screen_info to see what's on screen
+   - Decide which tool to use and call it
+   - Check the result, then decide next step
+   - When done, call finish(summary="what you did or found")
 
 ## Tool selection guide
 - Open an app → open_app(package_name="com.example.app")
@@ -91,6 +97,7 @@ class DefaultAgentService : AgentService {
 - If you need the clipboard after finding the source data, use clipboard(action="set", text="...") yourself.
 - Use get_installed_apps() when the user asks what apps are installed.
 - Use input_text to type. Do NOT tap on autocomplete suggestions.
+- Optimize search queries: when searching in shopping apps (Blinkit, Zepto, Amazon), convert colloquial terms like "small pepsi bottle 250ml" into concise product keywords like "Pepsi" or "Amul Milk". If sizes/variants are ambiguous, pick the best matching item or ask the user.
 - Never say you cannot access the user's clipboard, notifications, or phone state when a matching tool exists. Use the tool first.
 - Do NOT auto-fill passwords, confirm payments, or delete data."""
 
@@ -110,7 +117,8 @@ class DefaultAgentService : AgentService {
             "input_text", "type_text", "system_key", "open_app",
             "dpad_up", "dpad_down", "dpad_left", "dpad_right", "dpad_center",
             "volume_up", "volume_down", "press_menu", "press_power",
-            "clipboard", "send_file", "repeat_actions", "wait"
+            "clipboard", "send_file", "repeat_actions", "wait",
+            "send_message", "tap_node", "find_and_tap", "auto_reply"
         )
         /** ms to wait for UI to settle before capturing screen after an action */
         private const val SCREEN_SETTLE_MS = 500L
@@ -120,6 +128,30 @@ class DefaultAgentService : AgentService {
         var FILE_LOGGING_ENABLED = false
         @JvmField
         var FILE_LOGGING_CACHE_DIR: File? = null
+
+        @JvmStatic
+        fun formatLlmError(rawError: String?): String {
+            if (rawError.isNullOrBlank()) return "Unknown API error"
+            val lower = rawError.lowercase()
+            return when {
+                lower.contains("429") || lower.contains("rate limit") || lower.contains("too many requests") ->
+                    "Rate limit reached (HTTP 429). DeepSeek / OpenRouter is currently busy or rate-limited. Please wait a few seconds and try again, or switch to GLM 4 Flash in Settings -> Models."
+                lower.contains("401") || lower.contains("403") || lower.contains("unauthorized") || lower.contains("invalid api key") ->
+                    "Invalid API Key (HTTP 401/403). Please verify your OpenRouter / LLM API key under Settings -> Models."
+                lower.contains("402") || lower.contains("insufficient") || lower.contains("credit") || lower.contains("balance") ->
+                    "Insufficient credits or quota exceeded. Please check your OpenRouter / LLM account balance."
+                lower.contains("500") || lower.contains("502") || lower.contains("503") || lower.contains("service unavailable") ->
+                    "Provider server error (HTTP 5xx). The AI provider is temporarily unavailable. Try again in a moment."
+                lower.contains("timeout") || lower.contains("timed out") ->
+                    "Request timed out. The AI provider is responding too slowly."
+                else -> {
+                    var clean = rawError.replace(Regex("""^.*HttpException:\s*"""), "")
+                    clean = clean.replace(Regex("""\{.*"message":\s*"([^"]+)".*\}"""), "$1")
+                    if (clean.length > 180) clean = clean.take(180) + "..."
+                    clean
+                }
+            }
+        }
     }
 
     private lateinit var config: AgentConfig
@@ -249,7 +281,7 @@ class DefaultAgentService : AgentService {
     // ==================== Pre-flight Check ====================
 
     private fun preCheck(): String? {
-        if (ClawAccessibilityService.getInstance() == null) {
+        if (ClawAccessibilityService.getConnectedInstance(5000L) == null) {
             return ClawApplication.instance.getString(R.string.agent_accessibility_not_enabled)
         }
         return null
@@ -319,11 +351,11 @@ class DefaultAgentService : AgentService {
             } catch (e: Exception) {
                 lastException = e
                 val msg = e.message ?: ""
-                // Do not retry on token exhaustion or auth failure
+                // Do not retry on auth failure or balance error
                 if (msg.contains("401") || msg.contains("403") || msg.contains("insufficient")) {
                     throw e
                 }
-                val retryDelayMs = (Math.pow(2.0, attempt.toDouble()) * 1000).toLong()
+                val retryDelayMs = (Math.pow(2.0, attempt.toDouble()) * 2000).toLong()
                 XLog.w(TAG, "LLM API call failed (attempt ${attempt + 1}/$MAX_API_RETRIES), retrying in ${retryDelayMs}ms: $msg")
                 try {
                     delay(retryDelayMs)
@@ -477,6 +509,7 @@ class DefaultAgentService : AgentService {
 
         val parsedPrompt = TaskPromptEnvelope.parse(userPrompt)
         val rawUserRequest = parsedPrompt.currentRequest
+        val optimizedUserRequest = PromptRewriter.optimize(rawUserRequest)
 
         // Build System Prompt — use optimized prompt for local LLM
         val basePrompt = if (config.provider == LlmProvider.LOCAL) {
@@ -485,21 +518,25 @@ class DefaultAgentService : AgentService {
             config.systemPrompt
         }
 
-        val inAppSearchGuard = InAppSearchGuard.fromTask(rawUserRequest)
-        val emailComposeGuard = EmailComposeGuard.fromTask(rawUserRequest)
-        val directDeviceDataGuard = DirectDeviceDataGuard.fromTask(rawUserRequest)
+        val inAppSearchGuard = InAppSearchGuard.fromTask(optimizedUserRequest)
+        val emailComposeGuard = EmailComposeGuard.fromTask(optimizedUserRequest)
+        val directDeviceDataGuard = DirectDeviceDataGuard.fromTask(optimizedUserRequest)
 
         // For local LLM, inject matching playbook into system prompt
         val playbookSection = if (config.provider == LlmProvider.LOCAL) {
-            val matched = PlaybookManager.match(rawUserRequest)
+            val matched = PlaybookManager.match(optimizedUserRequest)
             if (matched != null) {
-                XLog.i(TAG, "Playbook matched: ${matched.id} for '$rawUserRequest'")
+                XLog.i(TAG, "Playbook matched: ${matched.id} for '$optimizedUserRequest'")
                 "\n\n## Playbook: ${matched.name}\nFollow these steps exactly:\n\n${matched.body}"
             } else ""
         } else ""
 
+        MemoryManager.learnFromMessage(rawUserRequest)
+        val memorySection = MemoryManager.getMemoryPromptSection()
+
         val fullSystemPrompt = buildString {
             append(basePrompt)
+            append(memorySection)
             append(playbookSection)
             append(inAppSearchGuard.buildPromptSection())
             append(emailComposeGuard.buildPromptSection())
@@ -524,10 +561,10 @@ class DefaultAgentService : AgentService {
                     append("\n\n")
                 }
                 append("Current user request:\n")
-                append(rawUserRequest)
+                append(optimizedUserRequest)
             }
         } else {
-            rawUserRequest
+            optimizedUserRequest
         }
 
         // Opt-2: Pre-warm — only attach screen info for task-like prompts.
@@ -544,7 +581,12 @@ class DefaultAgentService : AgentService {
             lowerPrompt.contains("check ") || lowerPrompt.contains("compose ") ||
             lowerPrompt.contains("find ") || lowerPrompt.contains("screen") ||
             lowerPrompt.contains("notification") || lowerPrompt.contains("read my") ||
-            lowerPrompt.contains("call ") || lowerPrompt.contains("dial ")
+            lowerPrompt.contains("call ") || lowerPrompt.contains("dial ") ||
+            lowerPrompt.contains("order") || lowerPrompt.contains("buy ") ||
+            lowerPrompt.contains("message ") || lowerPrompt.contains("text ") ||
+            lowerPrompt.contains("hi to") || lowerPrompt.contains("add ") ||
+            lowerPrompt.contains("cart") || lowerPrompt.contains("blinkit") ||
+            lowerPrompt.contains("zepto") || lowerPrompt.contains("whatsapp")
 
         val enrichedPrompt = if (looksLikeTask) {
             try {
@@ -574,7 +616,7 @@ class DefaultAgentService : AgentService {
         val taskBudget = TaskBudget.fromSettings()
         var softLimitWarned = false
         var hasExecutedTool = false
-        val maxIterations = minOf(config.maxIterations, 10)
+        val maxIterations = minOf(config.maxIterations, 25)
         if (config.maxIterations > maxIterations) {
             XLog.w(TAG, "runAgentLoop: maxIterations capped to $maxIterations (configured=${config.maxIterations})")
         }
@@ -592,7 +634,8 @@ class DefaultAgentService : AgentService {
                 llmResponse = chatWithRetry(messages, callback, iterations)
             } catch (e: Exception) {
                 XLog.e(TAG, "LLM API call failed after retries", e)
-                callback.onError(iterations, RuntimeException(ClawApplication.instance.getString(R.string.agent_api_call_failed, e.message)), totalTokens)
+                val friendlyError = formatLlmError(e.message)
+                callback.onError(iterations, RuntimeException(friendlyError), totalTokens)
                 return
             }
 
@@ -674,6 +717,23 @@ class DefaultAgentService : AgentService {
             // No tool calls in this response — treat it as the final user-facing result.
             if (!llmResponse.hasToolExecutionRequests()) {
                 val responseText = llmResponse.text?.trim().orEmpty()
+
+                // Check for hallucinated accessibility warning from LLM on initial turns
+                val isHallucinatedAccessibilityError = !hasExecutedTool &&
+                    (responseText.contains("accessibility", ignoreCase = true) ||
+                     responseText.contains("not enabled", ignoreCase = true) ||
+                     responseText.contains("enable it", ignoreCase = true))
+
+                if (isHallucinatedAccessibilityError) {
+                    XLog.w(TAG, "runAgentLoop: detected hallucinated accessibility error text from LLM! Injecting tool prompt.")
+                    messages.add(UserMessage.from(
+                        "[System Notice] Accessibility Service is ALREADY ENABLED and FULLY ACTIVE on this phone. " +
+                        "Do NOT output instructions or say accessibility is disabled. " +
+                        "You MUST execute a tool call now (for example open_app or send_message or get_screen_info) to proceed with the user's task."
+                    ))
+                    continue
+                }
+
                 val completionReason = when {
                     responseText.isNotEmpty() -> "text-only response"
                     hasExecutedTool -> "empty post-tool response"

@@ -16,17 +16,17 @@ import android.view.accessibility.AccessibilityNodeInfo;
  */
 public final class UiActionMatchUtils {
     private static final String[] SEND_ID_HINTS = {
-            "send", "reply", "submit", "done", "fab"
+            "send", "reply", "submit", "done", "fab", "entry_send", "send_btn", "send_button", "send_message", "paperplane"
     };
     private static final String[] SEARCH_ID_HINTS = {
-            "search", "find", "query"
+            "search", "find", "query", "menuitem_search", "search_btn", "search_bar"
     };
 
     private static final String[] SEND_TEXT_HINTS = {
-            "send", "發送", "发送", "傳送", "전송", "送信", "enviar", "envoyer", "senden", "отправить"
+            "send", "發送", "发送", "傳送", "전송", "送信", "enviar", "envoyer", "senden", "отправить", "kirim"
     };
     private static final String[] SEARCH_TEXT_HINTS = {
-            "search", "搜尋", "搜索", "查找", "查詢", "検索", "찾기", "buscar", "rechercher", "suche", "искать"
+            "search", "搜尋", "搜索", "查找", "查詢", "検索", "찾기", "buscar", "rechercher", "suche", "искать", "cari"
     };
 
     private UiActionMatchUtils() {}

@@ -57,6 +57,7 @@ public class ClawAccessibilityService extends AccessibilityService {
      * still binding" (just wait).
      */
     public static boolean isEnabledInSettings(Context context) {
+        if (instance != null) return true;
         try {
             int accessibilityEnabled = Settings.Secure.getInt(
                     context.getContentResolver(),
@@ -69,9 +70,12 @@ public class ClawAccessibilityService extends AccessibilityService {
                     context.getContentResolver(),
                     Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
             if (enabledServices == null || enabledServices.isEmpty()) return false;
-            String myService = context.getPackageName() + "/"
-                    + ClawAccessibilityService.class.getName();
-            return enabledServices.contains(myService);
+            String pkg = context.getPackageName();
+            String longName = pkg + "/" + ClawAccessibilityService.class.getName();
+            String shortName = pkg + "/.service.ClawAccessibilityService";
+            return enabledServices.contains(longName)
+                    || enabledServices.contains(shortName)
+                    || enabledServices.contains(pkg);
         } catch (Exception e) {
             XLog.e(TAG, "Failed to check accessibility settings", e);
             return false;
@@ -108,7 +112,8 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (service != null) return service;
 
         Context app = ClawApplication.Companion.getInstance();
-        if (app == null || !isEnabledInSettings(app)) {
+        if (!isEnabledInSettings(app)) {
+            XLog.w(TAG, "Accessibility service not enabled in settings");
             return null;
         }
 
@@ -123,8 +128,49 @@ public class ClawAccessibilityService extends AccessibilityService {
         KVUtils.INSTANCE.noteAccessibilityConnected();
         KVUtils.INSTANCE.noteAccessibilityHeartbeat();
         XLog.i(TAG, "Accessibility service connected");
+        startKeepAliveForeground();
         ForegroundService.Companion.syncToBackgroundState(this);
         maybeReturnToAppAfterPermissionFlow();
+    }
+
+    private void startKeepAliveForeground() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                android.app.NotificationManager nm = (android.app.NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    android.app.NotificationChannel channel = new android.app.NotificationChannel(
+                            "saathi_accessibility_channel",
+                            "Saathi Service Active",
+                            android.app.NotificationManager.IMPORTANCE_LOW
+                    );
+                    channel.setDescription("Keeps Saathi accessibility service active in background");
+                    nm.createNotificationChannel(channel);
+                }
+            }
+
+            Intent intent = new Intent(this, io.agents.pokeclaw.ui.chat.ComposeChatActivity.class);
+            android.app.PendingIntent pi = android.app.PendingIntent.getActivity(
+                    this, 0, intent,
+                    android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT
+            );
+
+            androidx.core.app.NotificationCompat.Builder builder = new androidx.core.app.NotificationCompat.Builder(this, "saathi_accessibility_channel")
+                    .setSmallIcon(io.agents.pokeclaw.R.drawable.ic_launcher)
+                    .setContentTitle("Saathi AI Agent")
+                    .setContentText("Accessibility Service Active")
+                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_LOW)
+                    .setOngoing(true)
+                    .setContentIntent(pi);
+
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(2002, builder.build(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(2002, builder.build());
+            }
+            XLog.i(TAG, "Started keep-alive foreground notification for AccessibilityService");
+        } catch (Exception e) {
+            XLog.w(TAG, "Failed to start keep-alive foreground notification", e);
+        }
     }
 
     @Override
@@ -180,14 +226,6 @@ public class ClawAccessibilityService extends AccessibilityService {
 
         mainHandler.postDelayed(() -> {
             try {
-                performGlobalAction(GLOBAL_ACTION_BACK);
-            } catch (Exception e) {
-                XLog.w(TAG, "Failed to exit accessibility detail screen", e);
-            }
-        }, 250);
-
-        mainHandler.postDelayed(() -> {
-            try {
                 Intent intent = new Intent(this, io.agents.pokeclaw.ui.settings.SettingsActivity.class);
                 intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                         | Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -197,7 +235,7 @@ public class ClawAccessibilityService extends AccessibilityService {
             } catch (Exception e) {
                 XLog.w(TAG, "Could not bring app to foreground after service connected", e);
             }
-        }, 700);
+        }, 500);
     }
 
     // ======================== Gesture Operations ========================
@@ -376,15 +414,20 @@ public class ClawAccessibilityService extends AccessibilityService {
     private final java.util.concurrent.atomic.AtomicInteger nodeCounter = new java.util.concurrent.atomic.AtomicInteger(0);
 
     public String getScreenTree() {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) {
+                return null;
+            }
+            nodeIdMap.clear();
+            nodeCounter.set(0);
+            StringBuilder sb = new StringBuilder();
+            buildNodeTree(root, sb, 0);
+            return sb.toString();
+        } catch (Exception e) {
+            XLog.e(TAG, "getScreenTree error", e);
             return null;
         }
-        nodeIdMap.clear();
-        nodeCounter.set(0);
-        StringBuilder sb = new StringBuilder();
-        buildNodeTree(root, sb, 0);
-        return sb.toString();
     }
 
     /** Get center coordinates for a node ID (e.g. "n3"). Returns null if not found. */
@@ -398,13 +441,18 @@ public class ClawAccessibilityService extends AccessibilityService {
      * Useful for comparing with the filtered version to debug AI behavior.
      */
     public String getScreenTreeFull() {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) {
+                return null;
+            }
+            StringBuilder sb = new StringBuilder();
+            buildNodeTreeFull(root, sb, 0);
+            return sb.toString();
+        } catch (Exception e) {
+            XLog.e(TAG, "getScreenTreeFull error", e);
             return null;
         }
-        StringBuilder sb = new StringBuilder();
-        buildNodeTreeFull(root, sb, 0);
-        return sb.toString();
     }
 
     private void buildNodeTree(AccessibilityNodeInfo node, StringBuilder sb, int depth) {
@@ -419,7 +467,6 @@ public class ClawAccessibilityService extends AccessibilityService {
                 AccessibilityNodeInfo child = node.getChild(i);
                 if (child != null) {
                     buildNodeTree(child, sb, depth);
-                    child.recycle();
                 }
             }
             return;
@@ -457,6 +504,18 @@ public class ClawAccessibilityService extends AccessibilityService {
             } else if (hasDesc) {
                 line.append("\"").append(node.getContentDescription()).append("\"");
             }
+            CharSequence hint = node.getHintText();
+            if (hint != null && hint.length() > 0 && !hasText) {
+                line.append(" hint=\"").append(hint.length() > 30 ? hint.subSequence(0, 30) + ".." : hint).append("\"");
+            }
+
+            String viewId = node.getViewIdResourceName();
+            if (viewId != null && !viewId.isEmpty()) {
+                int colonIdx = viewId.indexOf(":id/");
+                String shortId = colonIdx >= 0 ? viewId.substring(colonIdx + 4) : viewId;
+                line.append(" id=").append(shortId);
+            }
+
             if (node.isClickable()) line.append(" tap");
             if (node.isEditable()) line.append(" edit");
             if (node.isScrollable()) line.append(" scroll");
@@ -474,7 +533,6 @@ public class ClawAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
                 buildNodeTree(child, sb, childDepth);
-                child.recycle();
             }
         }
     }
@@ -563,7 +621,6 @@ public class ClawAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
                 buildNodeTreeFull(child, sb, depth + 1);
-                child.recycle();
             }
         }
     }
@@ -598,11 +655,7 @@ public class ClawAccessibilityService extends AccessibilityService {
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child == null) continue;
-            try {
-                collectTextMatches(child, query, exactMatches, relaxedMatches);
-            } finally {
-                child.recycle();
-            }
+            collectTextMatches(child, query, exactMatches, relaxedMatches);
         }
     }
 

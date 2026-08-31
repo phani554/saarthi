@@ -3,6 +3,14 @@
 
 package io.agents.pokeclaw.ui.chat
 
+import android.app.Activity
+import android.content.Intent
+import android.speech.RecognizerIntent
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
+
 import android.text.format.DateUtils
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
@@ -850,6 +858,17 @@ private fun ChatInputBar(
     var text by remember { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    val context = LocalContext.current
+    val speechLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+            if (!spokenText.isNullOrBlank()) {
+                text = spokenText
+            }
+        }
+    }
     // Consume prefill from prompt chips
     LaunchedEffect(prefillText) {
         if (prefillText.isNotEmpty()) {
@@ -955,7 +974,31 @@ private fun ChatInputBar(
                 maxLines = 4,
             )
 
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(4.dp))
+
+            IconButton(
+                onClick = {
+                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak command or message...")
+                    }
+                    try {
+                        speechLauncher.launch(intent)
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Speech input not available", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                modifier = Modifier.size(34.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Mic,
+                    contentDescription = "Voice Input",
+                    tint = colors.accent,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(Modifier.width(4.dp))
 
             FloatingActionButton(
                 onClick = {
