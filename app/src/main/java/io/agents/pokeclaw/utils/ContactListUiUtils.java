@@ -108,7 +108,7 @@ public final class ContactListUiUtils {
             AccessibilityNodeInfo bestMatch = findBestVisibleContactNode(root, normalizedAliases, digitAliases);
             if (bestMatch != null) {
                 XLog.i(TAG, "scrollAndFindAndClick: matched node text=" + bestMatch.getText() + " desc=" + bestMatch.getContentDescription() + " on attempt=" + attempt);
-                return service.clickNode(bestMatch);
+                return clickContactNodeSafely(service, bestMatch);
             }
 
             if (attempt == attempts || root == null) {
@@ -221,6 +221,52 @@ public final class ContactListUiUtils {
         return score;
     }
 
+    private static boolean isAvatarOrProfilePhoto(AccessibilityNodeInfo node) {
+        if (node == null) return false;
+        CharSequence desc = node.getContentDescription();
+        CharSequence viewId = node.getViewIdResourceName();
+        CharSequence className = node.getClassName();
+        String descStr = desc != null ? desc.toString().toLowerCase() : "";
+        String idStr = viewId != null ? viewId.toString().toLowerCase() : "";
+        String classStr = className != null ? className.toString() : "";
+
+        if (descStr.contains("profile photo") || descStr.contains("profile picture") || descStr.contains("avatar") || descStr.contains("头像")) {
+            return true;
+        }
+        if (idStr.contains("profile_photo") || idStr.contains("avatar") || idStr.contains("contact_photo") || idStr.contains("contact_badge")) {
+            return true;
+        }
+        if (classStr.contains("ImageView") && descStr.contains("photo")) {
+            return true;
+        }
+        return false;
+    }
+
+    public static boolean clickContactNodeSafely(ClawAccessibilityService service, AccessibilityNodeInfo node) {
+        if (node == null) return false;
+
+        Rect bounds = new Rect();
+        node.getBoundsInScreen(bounds);
+
+        if (isAvatarOrProfilePhoto(node)) {
+            AccessibilityNodeInfo parent = node.getParent();
+            if (parent != null) {
+                parent.getBoundsInScreen(bounds);
+                node = parent;
+            }
+        }
+
+        // Tap at center-right section of row (65% X offset) to avoid left profile avatar
+        if (bounds.width() > 100 && bounds.height() > 30) {
+            int tapX = bounds.left + (int) (bounds.width() * 0.65f);
+            int tapY = bounds.centerY();
+            XLog.i(TAG, "clickContactNodeSafely: tapping safe chat title area at (" + tapX + ", " + tapY + ")");
+            return service.performTap(tapX, tapY);
+        }
+
+        return service.clickNode(node);
+    }
+
     private static void collectNodesWithText(
         AccessibilityNodeInfo node,
         Set<String> normalizedAliases,
@@ -229,10 +275,12 @@ public final class ContactListUiUtils {
     ) {
         if (node == null) return;
 
-        CharSequence text = node.getText();
-        CharSequence desc = node.getContentDescription();
-        if (ContactMatchUtils.matchesTarget(text, desc, normalizedAliases, digitAliases)) {
-            results.add(node);
+        if (!isAvatarOrProfilePhoto(node)) {
+            CharSequence text = node.getText();
+            CharSequence desc = node.getContentDescription();
+            if (ContactMatchUtils.matchesTarget(text, desc, normalizedAliases, digitAliases)) {
+                results.add(node);
+            }
         }
 
         for (int i = 0; i < node.getChildCount(); i++) {
@@ -293,7 +341,7 @@ public final class ContactListUiUtils {
         AccessibilityNodeInfo bestMatch = findBestVisibleResultNode(root, normalizedAliases, digitAliases);
         if (bestMatch != null) {
             XLog.i(TAG, "trySearchAndClick: matched filtered result text=" + bestMatch.getText() + " desc=" + bestMatch.getContentDescription());
-            return service.clickNode(bestMatch) ? SearchAttemptResult.FOUND : SearchAttemptResult.NO_MATCH;
+            return clickContactNodeSafely(service, bestMatch) ? SearchAttemptResult.FOUND : SearchAttemptResult.NO_MATCH;
         }
 
         XLog.i(TAG, "trySearchAndClick: no filtered result matched query");
@@ -318,24 +366,22 @@ public final class ContactListUiUtils {
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
         boolean success = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
 
-        CharSequence currentText = node.getText();
-        if (success && currentText != null && currentText.toString().contains(text)) {
+        if (success) {
             return true;
         }
 
-        // Try clipboard paste fallback for custom search fields
+        // Only fall back to clipboard paste if ACTION_SET_TEXT returned false
         try {
             android.content.Context ctx = io.agents.pokeclaw.ClawApplication.Companion.getInstance();
             android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
                     ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
             if (clipboard != null) {
                 clipboard.setPrimaryClip(android.content.ClipData.newPlainText("search_query", text));
-                node.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+                return node.performAction(AccessibilityNodeInfo.ACTION_PASTE);
             }
         } catch (Exception ignored) {}
 
-        currentText = node.getText();
-        return currentText != null && currentText.toString().contains(text);
+        return false;
     }
 
     private static void clearText(AccessibilityNodeInfo node) {

@@ -124,6 +124,7 @@ object ChannelManager {
             return
         }
         XLog.d(TAG, "sendMessage [${channel.displayName}]: ${trimmedContent.take(120)}")
+
         handlers[channel]?.sendMessage(trimmedContent, messageID)
     }
 

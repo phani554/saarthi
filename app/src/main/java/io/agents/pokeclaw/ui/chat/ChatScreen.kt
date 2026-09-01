@@ -1000,6 +1000,27 @@ private fun ChatInputBar(
 
             Spacer(Modifier.width(4.dp))
 
+            var isVoiceSpeakerEnabled by remember { mutableStateOf(io.agents.pokeclaw.service.VoiceManager.isVoiceOutputEnabled) }
+            IconButton(
+                onClick = {
+                    isVoiceSpeakerEnabled = !isVoiceSpeakerEnabled
+                    io.agents.pokeclaw.service.VoiceManager.isVoiceOutputEnabled = isVoiceSpeakerEnabled
+                    if (!isVoiceSpeakerEnabled) {
+                        io.agents.pokeclaw.service.VoiceManager.stop()
+                    }
+                },
+                modifier = Modifier.size(34.dp)
+            ) {
+                Icon(
+                    imageVector = if (isVoiceSpeakerEnabled) Icons.Default.VolumeUp else Icons.Default.VolumeOff,
+                    contentDescription = "Voice Output Toggle",
+                    tint = if (isVoiceSpeakerEnabled) colors.accent else Color.Gray,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            Spacer(Modifier.width(4.dp))
+
             FloatingActionButton(
                 onClick = {
                     if (isTaskRunning) {

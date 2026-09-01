@@ -46,11 +46,26 @@ enum class CloudProvider(
         displayName = "OpenRouter",
         defaultBaseUrl = "https://openrouter.ai/api/v1",
         models = listOf(
-            CloudModel("zhipuai/glm-4-flash", "GLM 4 Flash", 0.06, 0.06, ModelTier.FAST, 128_000, recommended = true),
-            CloudModel("deepseek/deepseek-chat", "DeepSeek V3", 0.14, 0.28, ModelTier.SMART, 64_000),
+            // GLM Series
+            CloudModel("z-ai/glm-5.3-flash", "GLM 5.3 Flash", 0.06, 0.06, ModelTier.FAST, 128_000, recommended = true),
+            CloudModel("zhipu/glm-4-flash", "GLM 4 Flash", 0.06, 0.06, ModelTier.FAST, 128_000),
+
+            // Qwen Series
+            CloudModel("qwen/qwen3.8-flash", "Qwen 3.8 Flash", 0.05, 0.15, ModelTier.FAST, 128_000),
+            CloudModel("qwen/qwen3.8-max", "Qwen 3.8 Max", 0.40, 1.20, ModelTier.SMART, 128_000),
             CloudModel("qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B", 0.35, 0.40, ModelTier.SMART, 128_000),
-            CloudModel("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B", 0.12, 0.30, ModelTier.SMART, 128_000),
+            CloudModel("qwen/qwen-2.5-coder-32b-instruct", "Qwen 2.5 Coder 32B", 0.15, 0.20, ModelTier.FAST, 128_000),
+
+            // Gemini Series
+            CloudModel("google/gemini-3.1-flash-live-preview", "Gemini 3.1 Flash Live", 0.10, 0.40, ModelTier.FAST, 1_000_000, recommended = true),
+            CloudModel("google/gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", 0.04, 0.15, ModelTier.LITE, 1_000_000),
             CloudModel("google/gemini-2.5-flash", "Gemini 2.5 Flash", 0.075, 0.30, ModelTier.FAST, 1_000_000),
+
+            // Flagship Reasoning & UI Agents
+            CloudModel("deepseek/deepseek-chat", "DeepSeek V3", 0.14, 0.28, ModelTier.SMART, 64_000),
+            CloudModel("deepseek/deepseek-r1", "DeepSeek R1", 0.55, 2.19, ModelTier.PRO, 64_000),
+            CloudModel("anthropic/claude-3.5-sonnet", "Claude 3.5 Sonnet", 3.00, 15.00, ModelTier.PRO, 200_000),
+            CloudModel("meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B", 0.12, 0.30, ModelTier.SMART, 128_000),
         ),
         showBaseUrl = true
     ),
@@ -66,7 +81,8 @@ enum class CloudProvider(
         displayName = "Google",
         defaultBaseUrl = "https://generativelanguage.googleapis.com/v1beta",
         models = listOf(
-            CloudModel("gemini-2.5-flash", "Gemini 2.5 Flash", 0.15, 0.60, ModelTier.FAST, 1_000_000, recommended = true),
+            CloudModel("gemini-3.1-flash-live-preview", "Gemini 3.1 Flash Live", 0.10, 0.40, ModelTier.FAST, 1_000_000, recommended = true),
+            CloudModel("gemini-2.5-flash", "Gemini 2.5 Flash", 0.15, 0.60, ModelTier.FAST, 1_000_000),
             CloudModel("gemini-2.5-pro", "Gemini 2.5 Pro", 1.25, 10.00, ModelTier.PRO, 1_000_000),
         )
     ),

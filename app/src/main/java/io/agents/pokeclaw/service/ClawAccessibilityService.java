@@ -500,13 +500,17 @@ public class ClawAccessibilityService extends AccessibilityService {
 
             if (hasText) {
                 CharSequence text = node.getText();
-                line.append("\"").append(text.length() > 40 ? text.subSequence(0, 40) + ".." : text).append("\"");
-            } else if (hasDesc) {
-                line.append("\"").append(node.getContentDescription()).append("\"");
+                line.append("\"").append(text.length() > 120 ? text.subSequence(0, 120) + ".." : text).append("\"");
+            }
+            if (hasDesc) {
+                CharSequence desc = node.getContentDescription();
+                if (!hasText || !desc.toString().equals(node.getText().toString())) {
+                    line.append(" desc=\"").append(desc.length() > 120 ? desc.subSequence(0, 120) + ".." : desc).append("\"");
+                }
             }
             CharSequence hint = node.getHintText();
-            if (hint != null && hint.length() > 0 && !hasText) {
-                line.append(" hint=\"").append(hint.length() > 30 ? hint.subSequence(0, 30) + ".." : hint).append("\"");
+            if (hint != null && hint.length() > 0) {
+                line.append(" hint=\"").append(hint.length() > 60 ? hint.subSequence(0, 60) + ".." : hint).append("\"");
             }
 
             String viewId = node.getViewIdResourceName();

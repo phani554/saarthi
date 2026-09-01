@@ -85,7 +85,10 @@ class TaskOrchestrator(
         )
     }
 
-    private fun releaseTask(): TaskSessionState = taskSessionStore.release()
+    private fun releaseTask(): TaskSessionState {
+        io.agents.pokeclaw.agent.TaskExecutionState.instance.reset()
+        return taskSessionStore.release()
+    }
 
     fun isTaskRunning(): Boolean = taskSessionStore.isTaskRunning()
 
@@ -93,6 +96,8 @@ class TaskOrchestrator(
 
     fun cancelCurrentTask() {
         if (!taskSessionStore.markStopping()) return
+        io.agents.pokeclaw.agent.TaskExecutionState.instance.abandonTask("Task cancelled by user")
+        io.agents.pokeclaw.service.VoiceManager.stop()
         if (::agentService.isInitialized) {
             agentService.cancel()
         }

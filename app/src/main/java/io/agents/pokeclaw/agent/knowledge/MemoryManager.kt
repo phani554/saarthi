@@ -19,9 +19,11 @@ object MemoryManager {
     private const val MEMORY_FILE_PATH = "user_preferences.md"
 
     private val PREFERENCE_PATTERNS = listOf(
-        Pattern.compile("""(?i)\b(?:i\s+(?:prefer|like|love|hate|dislike|use|want|need)|my\s+(?:favorite|preferred|address|phone|email|number|mom|dad|wife|husband|home|office|contact)|always\s+(?:order|buy|use|pick)|never\s+(?:order|buy|use)|i\s+am\s+(?:vegetarian|vegan|allergic|gluten-free))\b.*"""),
+        Pattern.compile("""(?i)\b(?:i\s+(?:prefer|like|love|hate|dislike|use|want|need)|my\s+(?:favorite|preferred|address|phone|email|number|mom|dad|wife|husband|home|office|friend|sister|brother|contact)|always\s+(?:order|buy|use|pick)|never\s+(?:order|buy|use)|i\s+am\s+(?:vegetarian|vegan|allergic|gluten-free))\b.*"""),
         Pattern.compile("""(?i)\b(?:remember\s+that|note\s+that|keep\s+in\s+mind\s+that)\s+(.+)"""),
-        Pattern.compile("""(?i)\b(?:in\s+(?:the\s+)?(?:group|whatsapp|chat)|reply\s+(?:on\s+my\s+behalf|to|in)|tell\s+(?:them|group|everyone|mom|dad|my)|when\s+(?:anyone|someone)\s+asks|if\s+anyone\s+asks)\b.*""")
+        Pattern.compile("""(?i)\b(?:in\s+(?:the\s+)?(?:group|whatsapp|chat)|reply\s+(?:on\s+my\s+behalf|to|in)|tell\s+(?:them|group|everyone|mom|dad|my)|when\s+(?:anyone|someone)\s+asks|if\s+anyone\s+asks)\b.*"""),
+        Pattern.compile("""(?i)\b[a-z0-9_\s]+\s+is\s+my\s+[a-z0-9_\s]+\b.*"""),
+        Pattern.compile("""(?i)\b(?:order|buy|text|message|send\s+message\s+to)\s+[a-z0-9_\s]+\b.*""")
     )
 
     /**
@@ -57,6 +59,15 @@ object MemoryManager {
                 }
             }
         }
+    }
+
+    /**
+     * Explicitly record a personal fact/preference into persistent global memory.
+     */
+    fun recordFact(fact: String) {
+        if (fact.isBlank()) return
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
+        savePreference("- [$timestamp] $fact")
     }
 
     private fun savePreference(bulletPoint: String) {

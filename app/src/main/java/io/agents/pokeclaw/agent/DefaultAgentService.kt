@@ -97,6 +97,10 @@ class DefaultAgentService : AgentService {
 - If you need the clipboard after finding the source data, use clipboard(action="set", text="...") yourself.
 - Use get_installed_apps() when the user asks what apps are installed.
 - Use input_text to type. Do NOT tap on autocomplete suggestions.
+- Multi-product & Multi-step Execution: When given a request to order or add MULTIPLE products (e.g. 4 items) and send a message, process ALL items sequentially in the SAME task run (find_search_bar -> type product -> add_to_cart for Item 1, 2, 3, 4 -> send_message). Do NOT call finish or ask the user to proceed after just one product! Continue until ALL products are added and the message is sent.
+- Flipkart & Quick Commerce Mode Switch: On Flipkart (com.flipkart.android), for quick commerce/grocery items, verify that Flipkart is in Minutes mode (check top banner for "Minutes" tab or top search bar "Search in minutes"). If in normal store mode, tap the top banner "Minutes" tab (bounds x:348..612, y:126..282) immediately before searching!
+- Fast Search Bar & Add to Cart: Use find_search_bar(query="...") to search products directly in 1 step without scrolling down. Use add_to_cart(product_name="...") on search results to tap "ADD" buttons directly.
+- Group Task Summaries: Use get_group_task_summary(group_name="...") to extract actionable tasks and TODOs from WhatsApp group chats.
 - Optimize search queries: when searching in shopping apps (Blinkit, Zepto, Amazon), convert colloquial terms like "small pepsi bottle 250ml" into concise product keywords like "Pepsi" or "Amul Milk". If sizes/variants are ambiguous, pick the best matching item or ask the user.
 - Never say you cannot access the user's clipboard, notifications, or phone state when a matching tool exists. Use the tool first.
 - Do NOT auto-fill passwords, confirm payments, or delete data."""
@@ -118,7 +122,8 @@ class DefaultAgentService : AgentService {
             "dpad_up", "dpad_down", "dpad_left", "dpad_right", "dpad_center",
             "volume_up", "volume_down", "press_menu", "press_power",
             "clipboard", "send_file", "repeat_actions", "wait",
-            "send_message", "tap_node", "find_and_tap", "auto_reply"
+            "send_message", "tap_node", "find_and_tap", "auto_reply",
+            "find_search_bar", "add_to_cart"
         )
         /** ms to wait for UI to settle before capturing screen after an action */
         private const val SCREEN_SETTLE_MS = 500L
@@ -531,13 +536,17 @@ class DefaultAgentService : AgentService {
             } else ""
         } else ""
 
+        TaskExecutionState.instance.startTask(rawUserRequest)
+
         MemoryManager.learnFromMessage(rawUserRequest)
         val memorySection = MemoryManager.getMemoryPromptSection()
+        val taskStateSection = TaskExecutionState.instance.toPromptSection()
 
         val fullSystemPrompt = buildString {
             append(basePrompt)
             append(memorySection)
             append(playbookSection)
+            append(taskStateSection)
             append(inAppSearchGuard.buildPromptSection())
             append(emailComposeGuard.buildPromptSection())
             append(directDeviceDataGuard.buildPromptSection())
@@ -703,7 +712,7 @@ class DefaultAgentService : AgentService {
             }
             messages.add(aiMessage)
 
-            // Push thinking content in non-streaming mode
+            // Push thinking content in non-streaming mode & speak intermediate intent
             if (!config.streaming && !llmResponse.text.isNullOrBlank()) {
                 val suppressHallucinatedCompletion =
                     !llmResponse.hasToolExecutionRequests() &&
@@ -711,6 +720,7 @@ class DefaultAgentService : AgentService {
                             emailComposeGuard.shouldBlockTextOnlyCompletion())
                 if (!suppressHallucinatedCompletion) {
                     callback.onContent(iterations, llmResponse.text)
+                    io.agents.pokeclaw.service.VoiceManager.speakAsync(llmResponse.text)
                 }
             }
 
@@ -741,6 +751,7 @@ class DefaultAgentService : AgentService {
                 }
                 val finalAnswer = if (responseText.isNotEmpty()) responseText else ClawApplication.instance.getString(R.string.agent_task_completed)
                 XLog.i(TAG, "runAgentLoop: $completionReason, completing")
+                io.agents.pokeclaw.service.VoiceManager.speak(finalAnswer)
                 callback.onComplete(iterations, finalAnswer, totalTokens, actualModelName)
                 return
             }
@@ -793,8 +804,12 @@ class DefaultAgentService : AgentService {
                 }
 
                 callback.onToolCall(iterations, toolName, displayName, toolArgs)
+                io.agents.pokeclaw.service.VoiceManager.speakAsync("Executing $displayName")
                 directDeviceDataGuard.recordToolAttempt(toolName)
                 emailComposeGuard.recordToolAttempt(toolName)
+
+                TaskExecutionState.instance.setActiveContext("", toolName)
+                TaskExecutionState.instance.incrementStep()
 
                 val result = ToolRegistry.getInstance().executeTool(toolName, params)
                 val paramsString = if (params.isEmpty()) "" else params.toString()
@@ -813,8 +828,9 @@ class DefaultAgentService : AgentService {
 
                 // finish tool → task complete
                 if (toolName == "finish" && result.isSuccess) {
-                    val finishData = result.data
-                    callback.onComplete(iterations, finishData ?: ClawApplication.instance.getString(R.string.agent_task_completed), totalTokens, actualModelName)
+                    val finishData = result.data ?: ClawApplication.instance.getString(R.string.agent_task_completed)
+                    io.agents.pokeclaw.service.VoiceManager.speak(finishData)
+                    callback.onComplete(iterations, finishData, totalTokens, actualModelName)
                     return
                 }
 

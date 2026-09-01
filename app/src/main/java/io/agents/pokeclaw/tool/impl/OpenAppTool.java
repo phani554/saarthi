@@ -105,6 +105,14 @@ public class OpenAppTool extends BaseTool {
             return false;
         }
         dismissChainLaunchDialog(service);
+
+        if ("com.flipkart.android".equals(packageName)) {
+            try { Thread.sleep(800); } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            io.agents.pokeclaw.utils.NodeFinder.INSTANCE.ensureFlipkartMinutesMode(service);
+        }
+
         return true;
     }
 

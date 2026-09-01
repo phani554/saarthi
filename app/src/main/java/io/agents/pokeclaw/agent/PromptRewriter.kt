@@ -40,7 +40,8 @@ Rules:
 1. Preserve specific size/quantity/volume constraints requested by the user (e.g. "small pepsi bottle" -> "Pepsi small bottle (250ml/330ml)", "1L amul milk" -> "Amul Milk 1L").
 2. For e-commerce search, guide the agent to search core brand keywords first ("Pepsi") and then select the requested size/variant ("small bottle").
 3. Preserve app name, target contacts, and action intent.
-4. Output ONLY the optimized action task in one clear sentence. No quotes, no preamble."""
+4. If the request contains MULTIPLE items or tasks (e.g. 4 products to add to cart and a WhatsApp message to send), list ALL items and actions explicitly so the agent executes every single item in order without stopping!
+5. Output ONLY the optimized action task. No preamble."""
 
             val result = LlmSessionManager.singleShotCloud(systemPrompt, prompt, 0.2)
                 ?: LlmSessionManager.singleShotLocal(systemPrompt, prompt, 0.2)

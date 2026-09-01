@@ -74,6 +74,9 @@ object ToolRegistry {
         register(FindAndTapTool())
         register(SendMessageTool())
         register(AutoReplyTool())
+        register(FindSearchBarTool())
+        register(AddToCartTool())
+        register(GroupTaskSummaryTool())
     }
 
     fun register(tool: BaseTool) {

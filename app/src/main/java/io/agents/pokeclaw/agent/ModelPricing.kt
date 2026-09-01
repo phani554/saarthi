@@ -33,11 +33,21 @@ object ModelPricing {
         "claude-haiku-4-5" to Price(0.80, 4.00),
 
         // Google
+        "gemini-3.1-flash-live-preview" to Price(0.10, 0.40),
         "gemini-2.5-flash" to Price(0.15, 0.60),
         "gemini-2.5-pro" to Price(1.25, 10.00),
         "gemini-2.0-flash" to Price(0.10, 0.40),
 
         // Open-source via OpenRouter/Groq
+        "glm-5.3-flash" to Price(0.06, 0.06),
+        "glm-4-flash" to Price(0.06, 0.06),
+        "qwen3.8-flash" to Price(0.05, 0.15),
+        "qwen3.8-max" to Price(0.40, 1.20),
+        "qwen-2.5-72b-instruct" to Price(0.35, 0.40),
+        "qwen-2.5-coder-32b-instruct" to Price(0.15, 0.20),
+        "gemini-2.5-flash-lite" to Price(0.04, 0.15),
+        "claude-3.5-sonnet" to Price(3.00, 15.00),
+        "deepseek-r1" to Price(0.55, 2.19),
         "llama-3.3-70b-versatile" to Price(0.59, 0.79),
         "llama-4-maverick" to Price(0.50, 0.70),
         "deepseek-chat" to Price(0.27, 1.10),

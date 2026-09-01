@@ -76,7 +76,7 @@ object LlmSessionManager {
         return LlmClientFactory.create(
             config.toAgentConfig(
                 temperature = temperature,
-                maxIterations = 10
+                maxIterations = 25
             )
         )
     }

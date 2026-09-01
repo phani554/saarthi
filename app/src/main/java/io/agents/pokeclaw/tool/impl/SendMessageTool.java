@@ -285,24 +285,34 @@ public class SendMessageTool extends BaseTool {
         best.performAction(AccessibilityNodeInfo.ACTION_CLICK);
         Thread.sleep(300);
 
+        // Clear and set text via ACTION_SET_TEXT
+        Bundle clearArgs = new Bundle();
+        clearArgs.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "");
+        best.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs);
+
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message);
         boolean ok = best.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
 
-        // Also set primary clip and paste to ensure TextWatcher listeners fire in messaging apps (converts Mic -> Send button)
+        if (ok) {
+            XLog.i(TAG, "typeInBottomEditText: setText '" + message + "' succeeded via ACTION_SET_TEXT");
+            return true;
+        }
+
+        // Only fall back to clipboard paste if ACTION_SET_TEXT returned false
+        XLog.w(TAG, "typeInBottomEditText: ACTION_SET_TEXT returned false, attempting clipboard paste fallback");
         try {
             android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
                     service.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
             if (clipboard != null) {
                 clipboard.setPrimaryClip(android.content.ClipData.newPlainText("send_msg", message));
-                best.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+                return best.performAction(AccessibilityNodeInfo.ACTION_PASTE);
             }
         } catch (Exception e) {
             XLog.w(TAG, "typeInBottomEditText: paste fallback error", e);
         }
 
-        XLog.i(TAG, "typeInBottomEditText: setText/paste='" + message + "' at y=" + bestY + " result=" + ok);
-        return ok;
+        return false;
     }
 
     /**

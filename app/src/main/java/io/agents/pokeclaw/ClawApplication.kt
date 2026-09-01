@@ -33,6 +33,7 @@ class ClawApplication : BaseApp() {
         registerNetworkCallback()
         appViewModelInstance = getAppViewModelProvider()[AppViewModel::class.java]
         KVUtils.init(this)
+        io.agents.pokeclaw.service.VoiceManager.init(this)
         LocalBackendHealth.recoverPendingGpuCrashIfNeeded()
         ToolRegistry.getInstance().registerAllTools(ToolRegistry.DeviceType.MOBILE)
         io.agents.pokeclaw.agent.skill.SkillRegistry.loadBuiltInSkills()

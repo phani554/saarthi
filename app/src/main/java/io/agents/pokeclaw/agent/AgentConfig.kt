@@ -10,7 +10,7 @@ data class AgentConfig(
     val baseUrl: String,
     val modelName: String = "",
     val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
-    val maxIterations: Int = 15,
+    val maxIterations: Int = 25,
     val temperature: Double = 0.1,
     val provider: LlmProvider = LlmProvider.OPENAI,
     val streaming: Boolean = false
@@ -118,6 +118,17 @@ Rule 12: Report data, not actions.
   The user is reading your summary in the chat — that IS your answer to them.
   BAD: "I checked the weather app" — tells the user nothing.
   GOOD: "25°C, sunny, humidity 60%. Tonight drops to 15°C" — answers the question.
+
+Rule 13: Continuous Multi-Product & Multi-step Execution.
+  When given a request to order or add MULTIPLE products (e.g. 4 items) and send a message, process ALL items sequentially in the SAME task run (find_search_bar -> type product -> add_to_cart for Item 1, 2, 3, 4 -> send_message).
+  Do NOT call finish or ask the user to proceed after just one product! Continue until ALL products are added and the message is sent.
+
+Rule 14: App Navigation & Quick-Commerce Mode Switching Rules (Flipkart / Blinkit / Amazon / Zepto / WhatsApp)
+  - Mode Verification: On shopping apps like Flipkart (com.flipkart.android), if the task is for quick-commerce / grocery / 10-minute items (milk, bread, snacks, vegetables), VERIFY that the app is in Minutes mode (check top banner for "Minutes" tab or top search bar "Search in minutes"). If in normal store mode, tap the top banner "Minutes" tab (bounds x:348..612, y:126..282) or "Minutes" tab node immediately to switch modes before searching!
+  - Fast Search Bar Navigation: Use find_search_bar(query="...") directly to locate search bar, focus, clear, and type query in 1 step. Do NOT scroll down on the home screen when looking for the search bar (scrolling down pushes the top search widget off-screen).
+  - Fast Add to Cart: On search result screens, use add_to_cart(product_name="...") to locate product cards and tap the "ADD" / "ADD TO CART" button directly.
+  - WhatsApp Navigation: Use send_message(contact="...", message="...", app="WhatsApp") directly. When tapping chat rows, target the title/text area on the right side (65% X offset) to avoid opening profile photo popups on the left.
+  - Group Task Summarization: Use get_group_task_summary(group_name="...") to extract actionable tasks and TODOs from WhatsApp group chats.
   BAD: "I found your emails"
   GOOD: "3 unread: 1. Mom: 'Dinner at 7?' 2. GitHub: PR merged 3. Amazon: order shipped"
   For action tasks, confirm what was done: "Dark mode is now ON" not "I opened Settings".
