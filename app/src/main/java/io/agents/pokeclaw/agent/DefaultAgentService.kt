@@ -856,25 +856,22 @@ class DefaultAgentService : AgentService {
                                 if (added.isNotEmpty()) append("\nNew on screen: ${added.take(10).joinToString(", ")}")
                                 if (removed.isNotEmpty()) append("\nGone from screen: ${removed.take(10).joinToString(", ")}")
                             }
-                            val baseData = result.data ?: ""
-                            val enrichedData = "$baseData\n\nScreen after action:\n${screenAfter.data}$diffSection"
-                            val enriched = if (result.isSuccess) ToolResult.success(enrichedData)
-                                           else ToolResult.error(result.error ?: "")
-                            GSON.toJson(enriched)
+                            val baseData = if (result.isSuccess) (result.data ?: "✓ Action succeeded") else "✗ Error: ${result.error}"
+                            "$baseData\n\nScreen after action:\n${screenAfter.data}$diffSection"
                         } else {
                             XLog.w(TAG, "Opt3: get_screen_info failed after $toolName: ${screenAfter?.error}")
-                            GSON.toJson(result)
+                            if (result.isSuccess) (result.data ?: "✓ Action succeeded") else "✗ Error: ${result.error}"
                         }
                     } catch (e: Exception) {
                         XLog.w(TAG, "Opt3: exception fetching screen after $toolName", e)
-                        GSON.toJson(result)
+                        if (result.isSuccess) (result.data ?: "✓ Action succeeded") else "✗ Error: ${result.error}"
                     }
                 } else {
                     // Record fingerprint for dead-loop detection (non-action tools path)
                     if (toolName == "get_screen_info" && result.isSuccess && result.data != null) {
                         lastScreenHash = result.data.hashCode()
                     }
-                    GSON.toJson(result)
+                    if (result.isSuccess) (result.data ?: "✓ Action succeeded") else "✗ Error: ${result.error}"
                 }
 
                 // For action tools the loop detection hash was already updated above;

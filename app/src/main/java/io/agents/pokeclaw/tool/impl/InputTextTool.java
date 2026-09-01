@@ -97,13 +97,8 @@ public class InputTextTool extends BaseTool {
         targetNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
         targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK);
 
-        // If clear_first, select all and delete
-        if (clearFirst) {
-            clearNodeText(targetNode);
-        }
-
         // Strategy 1: try ACTION_SET_TEXT (standard approach)
-        // Note: ACTION_SET_TEXT overwrites existing text; for append mode we must concatenate
+        // Note: ACTION_SET_TEXT overwrites existing text cleanly when clearFirst is true
         if (trySetTextWithRetries(targetNode, text, clearFirst)) {
             return ToolResult.success(clearFirst ? "Input text: " + text : "Appended text: " + text);
         }
@@ -120,7 +115,6 @@ public class InputTextTool extends BaseTool {
         }
 
         if (clearFirst) {
-            // Clear again (some apps may not have fully cleared after strategy 1 failed)
             clearNodeText(targetNode);
         } else {
             // Append mode: move cursor to end
@@ -157,11 +151,19 @@ public class InputTextTool extends BaseTool {
     }
 
     private boolean trySetTextWithRetries(AccessibilityNodeInfo node, String text, boolean clearFirst) {
+        CharSequence existing = node.getText();
+        String candidateText;
+        if (clearFirst) {
+            candidateText = text;
+        } else {
+            String existingStr = existing != null ? existing.toString() : "";
+            candidateText = existingStr.endsWith(text) ? existingStr : (existingStr + text);
+        }
+
+        Bundle args = new Bundle();
+        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, candidateText);
+
         for (int attempt = 0; attempt < 3; attempt++) {
-            CharSequence existing = node.getText();
-            String candidateText = clearFirst ? text : ((existing != null ? existing.toString() : "") + text);
-            Bundle args = new Bundle();
-            args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, candidateText);
             if (node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)) {
                 return true;
             }

@@ -150,16 +150,10 @@ object SearchBarService {
             return false
         }
 
-        // Focus & set text cleanly
+        // Focus & set search query directly in a single atomic step
         searchNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         searchNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
 
-        // Clear existing text
-        val clearArgs = Bundle()
-        clearArgs.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "")
-        searchNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs)
-
-        // Set search query
         val textArgs = Bundle()
         textArgs.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, query)
         val success = searchNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, textArgs)
