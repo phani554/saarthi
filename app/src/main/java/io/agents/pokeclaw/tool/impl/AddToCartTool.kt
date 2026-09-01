@@ -80,8 +80,17 @@ class AddToCartTool : BaseTool() {
 
         val productName = optionalString(params, "product_name", "").trim().lowercase()
 
+        // Dismiss soft keyboard if open so lower screen ADD buttons are fully accessible
+        service.dismissKeyboard()
+
         val root = service.rootInActiveWindow
             ?: return ToolResult.error("Screen unavailable")
+
+        // Check if item is out of stock on active screen
+        if (isOutOfStock(root)) {
+            XLog.i(TAG, "execute: product is out of stock")
+            return ToolResult.error("Product is OUT OF STOCK on screen. Do not retry searching or scrolling for this item. Skip it or call finish.")
+        }
 
         // Check if item is already added to cart on active screen
         if (isAlreadyInCart(root)) {
@@ -126,6 +135,21 @@ class AddToCartTool : BaseTool() {
             if (text.contains(neg) || desc.contains(neg) || id.contains(neg)) {
                 return true
             }
+        }
+        return false
+    }
+
+    private fun isOutOfStock(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null || !node.isVisibleToUser) return false
+        val text = node.text?.toString().orEmpty().lowercase()
+        val desc = node.contentDescription?.toString().orEmpty().lowercase()
+        if (text.contains("out of stock") || desc.contains("out of stock") ||
+            text.contains("sold out") || desc.contains("sold out") ||
+            text.contains("currently unavailable") || desc.contains("currently unavailable")) {
+            return true
+        }
+        for (i in 0 until node.childCount) {
+            if (isOutOfStock(node.getChild(i))) return true
         }
         return false
     }

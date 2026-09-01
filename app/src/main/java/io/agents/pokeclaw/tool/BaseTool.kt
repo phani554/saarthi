@@ -13,9 +13,6 @@ abstract class BaseTool {
         @JvmField
         var useChineseDescription: Boolean = false
 
-        /** Maximum value for the wait_after parameter (milliseconds) */
-        private const val MAX_WAIT_AFTER_MS = 10000L
-
         /**
          * Shared wait_after parameter definition used by all tools.
          * Automatically appended to the end of each tool's parameter list by getParametersWithWaitAfter().
@@ -47,23 +44,11 @@ abstract class BaseTool {
     }
 
     /**
-     * Execute the tool and handle wait_after delay.
+     * Execute the tool directly without artificial wait delays for maximum execution speed.
      * Called by ToolRegistry.executeTool().
      */
     fun executeWithWaitAfter(params: @JvmSuppressWildcards Map<String, Any>): ToolResult {
-        val result = execute(params)
-        // Only wait if execution succeeded
-        if (result.isSuccess) {
-            val waitMs = optionalLong(params, "wait_after", 0)
-            if (waitMs in 1..MAX_WAIT_AFTER_MS) {
-                try {
-                    Thread.sleep(waitMs)
-                } catch (_: InterruptedException) {
-                    Thread.currentThread().interrupt()
-                }
-            }
-        }
-        return result
+        return execute(params)
     }
 
     /** English description, subclasses must implement */

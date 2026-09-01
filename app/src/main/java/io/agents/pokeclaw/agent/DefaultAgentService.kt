@@ -102,6 +102,7 @@ class DefaultAgentService : AgentService {
 - Fast Search Bar & Add to Cart: Use find_search_bar(query="...") to search products directly in 1 step without scrolling down. Use add_to_cart(product_name="...") on search results to tap "ADD" buttons directly.
 - Group Task Summaries: Use get_group_task_summary(group_name="...") to extract actionable tasks and TODOs from WhatsApp group chats.
 - Optimize search queries: when searching in shopping apps (Blinkit, Zepto, Amazon), convert colloquial terms like "small pepsi bottle 250ml" into concise product keywords like "Pepsi" or "Amul Milk". If sizes/variants are ambiguous, pick the best matching item or ask the user.
+- STRICT ABANDON RULE: If an item is "Out of stock", "Sold out", or "Currently unavailable", DO NOT keep searching, scrolling, or opening product pages for it! Skip that item immediately and move to the next item or call finish. Spend AT MOST 3 rounds per item. Do NOT endlessly scroll brand/catalog pages.
 - Never say you cannot access the user's clipboard, notifications, or phone state when a matching tool exists. Use the tool first.
 - Do NOT auto-fill passwords, confirm payments, or delete data."""
 
@@ -126,7 +127,7 @@ class DefaultAgentService : AgentService {
             "find_search_bar", "add_to_cart"
         )
         /** ms to wait for UI to settle before capturing screen after an action */
-        private const val SCREEN_SETTLE_MS = 500L
+        private const val SCREEN_SETTLE_MS = 250L
 
         /** Whether to write raw network request/response data to sandbox cache files for debugging */
         @JvmField
@@ -714,11 +715,12 @@ class DefaultAgentService : AgentService {
 
             // Push thinking content in non-streaming mode & speak intermediate intent
             if (!config.streaming && !llmResponse.text.isNullOrBlank()) {
+                val hasFinishCall = llmResponse.toolExecutionRequests?.any { it.name() == "finish" } == true
                 val suppressHallucinatedCompletion =
                     !llmResponse.hasToolExecutionRequests() &&
                         (inAppSearchGuard.shouldBlockTextOnlyCompletion() ||
                             emailComposeGuard.shouldBlockTextOnlyCompletion())
-                if (!suppressHallucinatedCompletion) {
+                if (!suppressHallucinatedCompletion && !hasFinishCall) {
                     callback.onContent(iterations, llmResponse.text)
                     io.agents.pokeclaw.service.VoiceManager.speakAsync(llmResponse.text)
                 }

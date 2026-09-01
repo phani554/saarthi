@@ -100,6 +100,7 @@ public class InputTextTool extends BaseTool {
         // Strategy 1: try ACTION_SET_TEXT (standard approach)
         // Note: ACTION_SET_TEXT overwrites existing text cleanly when clearFirst is true
         if (trySetTextWithRetries(targetNode, text, clearFirst)) {
+            service.dismissKeyboard();
             return ToolResult.success(clearFirst ? "Input text: " + text : "Appended text: " + text);
         }
 
@@ -128,6 +129,7 @@ public class InputTextTool extends BaseTool {
 
         // Perform paste
         if (targetNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
+            service.dismissKeyboard();
             return ToolResult.success(clearFirst ? "Input text (via paste): " + text : "Appended text (via paste): " + text);
         }
 
@@ -150,14 +152,28 @@ public class InputTextTool extends BaseTool {
         node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs);
     }
 
+    private String cleanPlaceholderText(String text, AccessibilityNodeInfo node) {
+        if (text == null) return "";
+        String lower = text.trim().toLowerCase();
+        CharSequence hint = node != null ? node.getHintText() : null;
+        if (hint != null && lower.equals(hint.toString().trim().toLowerCase())) {
+            return "";
+        }
+        if (lower.startsWith("search for") || lower.startsWith("search in") || lower.startsWith("search ") ||
+            lower.startsWith("type a message") || lower.startsWith("type message") || lower.startsWith("for ")) {
+            return "";
+        }
+        return text;
+    }
+
     private boolean trySetTextWithRetries(AccessibilityNodeInfo node, String text, boolean clearFirst) {
         CharSequence existing = node.getText();
         String candidateText;
         if (clearFirst) {
             candidateText = text;
         } else {
-            String existingStr = existing != null ? existing.toString() : "";
-            candidateText = existingStr.endsWith(text) ? existingStr : (existingStr + text);
+            String existingStr = cleanPlaceholderText(existing != null ? existing.toString() : "", node);
+            candidateText = existingStr.isEmpty() || existingStr.endsWith(text) ? text : (existingStr + text);
         }
 
         Bundle args = new Bundle();
@@ -168,7 +184,7 @@ public class InputTextTool extends BaseTool {
                 return true;
             }
             try {
-                Thread.sleep(200);
+                Thread.sleep(100);
             } catch (InterruptedException ignored) {
                 Thread.currentThread().interrupt();
                 return false;

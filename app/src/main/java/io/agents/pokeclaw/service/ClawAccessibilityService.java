@@ -455,9 +455,62 @@ public class ClawAccessibilityService extends AccessibilityService {
         }
     }
 
+    /**
+     * Checks if a soft keyboard (IME) window is currently visible on screen.
+     */
+    public boolean isKeyboardVisible() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                List<android.view.accessibility.AccessibilityWindowInfo> windows = getWindows();
+                if (windows != null) {
+                    for (android.view.accessibility.AccessibilityWindowInfo window : windows) {
+                        if (window != null && window.getType() == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root != null && root.getPackageName() != null) {
+                String pkgStr = root.getPackageName().toString().toLowerCase();
+                if (pkgStr.contains("inputmethod") || pkgStr.contains("keyboard") || pkgStr.contains("honeyboard") || pkgStr.contains("swiftkey")) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            XLog.w(TAG, "isKeyboardVisible check error", e);
+        }
+        return false;
+    }
+
+    /**
+     * Dismisses/hides the soft keyboard if it is currently visible on screen.
+     */
+    public boolean dismissKeyboard() {
+        if (!isKeyboardVisible()) {
+            return false;
+        }
+        XLog.i(TAG, "dismissKeyboard: soft keyboard detected, dismissing via GLOBAL_ACTION_BACK");
+        boolean result = performGlobalAction(GLOBAL_ACTION_BACK);
+        try {
+            Thread.sleep(200);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        return result;
+    }
+
     private void buildNodeTree(AccessibilityNodeInfo node, StringBuilder sb, int depth) {
         if (node == null) {
             return;
+        }
+
+        // Skip soft keyboard nodes so keyboard keys do not pollute the screen tree
+        if (node.getPackageName() != null) {
+            String pkg = node.getPackageName().toString().toLowerCase();
+            if (pkg.contains("inputmethod") || pkg.contains("keyboard") || pkg.contains("honeyboard") || pkg.contains("swiftkey")) {
+                return;
+            }
         }
 
         // Skip nodes not visible on screen (elements in scroll containers that are off-screen)

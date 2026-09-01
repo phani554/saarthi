@@ -3,7 +3,6 @@
 
 package io.agents.pokeclaw.tool.impl.mobile;
 
-import io.agents.pokeclaw.ClawApplication;
 import io.agents.pokeclaw.R;
 import io.agents.pokeclaw.service.ClawAccessibilityService;
 import io.agents.pokeclaw.tool.BaseTool;
@@ -68,6 +67,7 @@ public class TapNodeTool extends BaseTool {
         int y = coords[1];
         String boundsError = validateCoordinates(x, y);
         if (boundsError != null) return ToolResult.error(boundsError);
+        service.dismissKeyboard();
         boolean success = service.performTap(x, y);
         return success ? ToolResult.success("Tapped node " + nodeId + " at (" + x + ", " + y + ")")
                 : ToolResult.error("Failed to tap node " + nodeId + " at (" + x + ", " + y + ")");

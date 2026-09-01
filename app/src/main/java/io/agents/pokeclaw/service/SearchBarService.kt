@@ -160,6 +160,10 @@ object SearchBarService {
 
         if (success) {
             XLog.i(TAG, "navigateAndType: query '$query' set cleanly via ACTION_SET_TEXT")
+            try {
+                service.sendKeyEvent(android.view.KeyEvent.KEYCODE_ENTER)
+            } catch (_: Exception) {}
+            service.dismissKeyboard()
             return true
         }
 
