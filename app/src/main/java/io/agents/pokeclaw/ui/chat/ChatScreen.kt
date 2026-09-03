@@ -9,6 +9,8 @@ import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 
 import android.text.format.DateUtils
@@ -58,6 +60,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import io.agents.pokeclaw.data.memory.HybridMemoryRepository
+import io.agents.pokeclaw.data.memory.MemorySource
+import io.agents.pokeclaw.service.VoiceEngineState
+import io.agents.pokeclaw.service.VoiceManager
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -132,6 +138,7 @@ fun ChatScreen(
     sessionCost: Double = 0.0,
     onSendChat: (String) -> Unit,
     onSendTask: (String) -> Unit,
+    onVoiceInputTap: (() -> Unit)? = null,
     onStartMonitor: (MonitorTargetSpec) -> Unit = {},
     onSendDirectMessage: (contact: String, app: String, message: String) -> Unit = { _, _, _ -> },
     onNewChat: () -> Unit,
@@ -303,6 +310,7 @@ fun ChatScreen(
                             onTaskModeChange = { isTaskMode = it },
                             onSendChat = onSendChat,
                             onSendTask = onSendTask,
+                            onVoiceInputTap = onVoiceInputTap,
                             onStopAll = onStopAllTasks,
                             onAttach = onAttach,
                             colors = colors,
@@ -848,6 +856,7 @@ private fun ChatInputBar(
     onTaskModeChange: (Boolean) -> Unit,
     onSendChat: (String) -> Unit,
     onSendTask: (String) -> Unit,
+    onVoiceInputTap: (() -> Unit)? = null,
     onStopAll: () -> Unit = {},
     onAttach: () -> Unit,
     colors: PokeclawColors,
@@ -880,6 +889,8 @@ private fun ChatInputBar(
 
     val taskBg = Color(0xFF1A1410)
     val taskBorder = colors.accent.copy(alpha = 0.25f)
+    val voiceEngineState by VoiceManager.engineState.collectAsState()
+    val activeMemorySource by HybridMemoryRepository.activeMemorySource.collectAsState()
 
     Column(
         modifier = Modifier
@@ -890,6 +901,103 @@ private fun ChatInputBar(
             color = if (isTaskMode && isLocalModel) taskBorder else colors.divider,
             thickness = 1.dp,
         )
+
+        // Memory Source Active Indicator
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 2.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            val isMem0 = activeMemorySource == MemorySource.MEM0_CLOUD
+            Surface(
+                color = if (isMem0) Color(0xFF1E3A8A) else Color(0xFF27272A),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Text(
+                    text = if (isMem0) "⚡ Mem0 Cloud" else "💾 Local Vault",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isMem0) Color(0xFF93C5FD) else Color(0xFFA1A1AA),
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                )
+            }
+        }
+
+        // Running Task Status & Kill Button Banner
+        if (isTaskRunning) {
+            Surface(
+                color = Color(0xFFB91C1C),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "🤖 Task Executing...",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                    Button(
+                        onClick = onStopAll,
+                        colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                        modifier = Modifier.height(28.dp)
+                    ) {
+                        Text(
+                            text = "KILL TASK",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = Color(0xFFB91C1C)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Voice Engine State Indicator Banner
+        if (voiceEngineState !is VoiceEngineState.Idle) {
+            val statusText = when (val state = voiceEngineState) {
+                is VoiceEngineState.Recording -> "🔴 Recording audio... (Tap mic to stop)"
+                is VoiceEngineState.Transcribing -> "⚡ Transcribing audio with Sarvam Saaras..."
+                is VoiceEngineState.GeneratingResponse -> "🧠 Generating response with Gemini..."
+                is VoiceEngineState.Speaking -> "🔊 Speaking via Sarvam Bulbul TTS..."
+                is VoiceEngineState.Error -> "⚠️ Voice error: ${state.message}"
+                else -> ""
+            }
+            if (statusText.isNotEmpty()) {
+                Surface(
+                    color = colors.accent.copy(alpha = 0.15f),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = statusText,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = colors.accent,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                    )
+                }
+            }
+        }
 
         // Segmented Chat/Task toggle — Local LLM only
         if (isLocalModel) {
@@ -978,14 +1086,18 @@ private fun ChatInputBar(
 
             IconButton(
                 onClick = {
-                    val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                        putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                        putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak command or message...")
-                    }
-                    try {
-                        speechLauncher.launch(intent)
-                    } catch (e: Exception) {
-                        Toast.makeText(context, "Speech input not available", Toast.LENGTH_SHORT).show()
+                    if (onVoiceInputTap != null) {
+                        onVoiceInputTap()
+                    } else {
+                        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak command or message...")
+                        }
+                        try {
+                            speechLauncher.launch(intent)
+                        } catch (e: Exception) {
+                            Toast.makeText(context, "Speech input not available", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 },
                 modifier = Modifier.size(34.dp)

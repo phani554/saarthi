@@ -77,6 +77,9 @@ object ToolRegistry {
         register(FindSearchBarTool())
         register(AddToCartTool())
         register(GroupTaskSummaryTool())
+        register(PlaceCallTool())
+        register(WhatsAppForwardTool())
+        register(SendDistressSignalTool())
     }
 
     fun register(tool: BaseTool) {

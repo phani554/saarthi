@@ -3,6 +3,7 @@
 
 package io.agents.pokeclaw.agent.knowledge
 
+import io.agents.pokeclaw.agent.llm.LlmSessionManager
 import io.agents.pokeclaw.utils.XLog
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -11,6 +12,8 @@ import java.util.regex.Pattern
 
 /**
  * Manages user memory and preferences learned from user interactions.
+ * Language-agnostic: uses AI (Gemini / Sarvam 105B) to extract structured facts
+ * from Telugu, Hindi, Hinglish, Tamil, Bengali, or English inputs.
  * Persists learned memory in vault/user_preferences.md via KBManager.
  */
 object MemoryManager {
@@ -40,13 +43,15 @@ object MemoryManager {
 
     /**
      * Scan an incoming user prompt/message and extract preference statements to save.
+     * Uses Gemini/Interaction AI to ensure language is not a barrier (Telugu, Hindi, English, etc.).
      */
     fun learnFromMessage(userText: String) {
         if (userText.isBlank()) return
-
-        val lines = userText.split("\n", ".", ";")
+        val raw = userText.trim()
         val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
 
+        // 1. Fast regex pattern match
+        val lines = raw.split("\n", ".", ";")
         for (line in lines) {
             val cleanLine = line.trim()
             if (cleanLine.length < 5) continue
@@ -58,6 +63,28 @@ object MemoryManager {
                     break
                 }
             }
+        }
+
+        // 2. Multi-lingual AI memory extraction (translates facts from Telugu/Hindi/Tamil/etc. into canonical English statements)
+        try {
+            val systemPrompt = "You extract personal user facts, relationships, group names, and preferences from user messages regardless of language (Telugu, Hindi, Hinglish, Tamil, English, etc.)."
+            val prompt = """Analyze this user message for personal facts or relationships:
+"$raw"
+
+Rules:
+1. If the user states a personal preference, friend, family relation, address, contact mapping, or project group name (e.g. "major project group is Final Year Project", "my friend is Rahul", "naa friend Rahul", "nenu major project group Final Year Project ani pettanu"):
+   - Extract a single, concise English fact statement.
+2. If NO personal fact is in the message, output ONLY 'NONE'.
+3. Output ONLY the clean fact statement or 'NONE'. No preamble."""
+
+            val extracted = LlmSessionManager.singleShotInteraction(systemPrompt, prompt, 0.1)
+                ?.trim()?.removeSurrounding("\"")?.removeSurrounding("'")
+
+            if (!extracted.isNullOrBlank() && !extracted.equals("NONE", ignoreCase = true) && extracted.length > 5) {
+                savePreference("- [$timestamp] $extracted")
+            }
+        } catch (e: Exception) {
+            XLog.w(TAG, "AI memory extraction failed: ${e.message}")
         }
     }
 

@@ -5,6 +5,7 @@ package io.agents.pokeclaw.utils
 
 import android.content.Context
 import com.tencent.mmkv.MMKV
+import io.agents.pokeclaw.BuildConfig
 import io.agents.pokeclaw.utils.XLog
 
 /**
@@ -283,6 +284,34 @@ object KVUtils {
     fun getNotificationListenerLastDisconnectedAt(): Long =
         getLong(KEY_NOTIFICATION_LISTENER_LAST_DISCONNECTED_AT, 0L)
 
+    private const val KEY_SARVAM_API_KEY = "KEY_SARVAM_API_KEY"
+    private const val KEY_SARVAM_LANGUAGE = "KEY_SARVAM_LANGUAGE"
+    private const val KEY_SARVAM_SPEAKER = "KEY_SARVAM_SPEAKER"
+    private const val KEY_INTERACTION_MODEL = "KEY_INTERACTION_MODEL"
+    private const val KEY_MEM0_API_KEY = "KEY_MEM0_API_KEY"
+    private const val KEY_ROUTE_VIA_OPENROUTER = "KEY_ROUTE_VIA_OPENROUTER"
+
+    fun isRouteViaOpenRouter(): Boolean = getBoolean(KEY_ROUTE_VIA_OPENROUTER, false)
+    fun setRouteViaOpenRouter(value: Boolean) = putBoolean(KEY_ROUTE_VIA_OPENROUTER, value)
+
+    fun getMem0ApiKey(): String {
+        val saved = getString(KEY_MEM0_API_KEY, "")
+        return saved.ifBlank { BuildConfig.MEM0_API_KEY }
+    }
+    fun setMem0ApiKey(value: String) = putString(KEY_MEM0_API_KEY, value)
+
+    fun getSarvamApiKey(): String {
+        val saved = getString(KEY_SARVAM_API_KEY, "")
+        return saved.ifBlank { BuildConfig.SARVAM_API_KEY }
+    }
+    fun setSarvamApiKey(value: String) = putString(KEY_SARVAM_API_KEY, value)
+    fun getSarvamLanguageCode(): String = getString(KEY_SARVAM_LANGUAGE, "hi-IN")
+    fun setSarvamLanguageCode(value: String) = putString(KEY_SARVAM_LANGUAGE, value)
+    fun getSarvamSpeaker(): String = getString(KEY_SARVAM_SPEAKER, "shubh")
+    fun setSarvamSpeaker(value: String) = putString(KEY_SARVAM_SPEAKER, value)
+    fun getInteractionModelId(): String = getString(KEY_INTERACTION_MODEL, "gemini-3.5-flash-lite")
+    fun setInteractionModelId(value: String) = putString(KEY_INTERACTION_MODEL, value)
+
     private const val KEY_LLM_API_KEY = "KEY_LLM_API_KEY"
     private const val KEY_LLM_BASE_URL = "KEY_LLM_BASE_URL"
     private const val KEY_LLM_MODEL_NAME = "KEY_LLM_MODEL_NAME"
@@ -299,7 +328,10 @@ object KVUtils {
     private const val KEY_PENDING_LOCAL_GPU_INIT_AT = "KEY_PENDING_LOCAL_GPU_INIT_AT"
     private const val KEY_PENDING_LOCAL_GPU_INIT_PID = "KEY_PENDING_LOCAL_GPU_INIT_PID"
 
-    fun getLlmApiKey(): String = getString(KEY_LLM_API_KEY, "")
+    fun getLlmApiKey(): String {
+        val saved = getString(KEY_LLM_API_KEY, "")
+        return saved.ifBlank { BuildConfig.GEMINI_API_KEY }
+    }
     fun setLlmApiKey(value: String) = putString(KEY_LLM_API_KEY, value)
 
     /** Per-provider API key storage — allows users to save keys for multiple providers simultaneously. */

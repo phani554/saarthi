@@ -7,9 +7,14 @@ import dev.langchain4j.data.message.ChatMessage
 import dev.langchain4j.data.message.SystemMessage
 import dev.langchain4j.data.message.UserMessage
 import dev.langchain4j.model.anthropic.AnthropicChatModel
+import dev.langchain4j.model.chat.ChatModel
 import dev.langchain4j.model.chat.request.ChatRequest
 import dev.langchain4j.model.openai.OpenAiChatModel
+import io.agents.pokeclaw.ClawApplication
+import io.agents.pokeclaw.agent.LlmProvider
 import io.agents.pokeclaw.agent.langchain.http.OkHttpClientBuilderAdapter
+import io.agents.pokeclaw.service.VoiceManager
+import io.agents.pokeclaw.utils.KVUtils
 import io.agents.pokeclaw.utils.XLog
 
 /**
@@ -29,7 +34,7 @@ object LlmSessionManager {
      * Create a Cloud LLM ChatModel using the user's current config.
      * Returns null if no API key is configured.
      */
-    fun createCloudChatModel(temperature: Double = 0.7): dev.langchain4j.model.chat.ChatModel? {
+    fun createCloudChatModel(temperature: Double = 0.7): ChatModel? {
         val config = ModelConfigRepository.snapshot()
         if (config.activeMode == ActiveModelMode.LOCAL) {
             XLog.w(TAG, "createCloudChatModel: local mode is active")
@@ -42,23 +47,102 @@ object LlmSessionManager {
             return null
         }
 
-        XLog.d(TAG, "createCloudChatModel: provider=${cloud.providerName}, model=${cloud.modelName}, baseUrl=${cloud.resolvedBaseUrl}")
-        return when (cloud.agentProvider) {
-            io.agents.pokeclaw.agent.LlmProvider.ANTHROPIC -> AnthropicChatModel.builder()
-                .httpClientBuilder(OkHttpClientBuilderAdapter())
-                .apiKey(cloud.apiKey)
-                .modelName(cloud.modelName)
-                .baseUrl(cloud.resolvedBaseUrl)
-                .temperature(temperature)
-                .build()
+        val forceOpenRouter = KVUtils.isRouteViaOpenRouter()
+        val openRouterKey = KVUtils.getApiKeyForProvider("OPENROUTER").ifEmpty { cloud.apiKey }.trim()
+        val modelName = if (forceOpenRouter && !cloud.modelName.contains("/")) {
+            "google/gemini-3.8-flash"
+        } else {
+            cloud.modelName.ifEmpty { "gpt-4o-mini" }
+        }
+        val baseUrl = if (forceOpenRouter) "https://openrouter.ai/api/v1" else cloud.resolvedBaseUrl.ifEmpty { "https://api.openai.com/v1" }
 
-            else -> OpenAiChatModel.builder()
+        XLog.d(TAG, "createCloudChatModel: forceOpenRouter=$forceOpenRouter model=$modelName baseUrl=$baseUrl")
+        return OpenAiChatModel.builder()
+            .httpClientBuilder(OkHttpClientBuilderAdapter())
+            .apiKey(if (forceOpenRouter) openRouterKey else cloud.apiKey)
+            .modelName(modelName)
+            .baseUrl(baseUrl)
+            .customHeaders(mapOf("HTTP-Referer" to "https://pokeclaw.agents.io", "X-Title" to "PokeClaw"))
+            .temperature(temperature)
+            .build()
+    }
+
+    /**
+     * Creates a ChatModel specifically configured for the designated Voice Interaction & Dialect Model
+     * (e.g., sarvam-105b, z-ai/glm-5.3-flash, or google/gemini-3.5-flash-lite).
+     */
+    fun createInteractionChatModel(temperature: Double = 0.3): ChatModel? {
+        val interactionModel = KVUtils.getInteractionModelId().ifBlank { "google/gemini-3.5-flash-lite" }
+        val sarvamKey = KVUtils.getSarvamApiKey().trim()
+        val forceOpenRouter = KVUtils.isRouteViaOpenRouter()
+        val openRouterKey = KVUtils.getApiKeyForProvider("OPENROUTER").ifEmpty { KVUtils.getLlmApiKey() }.trim()
+
+        if (!forceOpenRouter && (interactionModel.startsWith("sarvam") || interactionModel == "sarvam-105b")) {
+            if (sarvamKey.isEmpty()) {
+                XLog.w(TAG, "Sarvam interaction model selected but Sarvam API key is blank")
+                return null
+            }
+            XLog.d(TAG, "createInteractionChatModel: using Sarvam-105b")
+            return OpenAiChatModel.builder()
                 .httpClientBuilder(OkHttpClientBuilderAdapter())
-                .apiKey(cloud.apiKey)
-                .modelName(cloud.modelName.ifEmpty { "gpt-4o-mini" })
-                .baseUrl(cloud.resolvedBaseUrl.ifEmpty { "https://api.openai.com/v1" })
+                .apiKey(sarvamKey)
+                .modelName("sarvam-105b")
+                .baseUrl("https://api.sarvam.ai/v1")
+                .customHeaders(mapOf("api-subscription-key" to sarvamKey))
                 .temperature(temperature)
                 .build()
+        }
+
+        if (openRouterKey.isEmpty()) {
+            XLog.w(TAG, "Interaction model selected but API key is blank")
+            return null
+        }
+
+        val isOpenRouter = forceOpenRouter || interactionModel.contains("/") || KVUtils.getLlmProvider().equals("OPENROUTER", ignoreCase = true)
+        val resolvedModel = if (forceOpenRouter && !interactionModel.contains("/")) "google/gemini-3.5-flash-lite" else interactionModel
+        val baseUrl = if (isOpenRouter) "https://openrouter.ai/api/v1" else "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+        XLog.d(TAG, "createInteractionChatModel: forceOpenRouter=$forceOpenRouter model=$resolvedModel via $baseUrl")
+        return OpenAiChatModel.builder()
+            .httpClientBuilder(OkHttpClientBuilderAdapter())
+            .apiKey(openRouterKey)
+            .modelName(resolvedModel)
+            .baseUrl(baseUrl)
+            .customHeaders(mapOf("HTTP-Referer" to "https://pokeclaw.agents.io", "X-Title" to "PokeClaw"))
+            .temperature(temperature)
+            .build()
+    }
+
+    /**
+     * Single-shot call using the Interaction Model (for dialect turns, quick chat, or prompt rewriting).
+     */
+    fun singleShotInteraction(systemPrompt: String, userPrompt: String, temperature: Double = 0.2): String? {
+        return try {
+            val chatModel = createInteractionChatModel(temperature)
+            if (chatModel != null) {
+                val messages = listOf<ChatMessage>(
+                    SystemMessage.from(systemPrompt),
+                    UserMessage.from(userPrompt)
+                )
+                val request = ChatRequest.builder().messages(messages).build()
+                val response = chatModel.chat(request)
+                response.aiMessage().text()
+            } else {
+                singleShotCloud(systemPrompt, userPrompt, temperature)
+            }
+        } catch (e: Exception) {
+            XLog.w(TAG, "singleShotInteraction failed: ${e.message}")
+            handleLlmError(e)
+            singleShotCloud(systemPrompt, userPrompt, temperature)
+        }
+    }
+
+    fun handleLlmError(e: Exception) {
+        val msg = e.message.orEmpty()
+        if (msg.contains("401") || msg.contains("402") || msg.contains("403") || msg.contains("Unauthorized") || msg.contains("Payment Required")) {
+            val report = "API Key Expired or Quota Exceeded (HTTP 401/402/403). Please check Settings."
+            XLog.e(TAG, report, e)
+            VoiceManager.speakNative("API Key Expired or Quota Exceeded. Please update your key in Settings.")
         }
     }
 
@@ -147,7 +231,7 @@ object LlmSessionManager {
             val modelPath = ModelConfigRepository.snapshot().local.modelPath
             if (modelPath.isNullOrEmpty()) return null
 
-            val context = io.agents.pokeclaw.ClawApplication.instance
+            val context = ClawApplication.instance
             LocalModelRuntime.runSingleShot(
                 context = context,
                 modelPath = modelPath,

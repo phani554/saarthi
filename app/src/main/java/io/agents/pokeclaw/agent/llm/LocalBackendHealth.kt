@@ -194,7 +194,7 @@ object LocalBackendHealth {
         currentDeviceKey: String,
         pendingDeviceKey: String?,
         pendingAtMs: Long,
-        pendingPid: Int,
+        pendingPid: Int = 0,
         nowMs: Long,
         maxAgeMs: Long = CRASH_MARKER_MAX_AGE_MS,
     ): Boolean {

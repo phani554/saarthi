@@ -32,6 +32,7 @@ import io.agents.pokeclaw.service.ForegroundService
 import io.agents.pokeclaw.support.DebugReportManager
 import io.agents.pokeclaw.utils.KVUtils
 import io.agents.pokeclaw.utils.XLog
+import io.agents.pokeclaw.widget.InputDialog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -280,9 +281,41 @@ class SettingsActivity : BaseActivity() {
             leadingIcon = R.drawable.icon_current_model,
             title = getString(R.string.menu_llm_config),
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.LLM_CONFIG) },
-            showDivider = false
+            showDivider = true
         )
         menuItems[SettingsViewModel.MenuAction.LLM_CONFIG.name]?.setLeadingIconColor(getColor(R.color.colorTextPrimary))
+
+        var sarvamMenuItem: MenuItem? = null
+        sarvamMenuItem = modelGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_btn_speak_now,
+            title = "Sarvam AI Voice API Key",
+            onClick = {
+                showSarvamKeyDialog {
+                    val key = KVUtils.getSarvamApiKey()
+                    sarvamMenuItem?.setTrailingText(if (key.isNotEmpty()) "Configured" else "Not set")
+                }
+            },
+            showDivider = true
+        ).apply {
+            val key = KVUtils.getSarvamApiKey()
+            setTrailingText(if (key.isNotEmpty()) "Configured" else "Not set")
+        }
+
+        var mem0MenuItem: MenuItem? = null
+        mem0MenuItem = modelGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_save,
+            title = "Mem0 AI Memory API Key",
+            onClick = {
+                showMem0KeyDialog {
+                    val key = KVUtils.getMem0ApiKey()
+                    mem0MenuItem?.setTrailingText(if (key.isNotEmpty()) "Configured" else "Not set")
+                }
+            },
+            showDivider = true
+        ).apply {
+            val key = KVUtils.getMem0ApiKey()
+            setTrailingText(if (key.isNotEmpty()) "Configured" else "Not set")
+        }
 
         // Task Budget (inline in model group)
         modelGroup.addMenuItem(
@@ -386,11 +419,11 @@ class SettingsActivity : BaseActivity() {
             leadingIcon = android.R.drawable.ic_menu_share,
             title = "GitHub",
             onClick = {
-                startActivity(Intent(Intent.ACTION_VIEW, "https://github.com/agents-io/PokeClaw".toUri()))
+                startActivity(Intent(Intent.ACTION_VIEW, "https://github.com/ithiria894/saarthi".toUri()))
             },
             showDivider = true
         ).apply {
-            setTrailingText("agents-io/PokeClaw")
+            setTrailingText("ithiria894/saarthi")
         }
 
         aboutGroup.addMenuItem(
@@ -528,6 +561,36 @@ class SettingsActivity : BaseActivity() {
             message = getString(R.string.unbind_message, channelName, channelName),
             actionTitle = getString(R.string.unbind_action),
             onAction = onUnbind
+        )
+    }
+
+    private fun showSarvamKeyDialog(onDone: () -> Unit) {
+        val currentKey = KVUtils.getSarvamApiKey()
+        io.agents.pokeclaw.widget.InputDialog.show(
+            context = this,
+            title = "Sarvam AI API Key",
+            presetText = currentKey,
+            hint = "Enter Sarvam AI API subscription key",
+            onComplete = { text ->
+                KVUtils.setSarvamApiKey(text.trim())
+                Toast.makeText(this, if (text.trim().isNotEmpty()) "Sarvam key saved" else "Sarvam key cleared", Toast.LENGTH_SHORT).show()
+                onDone()
+            }
+        )
+    }
+
+    private fun showMem0KeyDialog(onDone: () -> Unit) {
+        val currentKey = KVUtils.getMem0ApiKey()
+        InputDialog.show(
+            context = this,
+            title = "Mem0 AI Memory API Key",
+            presetText = currentKey,
+            hint = "Enter Mem0 API key (m0-...)",
+            onComplete = { text ->
+                KVUtils.setMem0ApiKey(text.trim())
+                Toast.makeText(this, if (text.trim().isNotEmpty()) "Mem0 key saved" else "Mem0 key cleared; using local vault", Toast.LENGTH_SHORT).show()
+                onDone()
+            }
         )
     }
 

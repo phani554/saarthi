@@ -3,20 +3,24 @@
 
 package io.agents.pokeclaw.ui.chat
 
-import io.agents.pokeclaw.AppCapabilityCoordinator
-import io.agents.pokeclaw.ServiceBindingState
 import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.compose.runtime.collectAsState
+import io.agents.pokeclaw.AppCapabilityCoordinator
+import io.agents.pokeclaw.ServiceBindingState
+import io.agents.pokeclaw.agent.MultiModelAgentOrchestrator
 import io.agents.pokeclaw.agent.llm.ModelConfigRepository
 import io.agents.pokeclaw.appViewModel
 import io.agents.pokeclaw.floating.FloatingCircleManager
+import io.agents.pokeclaw.service.VoiceManager
 import io.agents.pokeclaw.ui.settings.LlmConfigActivity
 import io.agents.pokeclaw.ui.settings.SettingsActivity
 import io.agents.pokeclaw.utils.KVUtils
@@ -56,6 +60,74 @@ class ComposeChatActivity : ComponentActivity() {
     private val _sessionTokens = mutableStateOf(0)
     private val _sessionCost = mutableStateOf(0.0)
     private var deferLocalChatBootstrapForAutoTask = false
+
+    private val speechLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK) {
+            val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+            if (!spokenText.isNullOrBlank()) {
+                taskFlowController.processVoiceTurn(spokenText)
+            }
+        }
+    }
+
+    private fun triggerVoiceCapture() {
+        if (appViewModel.isTaskRunning()) {
+            Toast.makeText(this, "Task is currently running", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (androidx.core.content.ContextCompat.checkSelfPermission(
+                this,
+                android.Manifest.permission.RECORD_AUDIO
+            ) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            androidx.core.app.ActivityCompat.requestPermissions(
+                this,
+                arrayOf(android.Manifest.permission.RECORD_AUDIO),
+                200
+            )
+            return
+        }
+
+        if (VoiceManager.isPlayingAudio()) {
+            Toast.makeText(this, "Voice output is currently playing", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (VoiceManager.isRecordingInApp()) {
+            VoiceManager.stopInAppVoiceCapture()
+            Toast.makeText(this, "Mic stopped", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val hasSarvamKey = KVUtils.getSarvamApiKey().trim().isNotEmpty()
+        val hasGeminiKey = KVUtils.getLlmApiKey().trim().isNotEmpty()
+
+        if (hasSarvamKey || hasGeminiKey) {
+            Toast.makeText(this, "🎙️ Listening... Speak now", Toast.LENGTH_SHORT).show()
+            VoiceManager.startInAppVoiceCapture(this) { transcribedText ->
+                runOnUiThread {
+                    if (!transcribedText.isNullOrBlank()) {
+                        taskFlowController.processVoiceTurn(transcribedText)
+                    } else {
+                        Toast.makeText(this, "No speech detected", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        } else {
+            val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+                putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                putExtra(RecognizerIntent.EXTRA_PROMPT, "Bolein aapki kya madad karoon...")
+            }
+            try {
+                speechLauncher.launch(intent)
+            } catch (e: Exception) {
+                Toast.makeText(this, "Speech recognition not available", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     private val chatSessionController by lazy {
         ChatSessionController(
@@ -113,8 +185,10 @@ class ComposeChatActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         androidx.core.view.WindowCompat.setDecorFitsSystemWindows(window, false)
 
+        VoiceManager.init(this)
+        taskFlowController.onTriggerVoiceCapture = { triggerVoiceCapture() }
+
         // Hide floating circle only when no task is running
-        // (task running = keep floating pill visible for step/token status)
         try {
             if (!appViewModel.isTaskRunning()) {
                 FloatingCircleManager.hide()
@@ -150,6 +224,7 @@ class ComposeChatActivity : ComponentActivity() {
                 sessionCost = _sessionCost.value,
                 onSendChat = { sendChat(it) },
                 onSendTask = { taskFlowController.sendTask(it) },
+                onVoiceInputTap = { triggerVoiceCapture() },
                 onStartMonitor = { target -> taskFlowController.startMonitor(target) },
                 onSendDirectMessage = { contact, app, message ->
                     taskFlowController.sendTask("send \"$message\" to $contact on $app")
@@ -183,11 +258,9 @@ class ComposeChatActivity : ComponentActivity() {
                 onStopAllTasks = {
                     _isAwaitingReply.value = false
                     _isTaskRunning.value = false
-                    Toast.makeText(
-                        this,
-                        activeTaskShellController.stopAllTasks(),
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    MultiModelAgentOrchestrator.killAllTasks()
+                    val stopMsg = activeTaskShellController.stopAllTasks()
+                    Toast.makeText(this, "Stopped all tasks and threads", Toast.LENGTH_SHORT).show()
                 },
                 onModelSwitch = { modelId, displayName -> switchModel(modelId, displayName) },
                 colors = composeColors,
@@ -196,7 +269,7 @@ class ComposeChatActivity : ComponentActivity() {
 
         refreshSidebarHistory()
 
-        // Restore last conversation if Activity was recreated (e.g., system killed it during a task)
+        // Restore last conversation if Activity was recreated
         if (_messages.isEmpty()) {
             conversationStore.restoreLastConversation()?.let { restored ->
                 syncSidebar(restored.conversations)
@@ -219,16 +292,11 @@ class ComposeChatActivity : ComponentActivity() {
         }
         _isLocalModelActive.value = ModelConfigRepository.isLocalActive()
 
-        // Release local LLM conversation before task starts so the agent can use the engine
-        // (LiteRT-LM only supports 1 session at a time)
         appViewModel.onBeforeTask = {
             chatSessionController.releaseForTask()
         }
 
-        // Debug: auto-trigger task from ADB intent
-        // Usage: adb shell am start -n io.agents.pokeclaw/.ui.chat.ComposeChatActivity --es task "open my camera"
         handleIntentAutomation(intent, initialDelayMs = 2000)
-
     }
 
     override fun onNewIntent(intent: Intent) {

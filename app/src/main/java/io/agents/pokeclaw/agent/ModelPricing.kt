@@ -17,6 +17,9 @@ object ModelPricing {
     )
 
     private val PRICES = mapOf(
+        // Sarvam
+        "sarvam-105b" to Price(0.10, 0.40),
+
         // OpenAI
         "gpt-4o" to Price(2.50, 10.00),
         "gpt-4o-mini" to Price(0.15, 0.60),
@@ -33,10 +36,10 @@ object ModelPricing {
         "claude-haiku-4-5" to Price(0.80, 4.00),
 
         // Google
+        "gemini-3.8-flash" to Price(0.15, 0.60),
+        "gemini-3.5-flash-lite" to Price(0.04, 0.15),
+        "gemini-3.1-pro-preview" to Price(1.25, 10.00),
         "gemini-3.1-flash-live-preview" to Price(0.10, 0.40),
-        "gemini-2.5-flash" to Price(0.15, 0.60),
-        "gemini-2.5-pro" to Price(1.25, 10.00),
-        "gemini-2.0-flash" to Price(0.10, 0.40),
 
         // Open-source via OpenRouter/Groq
         "glm-5.3-flash" to Price(0.06, 0.06),

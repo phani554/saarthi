@@ -19,10 +19,12 @@ import io.agents.pokeclaw.TaskEvent
 import io.agents.pokeclaw.agent.DirectDeviceDataGuard
 import io.agents.pokeclaw.agent.PipelineRouter
 import io.agents.pokeclaw.agent.TaskPromptEnvelope
+import io.agents.pokeclaw.agent.llm.LlmSessionManager
 import io.agents.pokeclaw.agent.llm.ModelConfigRepository
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.service.ForegroundService
 import io.agents.pokeclaw.service.AutoReplyManager
+import io.agents.pokeclaw.service.VoiceManager
 import io.agents.pokeclaw.tool.ToolRegistry
 import io.agents.pokeclaw.ui.settings.SettingsActivity
 import io.agents.pokeclaw.utils.KVUtils
@@ -56,13 +58,99 @@ class TaskFlowController(
         private const val TAG = "TaskFlowController"
     }
 
+    enum class VoiceInteractionState {
+        IDLE,
+        PRE_TASK_CONFIRMATION,
+        TASK_EXECUTING,
+        MID_TASK_CLARIFICATION
+    }
+
+    var currentVoiceState = VoiceInteractionState.IDLE
+        private set
+
+    private val preTaskHistoryBuilder = StringBuilder()
+    var onTriggerVoiceCapture: (() -> Unit)? = null
+
     private var sendTaskRetryCount = 0
     private var lastMonitorStatusNote: String? = null
     private val pipelineRouter = PipelineRouter(activity)
 
+    fun processVoiceTurn(userSpeech: String) {
+        if (userSpeech.isBlank()) return
+
+        executor.submit {
+            try {
+                when (currentVoiceState) {
+                    VoiceInteractionState.IDLE, VoiceInteractionState.PRE_TASK_CONFIRMATION -> {
+                        currentVoiceState = VoiceInteractionState.PRE_TASK_CONFIRMATION
+                        preTaskHistoryBuilder.append("User: ").append(userSpeech).append("\n")
+
+                        val result = io.agents.pokeclaw.agent.PromptRewriter.processTurn(
+                            userSpeech = userSpeech,
+                            conversationHistory = preTaskHistoryBuilder.toString(),
+                            mode = io.agents.pokeclaw.agent.PromptRewriter.InteractionMode.PRE_TASK_CONFIRMATION
+                        )
+
+                        preTaskHistoryBuilder.append("Saarthi: ").append(result.spokenResponse).append("\n")
+                        io.agents.pokeclaw.service.VoiceManager.speakAsync(result.spokenResponse, flush = true)
+
+                        activity.runOnUiThread {
+                            addSystem(result.spokenResponse)
+                        }
+
+                        if (result.isCancelled) {
+                            currentVoiceState = VoiceInteractionState.IDLE
+                            preTaskHistoryBuilder.clear()
+                            VoiceManager.onPlaybackFinished = null
+                        } else if (result.isConfirmed && result.cleanedEnglishTask.isNotBlank()) {
+                            currentVoiceState = VoiceInteractionState.TASK_EXECUTING
+                            preTaskHistoryBuilder.clear()
+                            VoiceManager.onPlaybackFinished = null
+                            activity.runOnUiThread {
+                                sendTask(result.cleanedEnglishTask)
+                            }
+                        } else {
+                            currentVoiceState = VoiceInteractionState.PRE_TASK_CONFIRMATION
+                            VoiceManager.onPlaybackFinished = {
+                                if (currentVoiceState == VoiceInteractionState.PRE_TASK_CONFIRMATION) {
+                                    activity.runOnUiThread {
+                                        onTriggerVoiceCapture?.invoke()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    VoiceInteractionState.MID_TASK_CLARIFICATION -> {
+                        val result = io.agents.pokeclaw.agent.PromptRewriter.processTurn(
+                            userSpeech = userSpeech,
+                            conversationHistory = "Mid-task clarification",
+                            mode = io.agents.pokeclaw.agent.PromptRewriter.InteractionMode.MID_TASK_CLARIFICATION
+                        )
+
+                        io.agents.pokeclaw.service.VoiceManager.speakAsync(result.spokenResponse, flush = true)
+                        activity.runOnUiThread {
+                            addUser(userSpeech)
+                            addSystem("Clarification: ${result.cleanedEnglishTask}")
+                        }
+
+                        currentVoiceState = VoiceInteractionState.TASK_EXECUTING
+                    }
+                    VoiceInteractionState.TASK_EXECUTING -> {
+                        XLog.i(TAG, "Speech input ignored during active task execution")
+                    }
+                }
+            } catch (e: Exception) {
+                XLog.e(TAG, "Error in processVoiceTurn", e)
+            }
+        }
+    }
+
+    @Volatile
+    private var isTaskExecutingLock = false
+
     fun sendTask(text: String) {
-        if (appViewModel.isTaskRunning()) {
-            addSystem("Another task is still running. Stop it first.")
+        if (appViewModel.isTaskRunning() || isTaskExecutingLock) {
+            addSystem("A task is already running. Stop it first.")
             return
         }
 
@@ -118,6 +206,7 @@ class TaskFlowController(
                             Toast.makeText(activity, "Accessibility service didn't connect", Toast.LENGTH_LONG).show()
                             addSystem("Accessibility service didn't connect. Go to Settings and toggle it off then on.")
                             sendTaskRetryCount = 0
+                            cleanupAfterTask()
                         }
                     }
                 }
@@ -157,7 +246,8 @@ class TaskFlowController(
         val agentPromptOverride = buildAgentPromptOverride(text)
         addUser(text)
         uiState.isAwaitingReply.value = true
-        uiState.isTaskRunning.value = false
+        uiState.isTaskRunning.value = true
+        VoiceManager.lockTtsEngineForTask()
         XLog.i(TAG, "sendTask: isProcessing=TRUE")
         uiState.messages.add(ChatMessage(ChatMessage.Role.ASSISTANT, "..."))
 
@@ -269,11 +359,19 @@ class TaskFlowController(
             when (event) {
                 is TaskEvent.Completed -> {
                     replaceTypingIndicator(event.answer, event.modelName)
+                    VoiceManager.speakAsync(event.answer, flush = true)
                     cleanupAfterTask()
                     checkAutoReplyConfirmation()
                 }
                 is TaskEvent.Failed -> {
-                    replaceTypingIndicator("Error: ${event.error}")
+                    val rawError = event.error
+                    executor.submit {
+                        val explanation = explainTaskErrorWithAi(rawError)
+                        activity.runOnUiThread {
+                            replaceTypingIndicator("Error: $rawError\n\n💡 $explanation")
+                            VoiceManager.speakAsync(explanation, flush = true)
+                        }
+                    }
                     cleanupAfterTask()
                 }
                 is TaskEvent.Cancelled -> {
@@ -281,7 +379,14 @@ class TaskFlowController(
                     cleanupAfterTask()
                 }
                 is TaskEvent.Blocked -> {
-                    replaceTypingIndicator("Blocked by system dialog.")
+                    val msg = "Blocked by system dialog."
+                    executor.submit {
+                        val explanation = explainTaskErrorWithAi(msg)
+                        activity.runOnUiThread {
+                            replaceTypingIndicator("$msg\n\n💡 $explanation")
+                            VoiceManager.speakAsync(explanation, flush = true)
+                        }
+                    }
                     cleanupAfterTask()
                 }
                 is TaskEvent.ToolAction -> {
@@ -290,6 +395,7 @@ class TaskFlowController(
                     if (!event.toolName.contains("Finish", ignoreCase = true)) {
                         removeTypingIndicator()
                         addSystem("${event.toolName}...")
+                        VoiceManager.speakNative("${event.toolName}...")
                     }
                 }
                 is TaskEvent.ToolResult -> {
@@ -305,6 +411,7 @@ class TaskFlowController(
                     uiState.isAwaitingReply.value = false
                     uiState.isTaskRunning.value = true
                     addSystem(event.description)
+                    VoiceManager.speakNative(event.description)
                 }
                 is TaskEvent.LoopStart -> {
                     uiState.isAwaitingReply.value = false
@@ -337,6 +444,10 @@ class TaskFlowController(
 
     private fun cleanupAfterTask() {
         XLog.i(TAG, "cleanupAfterTask: isProcessing=FALSE")
+        VoiceManager.unlockTtsEngineTask()
+        isTaskExecutingLock = false
+        currentVoiceState = VoiceInteractionState.IDLE
+        preTaskHistoryBuilder.clear()
         uiState.isAwaitingReply.value = false
         uiState.isTaskRunning.value = false
         appViewModel.clearTaskCallback()
@@ -351,6 +462,20 @@ class TaskFlowController(
                 XLog.e(TAG, "cleanupAfterTask: loadModel error", e)
             }
         }, 500)
+    }
+
+    private fun explainTaskErrorWithAi(technicalError: String): String {
+        return try {
+            val systemPrompt = "You are Saarthi, an empathetic AI assistant. Explain phone automation errors to the user in simple, conversational language matching their dialect (Telugu, Hindi, Hinglish, English)."
+            val prompt = """The user's phone task encountered this technical error:
+"$technicalError"
+
+Explain what went wrong in 1-2 friendly, simple sentences in user's language/dialect:"""
+            val explanation = LlmSessionManager.singleShotInteraction(systemPrompt, prompt, 0.3)
+            explanation?.trim() ?: "Task execution failed: $technicalError"
+        } catch (e: Exception) {
+            "Task execution failed: $technicalError"
+        }
     }
 
     private fun checkAutoReplyConfirmation() {

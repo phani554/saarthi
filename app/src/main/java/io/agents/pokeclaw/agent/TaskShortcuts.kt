@@ -12,6 +12,8 @@ import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
 import android.provider.Settings
+import io.agents.pokeclaw.agent.knowledge.ContactAliasResolver
+import io.agents.pokeclaw.tool.ToolRegistry
 import io.agents.pokeclaw.utils.XLog
 
 /**
@@ -86,6 +88,40 @@ object TaskShortcuts {
         // --- Open camera ---
         if (t.contains("open camera") || t == "camera") {
             return openCamera(context)
+        }
+
+        // --- Emergency Distress Signal / SOS shortcut ---
+        if (t.contains("distress") || t.contains("sos") || t.contains("emergency alert") || t.contains("help caretaker")) {
+            val tool = ToolRegistry.getInstance().getTool("send_distress_signal")
+            if (tool != null) {
+                val result = tool.execute(emptyMap())
+                return result.data ?: result.error ?: "Emergency distress alert sent."
+            }
+        }
+
+        // --- Direct Phone Call shortcut ---
+        if (t.startsWith("call ") || t.startsWith("dial ") || t.startsWith("phone ")) {
+            val rawTarget = task.trim().substringAfter(" ").trim()
+            if (rawTarget.isNotEmpty() && !t.contains("whatsapp") && !t.contains("video")) {
+                val resolvedTarget = ContactAliasResolver.resolve(rawTarget)
+                val numberMatch = Regex("""[\d\s\-+()]{7,}""").find(resolvedTarget)
+                if (numberMatch != null) {
+                    val number = numberMatch.value.replace(Regex("""[\s\-()]"""), "")
+                    val callIntent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number")).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    return try {
+                        context.startActivity(callIntent)
+                        "Calling $resolvedTarget ($number) now..."
+                    } catch (e: Exception) {
+                        val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(dialIntent)
+                        "Opened dialer for $resolvedTarget ($number)."
+                    }
+                }
+            }
         }
 
         // --- Open settings ---

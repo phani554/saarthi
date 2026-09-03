@@ -60,8 +60,11 @@ android {
             abiFilters += "arm64-v8a"
         }
         buildConfigField("String", "VERSION_INFO", getVersionGit())
-        buildConfigField("String", "APP_ORIGIN", "\"PokeClaw by agents.io | github.com/agents-io/PokeClaw\"")
+        buildConfigField("String", "APP_ORIGIN", "\"Saathi by Phani and team | github.com/phani554/saarthi\"")
         buildConfigField("String", "BUILD_FINGERPRINT", "\"${getBuildFingerprint()}\"")
+        buildConfigField("String", "SARVAM_API_KEY", "\"${readLocalOrEnvString("SARVAM_API_KEY")}\"")
+        buildConfigField("String", "GEMINI_API_KEY", "\"${readLocalOrEnvString("GEMINI_API_KEY")}\"")
+        buildConfigField("String", "MEM0_API_KEY", "\"${readLocalOrEnvString("MEM0_API_KEY")}\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

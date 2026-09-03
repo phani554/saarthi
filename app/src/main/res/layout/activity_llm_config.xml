@@ -28,13 +28,13 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
-            <!-- Active Model Card -->
+            <!-- Card 1: Active Main Brain Model -->
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:paddingHorizontal="4dp"
                 android:paddingBottom="8dp"
-                android:text="Active Model"
+                android:text="1. Main Brain Model (Task Execution)"
                 android:textColor="@color/colorTextSecondary"
                 android:textSize="13dp"
                 android:textStyle="bold" />
@@ -82,7 +82,7 @@
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
-                            android:text="Tap to download a model"
+                            android:text="Main LLM for tool orchestration &amp; task execution"
                             android:textColor="@color/colorTextTertiary"
                             android:textSize="12dp" />
 
@@ -98,13 +98,337 @@
                 </LinearLayout>
             </androidx.cardview.widget.CardView>
 
+            <!-- Card 2: Voice Interaction & Translation Model -->
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="20dp"
                 android:paddingHorizontal="4dp"
                 android:paddingBottom="8dp"
-                android:text="Default Models"
+                android:text="2. Voice Interaction Model (Dialect &amp; Translation)"
+                android:textColor="@color/colorTextSecondary"
+                android:textSize="13dp"
+                android:textStyle="bold" />
+
+            <androidx.cardview.widget.CardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/colorContainerBrighten"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="1dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <TextView
+                            android:layout_width="36dp"
+                            android:layout_height="36dp"
+                            android:gravity="center"
+                            android:text="💬"
+                            android:textSize="20dp" />
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_marginStart="12dp"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/tvVoiceInteractionModelName"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="gemini-3.5-flash-lite"
+                                android:textColor="@color/colorTextPrimary"
+                                android:textSize="14dp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="2dp"
+                                android:text="Fast Gemini endpoint for multi-dialect Hinglish/Hindi interaction &amp; English prompt translation"
+                                android:textColor="@color/colorTextTertiary"
+                                android:textSize="11dp" />
+
+                            <TextView
+                                android:id="@+id/tvVoiceInteractionStatus"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="4dp"
+                                android:text="● Ready (Uses Gemini API Key)"
+                                android:textColor="@color/colorSuccessPrimary"
+                                android:textSize="11dp" />
+                        </LinearLayout>
+                    </LinearLayout>
+                </LinearLayout>
+            </androidx.cardview.widget.CardView>
+
+            <!-- Card 3: Voice Audio Engine (Sarvam AI) -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:paddingHorizontal="4dp"
+                android:paddingBottom="8dp"
+                android:text="3. Voice Audio Engine (Sarvam AI STT/TTS)"
+                android:textColor="@color/colorTextSecondary"
+                android:textSize="13dp"
+                android:textStyle="bold" />
+
+            <androidx.cardview.widget.CardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/colorContainerBrighten"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="1dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Sarvam API Key"
+                        android:textColor="@color/colorTextSecondary"
+                        android:textSize="12dp"
+                        android:layout_marginBottom="4dp" />
+
+                    <EditText
+                        android:id="@+id/etSarvamApiKeyConfig"
+                        android:layout_width="match_parent"
+                        android:layout_height="44dp"
+                        android:background="@drawable/bg_edit_text"
+                        android:hint="Enter Sarvam Subscription Key..."
+                        android:inputType="textPassword"
+                        android:paddingHorizontal="12dp"
+                        android:textColor="@color/colorTextPrimary"
+                        android:textColorHint="@color/colorTextTertiary"
+                        android:textSize="13dp" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:orientation="horizontal">
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical"
+                            android:layout_marginEnd="6dp">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Language"
+                                android:textColor="@color/colorTextSecondary"
+                                android:textSize="11dp"
+                                android:layout_marginBottom="2dp" />
+
+                            <EditText
+                                android:id="@+id/etSarvamLanguage"
+                                android:layout_width="match_parent"
+                                android:layout_height="40dp"
+                                android:background="@drawable/bg_edit_text"
+                                android:hint="hi-IN"
+                                android:inputType="text"
+                                android:paddingHorizontal="10dp"
+                                android:textColor="@color/colorTextPrimary"
+                                android:textSize="12dp" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical"
+                            android:layout_marginStart="6dp">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Speaker Voice"
+                                android:textColor="@color/colorTextSecondary"
+                                android:textSize="11dp"
+                                android:layout_marginBottom="2dp" />
+
+                            <EditText
+                                android:id="@+id/etSarvamSpeaker"
+                                android:layout_width="match_parent"
+                                android:layout_height="40dp"
+                                android:background="@drawable/bg_edit_text"
+                                android:hint="shubh"
+                                android:inputType="text"
+                                android:paddingHorizontal="10dp"
+                                android:textColor="@color/colorTextPrimary"
+                                android:textSize="12dp" />
+                        </LinearLayout>
+                    </LinearLayout>
+
+                    <io.agents.pokeclaw.widget.KButton
+                        android:id="@+id/btnSaveSarvamConfig"
+                        android:layout_width="match_parent"
+                        android:layout_height="40dp"
+                        android:layout_marginTop="12dp"
+                        android:text="Save Sarvam Config" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="Fallback: Gemini 3.5 Transcribe &amp; 3.1 TTS → Native Android Speech"
+                        android:textColor="@color/colorTextTertiary"
+                        android:textSize="10dp" />
+                </LinearLayout>
+            </androidx.cardview.widget.CardView>
+
+            <!-- Card 4: Mem0 AI Memory Cloud Integration -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:paddingHorizontal="4dp"
+                android:paddingBottom="8dp"
+                android:text="4. Mem0 AI Cloud Memory"
+                android:textColor="@color/colorTextSecondary"
+                android:textSize="13dp"
+                android:textStyle="bold" />
+
+            <androidx.cardview.widget.CardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/colorContainerBrighten"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="1dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Mem0 API Key"
+                        android:textColor="@color/colorTextSecondary"
+                        android:textSize="12dp"
+                        android:layout_marginBottom="4dp" />
+
+                    <EditText
+                        android:id="@+id/etMem0ApiKeyConfig"
+                        android:layout_width="match_parent"
+                        android:layout_height="44dp"
+                        android:background="@drawable/bg_edit_text"
+                        android:hint="Enter Mem0 API Key (m0-...)"
+                        android:inputType="textPassword"
+                        android:paddingHorizontal="12dp"
+                        android:textColor="@color/colorTextPrimary"
+                        android:textColorHint="@color/colorTextTertiary"
+                        android:textSize="13dp" />
+
+                    <io.agents.pokeclaw.widget.KButton
+                        android:id="@+id/btnSaveMem0Config"
+                        android:layout_width="match_parent"
+                        android:layout_height="40dp"
+                        android:layout_marginTop="12dp"
+                        android:text="Save Mem0 Config" />
+
+                    <TextView
+                        android:id="@+id/tvMem0StatusHint"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="● Status: Using Local Markdown Vault (Fallback)"
+                        android:textColor="@color/colorTextTertiary"
+                        android:textSize="10dp" />
+                </LinearLayout>
+            </androidx.cardview.widget.CardView>
+
+            <!-- Card 5: OpenRouter Routing Toggle -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:paddingHorizontal="4dp"
+                android:paddingBottom="8dp"
+                android:text="5. OpenRouter Global Fallback Routing"
+                android:textColor="@color/colorTextSecondary"
+                android:textSize="13dp"
+                android:textStyle="bold" />
+
+            <androidx.cardview.widget.CardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:cardBackgroundColor="@color/colorContainerBrighten"
+                app:cardCornerRadius="12dp"
+                app:cardElevation="1dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="center_vertical"
+                        android:orientation="horizontal">
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="Route All Models via OpenRouter"
+                                android:textColor="@color/colorTextPrimary"
+                                android:textSize="14dp"
+                                android:textStyle="bold" />
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="2dp"
+                                android:text="Toggle ON if Gemini or Sarvam key expires or is rate-limited"
+                                android:textColor="@color/colorTextTertiary"
+                                android:textSize="11dp" />
+                        </LinearLayout>
+
+                        <androidx.appcompat.widget.SwitchCompat
+                            android:id="@+id/switchOpenRouterRouting"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content" />
+                    </LinearLayout>
+                </LinearLayout>
+            </androidx.cardview.widget.CardView>
+
+            <!-- Default Models Card -->
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:paddingHorizontal="4dp"
+                android:paddingBottom="8dp"
+                android:text="Default Task Execution Models"
                 android:textColor="@color/colorTextSecondary"
                 android:textSize="13dp"
                 android:textStyle="bold" />
@@ -262,7 +586,6 @@
                 android:layout_height="wrap_content"
                 android:orientation="vertical" />
 
-            <!-- Storage section hidden — not useful for end users -->
             <TextView
                 android:id="@+id/tvStorageInfo"
                 android:layout_width="0dp"
@@ -287,7 +610,7 @@
                 android:layout_marginTop="20dp"
                 android:paddingHorizontal="4dp"
                 android:paddingBottom="8dp"
-                android:text="Cloud LLM"
+                android:text="Cloud LLM Configuration"
                 android:textColor="@color/colorTextSecondary"
                 android:textSize="13dp"
                 android:textStyle="bold" />

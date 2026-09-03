@@ -29,6 +29,7 @@ import dev.langchain4j.data.message.ChatMessage
 import dev.langchain4j.data.message.SystemMessage
 import dev.langchain4j.data.message.ToolExecutionResultMessage
 import dev.langchain4j.data.message.UserMessage
+import io.agents.pokeclaw.data.memory.HybridMemoryRepository
 import java.io.File
 import java.util.LinkedList
 import java.util.concurrent.atomic.AtomicBoolean
@@ -41,6 +42,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.yield
 
@@ -540,7 +542,8 @@ class DefaultAgentService : AgentService {
         TaskExecutionState.instance.startTask(rawUserRequest)
 
         MemoryManager.learnFromMessage(rawUserRequest)
-        val memorySection = MemoryManager.getMemoryPromptSection()
+        val (memorySection, memorySource) = HybridMemoryRepository.searchMemories(rawUserRequest)
+        XLog.i(TAG, "Task execution memory source: ${memorySource.name}")
         val taskStateSection = TaskExecutionState.instance.toPromptSection()
 
         val fullSystemPrompt = buildString {

@@ -17,6 +17,7 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.appcompat.widget.SwitchCompat
 import androidx.cardview.widget.CardView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -30,6 +31,7 @@ import io.agents.pokeclaw.agent.llm.ActiveModelMode
 import io.agents.pokeclaw.agent.llm.LocalModelManager
 import io.agents.pokeclaw.agent.llm.ModelConfigRepository
 import io.agents.pokeclaw.base.BaseActivity
+import io.agents.pokeclaw.data.memory.HybridMemoryRepository
 import io.agents.pokeclaw.ui.chat.ThemeManager
 import io.agents.pokeclaw.utils.KVUtils
 import io.agents.pokeclaw.widget.CommonToolbar
@@ -79,6 +81,77 @@ class LlmConfigActivity : BaseActivity() {
         val deviceSupport = LocalModelManager.deviceSupport(this)
         val catalog = LocalModelManager.catalog(this).associateBy { it.model.id }
 
+        // Card 3: Sarvam Voice Audio Engine binding
+        val etSarvamKey = findViewById<EditText>(R.id.etSarvamApiKeyConfig)
+        val etSarvamLang = findViewById<EditText>(R.id.etSarvamLanguage)
+        val etSarvamSpeaker = findViewById<EditText>(R.id.etSarvamSpeaker)
+        val btnSaveSarvam = findViewById<View>(R.id.btnSaveSarvamConfig)
+
+        etSarvamKey?.setText(KVUtils.getSarvamApiKey())
+        etSarvamLang?.setText(KVUtils.getSarvamLanguageCode())
+        etSarvamSpeaker?.setText(KVUtils.getSarvamSpeaker())
+
+        btnSaveSarvam?.setOnClickListener {
+            val key = etSarvamKey?.text?.toString()?.trim().orEmpty()
+            val lang = etSarvamLang?.text?.toString()?.trim().orEmpty().ifBlank { "hi-IN" }
+            val speaker = etSarvamSpeaker?.text?.toString()?.trim().orEmpty().ifBlank { "shubh" }
+
+            KVUtils.setSarvamApiKey(key)
+            KVUtils.setSarvamLanguageCode(lang)
+            KVUtils.setSarvamSpeaker(speaker)
+
+            Toast.makeText(this, "Sarvam Voice Engine settings saved!", Toast.LENGTH_SHORT).show()
+        }
+
+        // Card 4: Mem0 AI Cloud Memory binding
+        val etMem0Key = findViewById<EditText>(R.id.etMem0ApiKeyConfig)
+        val btnSaveMem0 = findViewById<View>(R.id.btnSaveMem0Config)
+        val tvMem0Status = findViewById<TextView>(R.id.tvMem0StatusHint)
+
+        etMem0Key?.setText(KVUtils.getMem0ApiKey())
+        val currentMem0Key = KVUtils.getMem0ApiKey()
+        if (currentMem0Key.isNotBlank()) {
+            tvMem0Status?.text = "● Status: Mem0 Cloud Active"
+            tvMem0Status?.setTextColor(getColor(R.color.colorSuccessPrimary))
+        } else {
+            tvMem0Status?.text = "● Status: Using Local Markdown Vault (Fallback)"
+            tvMem0Status?.setTextColor(Color.parseColor("#8b949e"))
+        }
+
+        btnSaveMem0?.setOnClickListener {
+            val key = etMem0Key?.text?.toString()?.trim().orEmpty()
+            KVUtils.setMem0ApiKey(key)
+            HybridMemoryRepository.refreshActiveSource()
+            if (key.isNotBlank()) {
+                tvMem0Status?.text = "● Status: Mem0 Cloud Active"
+                tvMem0Status?.setTextColor(getColor(R.color.colorSuccessPrimary))
+                Toast.makeText(this, "Mem0 API Key saved!", Toast.LENGTH_SHORT).show()
+            } else {
+                tvMem0Status?.text = "● Status: Using Local Markdown Vault (Fallback)"
+                tvMem0Status?.setTextColor(Color.parseColor("#8b949e"))
+                Toast.makeText(this, "Mem0 API Key cleared; using local vault", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // Card 2: Interaction Model Name update
+        val tvInteractionModel = findViewById<TextView>(R.id.tvVoiceInteractionModelName)
+        val interactionModelId = KVUtils.getInteractionModelId().ifBlank { "gemini-3.5-flash-lite" }
+        val isOpenRouterRoute = KVUtils.isRouteViaOpenRouter() || interactionModelId.contains("/")
+        val interactionRouteTag = if (isOpenRouterRoute) " (OpenRouter)" else " (Gemini API)"
+        tvInteractionModel?.text = "$interactionModelId$interactionRouteTag"
+
+        // Card 5: OpenRouter Global Fallback Switch
+        val switchOpenRouter = findViewById<SwitchCompat>(R.id.switchOpenRouterRouting)
+        switchOpenRouter?.isChecked = KVUtils.isRouteViaOpenRouter()
+        switchOpenRouter?.setOnCheckedChangeListener { _, isChecked ->
+            KVUtils.setRouteViaOpenRouter(isChecked)
+            Toast.makeText(
+                this,
+                if (isChecked) "OpenRouter Global Fallback Routing Enabled" else "OpenRouter Global Fallback Routing Disabled",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+
         // Apply theme to active model card text
         activeModelName.setTextColor(tc.aiText)
         activeModelMeta.setTextColor(Color.parseColor("#8b949e"))
@@ -118,8 +191,10 @@ class LlmConfigActivity : BaseActivity() {
         } else {
             val cloudModel = resolvedConfig.activeCloud.modelName
             if (cloudModel.isNotEmpty()) {
-                activeModelName.text = cloudModel
-                val providerName = resolvedConfig.activeCloud.provider.displayName
+                val isOpenRouter = KVUtils.isRouteViaOpenRouter() || resolvedConfig.activeCloud.provider == CloudProvider.OPENROUTER
+                val routeTag = if (isOpenRouter) " (OpenRouter)" else ""
+                activeModelName.text = "$cloudModel$routeTag"
+                val providerName = if (isOpenRouter) "OpenRouter" else resolvedConfig.activeCloud.provider.displayName
                 activeModelMeta.text = "$providerName · Cloud"
                 activeModelStatus.text = "● Connected"
                 activeModelStatus.setTextColor(getColor(R.color.colorSuccessPrimary))
