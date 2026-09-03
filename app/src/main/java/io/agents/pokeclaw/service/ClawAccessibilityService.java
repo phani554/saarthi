@@ -424,6 +424,45 @@ public class ClawAccessibilityService extends AccessibilityService {
     }
 
     /**
+     * Triggers IME action or clicks search submit button to execute search.
+     */
+    public boolean performImeAction(AccessibilityNodeInfo node) {
+        if (node != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                if (node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId())) {
+                    return true;
+                }
+            }
+            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+            node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+        }
+
+        // Search for magnifier/submit buttons in active window
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null) {
+            String[] submitIds = new String[]{
+                    "in.amazon.mShop.android.shopping:id/chrome_action_bar_search_type_search",
+                    "com.amazon.mShop.android.shopping:id/chrome_action_bar_search_type_search",
+                    "in.amazon.mShop.android.shopping:id/rs_search_src_text",
+                    "com.amazon.mShop.android.shopping:id/rs_search_src_text",
+                    "search_button",
+                    "search_icon"
+            };
+            for (String submitId : submitIds) {
+                List<AccessibilityNodeInfo> matches = root.findAccessibilityNodeInfosByViewId(submitId);
+                if (matches != null) {
+                    for (AccessibilityNodeInfo match : matches) {
+                        if (match.isVisibleToUser()) {
+                            return clickNode(match);
+                        }
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
      * Collects a tree representation of the current screen for AI analysis.
      */
     /** Node metadata container for informative tool feedback & resilient tapping */

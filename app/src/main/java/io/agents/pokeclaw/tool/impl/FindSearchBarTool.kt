@@ -34,7 +34,7 @@ class FindSearchBarTool : BaseTool() {
         val query = optionalString(params, "query", "").trim()
 
         if (query.isNotEmpty()) {
-            val fastResult = EcommerceAutomationHelper.fastSearchAndAddToCart(service, query)
+            val fastResult = EcommerceAutomationHelper.fastSearch(service, query)
             if (fastResult.isSuccess) {
                 return fastResult
             }

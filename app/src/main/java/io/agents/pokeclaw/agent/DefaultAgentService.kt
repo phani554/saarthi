@@ -93,7 +93,7 @@ class DefaultAgentService : AgentService {
             "find_search_bar", "add_to_cart"
         )
         /** ms to wait for UI to settle before capturing screen after an action */
-        private const val SCREEN_SETTLE_MS = 1000L
+        private const val SCREEN_SETTLE_MS = 700L
 
         /** Whether to write raw network request/response data to sandbox cache files for debugging */
         @JvmField

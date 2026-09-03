@@ -12,13 +12,35 @@ import io.agents.pokeclaw.utils.NodeFinder
 import io.agents.pokeclaw.utils.XLog
 
 /**
- * Ultra-fast E-Commerce & Quick Commerce Automation Engine for Blinkit, Zepto, Flipkart Minutes, Amazon, etc.
+ * Ultra-fast E-Commerce & Quick Commerce Automation Engine for Blinkit, Zepto, Flipkart Minutes, Amazon (IN/US), etc.
  * Performs initial cart inspection first to skip already added items (halving execution time),
- * and combines search bar navigation, query typing, product search, and cart addition in 1 fast step (< 100ms).
+ * immediately skips and reports out-of-stock items, and combines search bar navigation and cart addition in 1 fast step (< 100ms).
  */
 object EcommerceAutomationHelper {
 
     private const val TAG = "EcommerceHelper"
+
+    /**
+     * Fast pure search without attempting Add to Cart.
+     */
+    fun fastSearch(service: ClawAccessibilityService, query: String): ToolResult {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return ToolResult.error("Query is blank")
+
+        val root = service.rootInActiveWindow
+        val pkg = root?.packageName?.toString().orEmpty().lowercase()
+
+        if (pkg.contains("amazon")) {
+            return AmazonAutomationDriver.searchOnly(service, cleanQuery)
+        }
+
+        val typed = SearchBarService.navigateAndType(service, cleanQuery)
+        return if (typed) {
+            ToolResult.success("Searched for '$cleanQuery'")
+        } else {
+            ToolResult.error("Search bar unavailable on active screen")
+        }
+    }
 
     /**
      * Fast 1-step Search + Add to Cart in < 150ms.
@@ -29,9 +51,15 @@ object EcommerceAutomationHelper {
 
         XLog.i(TAG, "fastSearchAndAddToCart: starting fast 1-step order for '$cleanQuery'")
 
-        // 1. Switch Flipkart to Minutes mode if on Flipkart
         val root = service.rootInActiveWindow
-        val pkg = root?.packageName?.toString().orEmpty()
+        val pkg = root?.packageName?.toString().orEmpty().lowercase()
+
+        // Dedicated driver for Amazon India & Global
+        if (pkg.contains("amazon")) {
+            return AmazonAutomationDriver.searchAndAddToCart(service, cleanQuery)
+        }
+
+        // 1. Switch Flipkart to Minutes mode if on Flipkart
         if (pkg == "com.flipkart.android") {
             NodeFinder.ensureFlipkartMinutesMode(service)
         }
@@ -68,7 +96,8 @@ object EcommerceAutomationHelper {
     }
 
     /**
-     * Process multi-product order list directly in < 500ms total.
+     * Process multi-product order list directly.
+     * Skips out-of-stock items immediately and reports them cleanly in the summary.
      */
     fun processMultiProductOrderList(service: ClawAccessibilityService, items: List<String>): ToolResult {
         if (items.isEmpty()) return ToolResult.error("Item list is empty")
@@ -93,11 +122,15 @@ object EcommerceAutomationHelper {
 
         val successItems = mutableListOf<String>()
         val failedItems = mutableListOf<String>()
+        val outOfStockItems = mutableListOf<String>()
 
         for (item in itemsToAdd) {
             val result = fastSearchAndAddToCart(service, item)
             if (result.isSuccess) {
                 successItems.add(item)
+            } else if (result.error?.contains("OUT OF STOCK", ignoreCase = true) == true) {
+                XLog.w(TAG, "Item '$item' is OUT OF STOCK — skipping immediately and reporting")
+                outOfStockItems.add(item)
             } else {
                 failedItems.add(item)
             }
@@ -105,11 +138,14 @@ object EcommerceAutomationHelper {
 
         val summary = buildString {
             append("Cart Order Progress: Added ").append(successItems.size).append(" items (").append(successItems.joinToString(", ")).append(").")
+            if (outOfStockItems.isNotEmpty()) {
+                append(" Skipped ").append(outOfStockItems.size).append(" out-of-stock items: (").append(outOfStockItems.joinToString(", ")).append(").")
+            }
             if (items.size > itemsToAdd.size) {
                 append(" Skipped ").append(items.size - itemsToAdd.size).append(" items already in cart.")
             }
             if (failedItems.isNotEmpty()) {
-                append(" Could not add ").append(failedItems.size).append(" items (").append(failedItems.joinToString(", ")).append(").")
+                append(" Could not add ").append(failedItems.size).append(" items: (").append(failedItems.joinToString(", ")).append(").")
             }
         }
 

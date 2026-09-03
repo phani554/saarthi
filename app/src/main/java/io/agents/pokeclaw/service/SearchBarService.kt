@@ -15,7 +15,7 @@ import io.agents.pokeclaw.utils.NodeFinder
 import io.agents.pokeclaw.utils.XLog
 
 /**
- * Ultra-fast search bar navigation service for WhatsApp, Blinkit, Amazon, Flipkart, and generic apps.
+ * Ultra-fast search bar navigation service for WhatsApp, Blinkit, Amazon (IN/US), Flipkart, and generic apps.
  * Bypasses full accessibility tree parsing when searching for products/contacts with event-driven 30ms polling.
  */
 object SearchBarService {
@@ -39,10 +39,21 @@ object SearchBarService {
     )
 
     private val AMAZON_SEARCH_IDS = arrayOf(
+        "in.amazon.mShop.android.shopping:id/rs_search_src_text",
+        "in.amazon.mShop.android.shopping:id/chrome_search_hint_view",
+        "in.amazon.mShop.android.shopping:id/search_textbox",
+        "in.amazon.mShop.android.shopping:id/iss_search_dropdown_item_text",
+        "in.amazon.mShop.android.shopping:id/chrome_action_bar_search_type_search",
+        "in.amazon.mShop.android.shopping:id/auto_complete_text_view",
         "com.amazon.mShop.android.shopping:id/rs_search_src_text",
         "com.amazon.mShop.android.shopping:id/chrome_search_hint_view",
         "com.amazon.mShop.android.shopping:id/search_textbox",
-        "com.amazon.mShop.android.shopping:id/iss_search_dropdown_item_text"
+        "com.amazon.mShop.android.shopping:id/iss_search_dropdown_item_text",
+        "com.amazon.mShop.android.shopping:id/chrome_action_bar_search_type_search",
+        "com.amazon.mShop.android.shopping:id/auto_complete_text_view",
+        "rs_search_src_text", "search_textbox", "chrome_search_hint_view",
+        "auto_complete_text_view", "search_input", "chrome_search_entry",
+        "nav_search_bar", "search_src_text"
     )
 
     private val FLIPKART_SEARCH_IDS = arrayOf(
@@ -73,11 +84,11 @@ object SearchBarService {
         }
 
         // 1. Package-specific ID lookup
-        val targetIds = when (pkgName) {
-            "com.whatsapp" -> WHATSAPP_SEARCH_IDS
-            "com.grofers.customerapp" -> BLINKIT_SEARCH_IDS
-            "com.amazon.mShop.android.shopping" -> AMAZON_SEARCH_IDS
-            "com.flipkart.android" -> FLIPKART_SEARCH_IDS
+        val targetIds = when {
+            pkgName == "com.whatsapp" -> WHATSAPP_SEARCH_IDS
+            pkgName == "com.grofers.customerapp" -> BLINKIT_SEARCH_IDS
+            pkgName.contains("amazon") -> AMAZON_SEARCH_IDS
+            pkgName == "com.flipkart.android" -> FLIPKART_SEARCH_IDS
             else -> emptyArray()
         }
 
@@ -170,10 +181,45 @@ object SearchBarService {
 
         if (success) {
             XLog.i(TAG, "navigateAndType: query '$query' set cleanly via ACTION_SET_TEXT")
+
+            val root = service.rootInActiveWindow
+            val pkg = root?.packageName?.toString().orEmpty().lowercase()
+
+            if (pkg.contains("amazon")) {
+                var suggestion: AccessibilityNodeInfo? = null
+                val deadline = System.currentTimeMillis() + 180L
+                while (System.currentTimeMillis() < deadline) {
+                    val freshRoot = service.rootInActiveWindow
+                    if (freshRoot != null) {
+                        suggestion = NodeFinder.findNodeByTextContains(freshRoot, query.lowercase())
+                        if (suggestion == null) {
+                            suggestion = NodeFinder.findNodeByIdOrText(freshRoot,
+                                "iss_search_dropdown_item_text", "sac-suggestion-row", "iss_suggestion_text"
+                            )
+                        }
+                    }
+                    if (suggestion != null) break
+                    try { Thread.sleep(20L) } catch (_: Exception) { break }
+                }
+
+                if (suggestion != null) {
+                    val clickable = NodeFinder.findClickableAncestor(suggestion) ?: suggestion
+                    val clicked = service.clickNode(clickable)
+                    XLog.i(TAG, "navigateAndType Amazon: clicked suggestion dropdown item, result=$clicked")
+                    if (clicked) return true
+                }
+
+                val submitted = service.performImeAction(searchNode)
+                XLog.i(TAG, "navigateAndType Amazon: performImeAction fallback result=$submitted")
+                return true
+            }
+
             try {
                 service.sendKeyEvent(KeyEvent.KEYCODE_ENTER)
             } catch (_: Exception) {}
-            service.dismissKeyboard()
+            if (!pkg.contains("amazon")) {
+                service.dismissKeyboard()
+            }
             return true
         }
 

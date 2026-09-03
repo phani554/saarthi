@@ -21,7 +21,7 @@ abstract class BaseTool {
         val WAIT_AFTER_PARAM = ToolParameter(
             "wait_after",
             "integer",
-            "Optional: milliseconds to wait after this action completes (e.g. 1000 for page load & UI settle). Default 1000.",
+            "Optional: milliseconds to wait after this action completes for UI settle (e.g. 700). Default 700.",
             false
         )
     }
@@ -44,15 +44,15 @@ abstract class BaseTool {
     }
 
     /**
-     * Execute the tool with fast 1.0s UI settle pause for maximum perception accuracy and clean screen tree capture.
+     * Execute the tool with tuned 700ms UI settle pause for maximum perception accuracy across all major shopping sites.
      * Called by ToolRegistry.executeTool().
      */
     fun executeWithWaitAfter(params: @JvmSuppressWildcards Map<String, Any>): ToolResult {
         val result = execute(params)
-        val waitMs = optionalLong(params, "wait_after", 1000L)
+        val waitMs = optionalLong(params, "wait_after", 700L)
         if (waitMs > 0 && getName() in listOf("tap", "tap_node", "find_and_tap", "input_text", "swipe", "open_app", "add_to_cart")) {
             try {
-                Thread.sleep(Math.min(waitMs, 1500L))
+                Thread.sleep(Math.min(waitMs, 1000L))
             } catch (_: InterruptedException) {
                 Thread.currentThread().interrupt()
             }

@@ -157,10 +157,16 @@ object TaskShortcuts {
         }
 
         // --- Open [known app by keyword] ---
-        // Check known packages map first (exact keyword match inside the task string)
-        for ((keyword, pkg) in KNOWN_PACKAGES) {
-            if (t.contains(keyword)) {
-                return launchPackage(context, pkg, keyword)
+        // Only trigger direct launch if task is an explicit open command and not an in-app action (e.g. "search for shoes on amazon")
+        val isActionTask = t.contains("search") || t.contains("buy") || t.contains("order") ||
+                t.contains("check") || t.contains("send") || t.contains("find") || t.contains("add") ||
+                t.contains("call") || t.contains("type") || t.contains("forward") || t.contains("read")
+
+        if (!isActionTask) {
+            for ((keyword, pkg) in KNOWN_PACKAGES) {
+                if (t == keyword || t == "open $keyword" || t == "launch $keyword" || t == "start $keyword" || t == "go to $keyword") {
+                    return launchPackage(context, pkg, keyword)
+                }
             }
         }
 

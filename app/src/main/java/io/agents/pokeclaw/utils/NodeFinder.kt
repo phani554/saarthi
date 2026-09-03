@@ -51,16 +51,38 @@ object NodeFinder {
         val resId = root?.viewIdResourceName?.lowercase().orEmpty()
         val text = root?.text?.toString().orEmpty().lowercase()
         val desc = root?.contentDescription?.toString().orEmpty().lowercase()
+        val hint = root?.hintText?.toString().orEmpty().lowercase()
 
         for (id in identifiers) {
-            val lowerId = id.lowercase()
-            if (resId.contains(lowerId) || text == lowerId || desc == lowerId) {
+            val lowerId = id.lowercase().trim()
+            if (lowerId.isEmpty()) continue
+            if (resId.contains(lowerId) || text.contains(lowerId) || desc.contains(lowerId) || hint.contains(lowerId)) {
                 return root
             }
         }
 
         for (i in 0 until (root?.childCount ?: 0)) {
             val child = findNodeByIdOrText(root?.getChild(i), *identifiers)
+            if (child != null) return child
+        }
+        return null
+    }
+
+    fun findNodeByTextContains(root: AccessibilityNodeInfo?, vararg substrings: String): AccessibilityNodeInfo? {
+        if (nodeInvalid(root)) return null
+
+        val text = root?.text?.toString().orEmpty().lowercase()
+        val desc = root?.contentDescription?.toString().orEmpty().lowercase()
+
+        for (sub in substrings) {
+            val lowerSub = sub.lowercase().trim()
+            if (lowerSub.isNotEmpty() && (text.contains(lowerSub) || desc.contains(lowerSub))) {
+                return root
+            }
+        }
+
+        for (i in 0 until (root?.childCount ?: 0)) {
+            val child = findNodeByTextContains(root?.getChild(i), *substrings)
             if (child != null) return child
         }
         return null
