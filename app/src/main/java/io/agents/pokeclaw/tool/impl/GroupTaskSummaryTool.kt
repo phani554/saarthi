@@ -4,6 +4,7 @@
 package io.agents.pokeclaw.tool.impl
 
 import android.view.accessibility.AccessibilityNodeInfo
+import io.agents.pokeclaw.agent.llm.LlmSessionManager
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.tool.BaseTool
 import io.agents.pokeclaw.tool.ToolParameter
@@ -79,10 +80,30 @@ class GroupTaskSummaryTool : BaseTool() {
         collectChatMessages(root, messages)
 
         if (messages.isEmpty()) {
-            return ToolResult.success("Opened group '$groupName', but no recent text messages were visible on screen.")
+            return ToolResult.success("Opened chat '$groupName', but no recent text messages were visible on screen.")
         }
 
-        // 4. Extract actionable tasks and summary
+        // Run AI single-shot summarization on collected chat transcript
+        val transcript = messages.joinToString("\n").take(3000)
+        val systemPrompt = "You are an intelligent WhatsApp Chat Summarizer."
+        val prompt = """The following are recent messages extracted from the WhatsApp chat '$groupName':
+$transcript
+
+Task: Provide a concise, clear 3-bullet-point summary of the main topics discussed, decisions made, and pending tasks or action items in this chat.
+Keep the summary plain, clear, and direct. Output ONLY the 3 bullet points."""
+
+        val aiSummary = try {
+            LlmSessionManager.singleShotCloud(systemPrompt, prompt, 0.2)
+                ?: LlmSessionManager.singleShotLocal(systemPrompt, prompt, 0.2)
+        } catch (e: Exception) {
+            null
+        }
+
+        if (!aiSummary.isNullOrBlank()) {
+            return ToolResult.success("### WhatsApp Chat Summary for '$groupName':\n\n$aiSummary")
+        }
+
+        // Fallback: Keyword extraction
         val actionItems = mutableListOf<String>()
         for (msg in messages) {
             val lower = msg.lowercase()
@@ -95,7 +116,7 @@ class GroupTaskSummaryTool : BaseTool() {
         }
 
         val sb = StringBuilder()
-        sb.append("### Gist of Tasks for Group: '").append(groupName).append("'\n\n")
+        sb.append("### Gist of Tasks for Chat: '").append(groupName).append("'\n\n")
         sb.append("**Total Recent Messages Inspected**: ").append(messages.size).append("\n\n")
 
         if (actionItems.isNotEmpty()) {

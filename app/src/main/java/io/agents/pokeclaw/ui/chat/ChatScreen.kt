@@ -1487,43 +1487,21 @@ private fun QuickTasksPanel(
 ) {
     var expanded by remember { mutableStateOf(true) }
 
-    // Cloud-only tasks at the top (multi-step, Siri/GA can't do these)
-    // Cloud-only tasks (multi-step, Siri can't do)
-    val cloudOnlyTasks = listOf(
-        "🦞 Open Reddit and search for pokeclaw",
-        "🎬 Search YouTube for funny cat fails",
-        "📦 Install Telegram from Play Store",
-        "🐦 Check what's trending on Twitter and tell me",
-        "💬 Check my latest WhatsApp chat and summarize it",
-        "📋 Copy the latest email subject and Google it",
-        "📧 Write an email saying I'll be late today",
+    // Real Saarthi use cases for quick tasks
+    val saarthiTasks = listOf(
+        "💬 Send a message to Mom on WhatsApp",
+        "📞 Call Mom on WhatsApp",
+        "📊 Summarize my WhatsApp chat with Mom",
+        "🛒 Order Amul Milk on Blinkit",
+        "🖊️ Order a pen from Flipkart Minutes",
+        "🍅 Check tomato prices on Flipkart Minutes",
+        "🔋 How much battery do I have left?",
+        "📋 Read my clipboard and summarize it",
+        "🔔 Check unread notifications",
+        "📱 List my installed apps",
+        "💾 Check available storage space",
     )
-    // Reasoning tasks (1-2 tool calls + LLM analysis) — impressive, work on both
-    val reasoningTasks = listOf(
-        "📵 Check my notifications — anything important?",
-        "📋 Read my clipboard and explain what it says",
-        "🧹 Check my storage and apps — what can I delete?",
-        "🔔 Read my notifications and summarize",
-        "🔋 Check my battery and tell me if I need to charge",
-    )
-    // Simple deterministic tasks (1 tool, no reasoning)
-    val deterministicTasks = listOf(
-        "💬 Send hi to Mom on WhatsApp",
-        "📱 What apps do I have?",
-        "🌡️ How hot is my phone?",
-        "🔵 Is bluetooth on?",
-        "🔋 How much battery left?",
-        "📞 Call Mom",
-        "💾 How much storage do I have?",
-        "📲 What Android version am I running?",
-    )
-    // Cloud: cloud-only → reasoning → deterministic
-    // Local: reasoning first (impressive) → deterministic
-    val quickTasks = if (isLocalModel) {
-        reasoningTasks + deterministicTasks
-    } else {
-        cloudOnlyTasks + reasoningTasks + deterministicTasks
-    }
+    val quickTasks = saarthiTasks
 
     Column(
         modifier = Modifier.background(colors.surface),

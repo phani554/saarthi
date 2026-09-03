@@ -6,6 +6,7 @@ package io.agents.pokeclaw.tool.impl
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.view.accessibility.AccessibilityNodeInfo
 import io.agents.pokeclaw.ClawApplication
 import io.agents.pokeclaw.agent.MultiModelAgentOrchestrator
 import io.agents.pokeclaw.agent.knowledge.ContactAliasResolver
@@ -13,6 +14,8 @@ import io.agents.pokeclaw.service.VoiceManager
 import io.agents.pokeclaw.tool.BaseTool
 import io.agents.pokeclaw.tool.ToolParameter
 import io.agents.pokeclaw.tool.ToolResult
+import io.agents.pokeclaw.utils.ContactListUiUtils
+import io.agents.pokeclaw.utils.ContactMatchUtils
 import io.agents.pokeclaw.utils.XLog
 
 /**
@@ -98,13 +101,104 @@ class PlaceCallTool : BaseTool() {
         val modeText = if (isVideo) "WhatsApp Video Call" else "WhatsApp Voice Call"
         VoiceManager.speakNative("Starting $modeText with $contact...", flush = true)
 
-        val launchIntent = context.packageManager.getLaunchIntentForPackage("com.whatsapp")
-        if (launchIntent != null) {
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(launchIntent)
+        val service = requireAccessibilityService()
+        if (service == null) {
+            val launchIntent = context.packageManager.getLaunchIntentForPackage("com.whatsapp")
+            if (launchIntent != null) {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(launchIntent)
+            }
+            MultiModelAgentOrchestrator.killAllTasks()
+            return ToolResult.success("Opened WhatsApp for $modeText with $contact.")
         }
 
+        // 1. Open WhatsApp
+        val opened = OpenAppTool.openAppWithInterceptHandling(service, "com.whatsapp")
+        if (!opened) {
+            return ToolResult.error("Failed to open WhatsApp")
+        }
+        try { Thread.sleep(1200) } catch (_: InterruptedException) {}
+
+        // 2. Open chatroom for target contact
+        if (!ContactListUiUtils.prepareForContactLookup(service, "com.whatsapp", 3, 800)) {
+            return ToolResult.error("Could not reach searchable WhatsApp chat list")
+        }
+
+        val normalized = ContactMatchUtils.buildNormalizedAliases(contact)
+        val digit = ContactMatchUtils.buildDigitAliases(contact)
+        val chatOpened = ContactListUiUtils.searchOrScrollAndFindAndClick(service, contact, normalized, digit, 8, 800)
+        if (!chatOpened) {
+            return ToolResult.error("Could not find contact '$contact' in WhatsApp")
+        }
+
+        try { Thread.sleep(1000) } catch (_: InterruptedException) {}
+
+        // 3. Locate and tap call icon in top action bar
+        val root = service.rootInActiveWindow
+        if (root != null) {
+            val callBtn = findCallButtonNode(root, isVideo)
+            if (callBtn != null) {
+                service.clickNode(callBtn)
+                XLog.i("PlaceCallTool", "Tapped $modeText icon for $contact")
+                try { Thread.sleep(1000) } catch (_: InterruptedException) {}
+
+                // Handle potential confirmation dialog ("Start video call?")
+                val dialogRoot = service.rootInActiveWindow
+                if (dialogRoot != null) {
+                    val confirmBtn = findCallConfirmNode(dialogRoot)
+                    if (confirmBtn != null) {
+                        service.clickNode(confirmBtn)
+                        XLog.i("PlaceCallTool", "Tapped call confirmation button")
+                    }
+                }
+            } else {
+                XLog.w("PlaceCallTool", "Call icon not found in action bar, opened chatroom")
+            }
+        }
+
+        VoiceManager.stop()
         MultiModelAgentOrchestrator.killAllTasks()
         return ToolResult.success("Initiated $modeText with $contact on WhatsApp.")
+    }
+
+    private fun findCallButtonNode(root: AccessibilityNodeInfo, isVideo: Boolean): AccessibilityNodeInfo? {
+        val targetId = if (isVideo) "com.whatsapp:id/video_call_btn" else "com.whatsapp:id/voice_call_btn"
+        val altId = if (isVideo) "com.whatsapp:id/action_video_call" else "com.whatsapp:id/action_voice_call"
+        val keyword = if (isVideo) "video" else "voice"
+
+        val nodes = root.findAccessibilityNodeInfosByViewId(targetId)
+        if (!nodes.isNullOrEmpty()) return nodes[0]
+
+        val altNodes = root.findAccessibilityNodeInfosByViewId(altId)
+        if (!altNodes.isNullOrEmpty()) return altNodes[0]
+
+        return searchNodeByDesc(root, keyword)
+    }
+
+    private fun findCallConfirmNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        return searchNodeByTextOrDesc(root, "Call") ?: searchNodeByTextOrDesc(root, "Start")
+    }
+
+    private fun searchNodeByDesc(node: AccessibilityNodeInfo?, keyword: String): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+        if (desc.contains(keyword) && (desc.contains("call") || desc.contains("button"))) return node
+        for (i in 0 until node.childCount) {
+            val res = searchNodeByDesc(node.getChild(i), keyword)
+            if (res != null) return res
+        }
+        return null
+    }
+
+    private fun searchNodeByTextOrDesc(node: AccessibilityNodeInfo?, textStr: String): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val txt = node.text?.toString()?.lowercase() ?: ""
+        val desc = node.contentDescription?.toString()?.lowercase() ?: ""
+        if ((txt == textStr.lowercase() || desc == textStr.lowercase()) && node.isClickable) return node
+        for (i in 0 until node.childCount) {
+            val res = searchNodeByTextOrDesc(node.getChild(i), textStr)
+            if (res != null) return res
+        }
+        return null
     }
 }

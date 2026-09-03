@@ -44,6 +44,7 @@ object ToolRegistry {
         register(GetDeviceInfoTool())
         register(GetNotificationsTool())
         register(MakeCallTool())
+        register(SearchContactsTool())
         register(FinishTool())
         // Knowledge Base tools — shared vault available in all modes
         register(KbWriteTool())

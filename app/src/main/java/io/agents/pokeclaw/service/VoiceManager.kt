@@ -186,18 +186,14 @@ object VoiceManager : TextToSpeech.OnInitListener {
     private fun speakNativeInternal(cleanText: String, flush: Boolean) {
         isPlayingAudio = true
         _engineState.value = VoiceEngineState.Speaking
-        val locale = when (lastDetectedLanguageCode) {
-            "en-IN" -> Locale.ENGLISH
-            "hi-IN" -> Locale("hi", "IN")
-            "te-IN" -> Locale("te", "IN")
-            "ta-IN" -> Locale("ta", "IN")
-            "bn-IN" -> Locale("bn", "IN")
-            else -> Locale.getDefault()
-        }
-        tts?.setLanguage(locale)
-        val mode = if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+        // Force English locale for clean, natural task execution pronunciation
+        tts?.setLanguage(Locale.US)
+        tts?.setSpeechRate(1.0f)
+        tts?.setPitch(1.0f)
+        // Always flush previous utterances when new speech arrives to prevent queue stacking/muttering
+        val mode = TextToSpeech.QUEUE_FLUSH
         tts?.speak(cleanText, mode, null, "saarthi_tts_" + System.currentTimeMillis())
-        XLog.i(TAG, "Speaking via Native TTS (lang=$lastDetectedLanguageCode, flush=$flush): '$cleanText'")
+        XLog.i(TAG, "Speaking via Native TTS (lang=Locale.US, flush=true): '$cleanText'")
         mainHandler.postDelayed({
             isPlayingAudio = false
             if (_engineState.value == VoiceEngineState.Speaking) {
@@ -224,7 +220,11 @@ object VoiceManager : TextToSpeech.OnInitListener {
             if (isTtsInitialized) {
                 isPlayingAudio = true
                 _engineState.value = VoiceEngineState.Speaking
-                val mode = if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+                tts?.setLanguage(Locale.US)
+                tts?.setSpeechRate(1.0f)
+                tts?.setPitch(1.0f)
+                // Always flush to avoid queued speech collision
+                val mode = TextToSpeech.QUEUE_FLUSH
                 tts?.speak(cleanText, mode, null, "saarthi_native_" + System.currentTimeMillis())
                 XLog.i(TAG, "Speaking via Native TTS: '$cleanText'")
                 mainHandler.postDelayed({
@@ -359,6 +359,8 @@ object VoiceManager : TextToSpeech.OnInitListener {
             .replace(Regex("""https?://\S+"""), "")        // Remove URLs
             .replace(Regex("""[*#_~`\[\]]"""), "")        // Remove markdown symbols
             .replace(Regex("""[\u2600-\u26FF\u2700-\u27BF]"""), "") // Remove emojis
+            .replace(Regex("""[✅⚠️●•✓|▪▫▸▶►]"""), "") // Remove checkmarks and bullet symbols
+            .replace(Regex("""^\s*[-*+]\s+""", RegexOption.MULTILINE), "") // Remove list bullets
             .replace(Regex("""\s+"""), " ")
             .trim()
     }

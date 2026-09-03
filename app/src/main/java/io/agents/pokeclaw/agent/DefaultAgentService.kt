@@ -841,6 +841,16 @@ class DefaultAgentService : AgentService {
                     return
                 }
 
+                // Call tools → immediately terminate loop to stay on active call screen without redirecting or speaking finish text
+                if ((toolName == "place_call" || toolName == "make_call") && result.isSuccess) {
+                    XLog.i(TAG, "Call tool executed successfully, terminating loop immediately to stay on call screen")
+                    VoiceManager.stop()
+                    MultiModelAgentOrchestrator.killAllTasks()
+                    val callData = result.data ?: "Call initiated."
+                    callback.onComplete(iterations, callData, totalTokens, actualModelName)
+                    return
+                }
+
                 // Opt-3: Auto-attach fresh screen state after action tools.
                 // LLM sees updated UI in the same tool result → can decide next step
                 // immediately without spending an extra 5 s inference round on get_screen_info.

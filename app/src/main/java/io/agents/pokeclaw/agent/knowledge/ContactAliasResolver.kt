@@ -3,6 +3,8 @@
 
 package io.agents.pokeclaw.agent.knowledge
 
+import android.provider.ContactsContract
+import io.agents.pokeclaw.ClawApplication
 import io.agents.pokeclaw.agent.llm.LlmSessionManager
 import io.agents.pokeclaw.utils.XLog
 
@@ -22,6 +24,13 @@ object ContactAliasResolver {
     fun resolve(rawName: String): String {
         val clean = rawName.trim()
         if (clean.isBlank()) return clean
+
+        // Fast local device contact lookup first
+        val deviceName = lookupDeviceContact(clean)
+        if (!deviceName.isNullOrBlank()) {
+            XLog.i(TAG, "ContactAliasResolver: fast device contact match '$clean' -> '$deviceName'")
+            return deviceName
+        }
 
         val memory = MemoryManager.getMemoryPromptSection()
 
@@ -52,6 +61,30 @@ Rules:
         } catch (e: Exception) {
             XLog.w(TAG, "ContactAliasResolver failed, returning raw name '$clean'", e)
             clean
+        }
+    }
+
+    private fun lookupDeviceContact(name: String): String? {
+        return try {
+            val ctx = ClawApplication.instance
+            val resolver = ctx.contentResolver
+            val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
+            val projection = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME)
+            val selection = "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?"
+            val args = arrayOf("%$name%")
+
+            resolver.query(uri, projection, selection, args, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val displayName = cursor.getString(0)
+                    if (!displayName.isNullOrBlank()) {
+                        return displayName
+                    }
+                }
+            }
+            null
+        } catch (e: Exception) {
+            XLog.w(TAG, "lookupDeviceContact error for '$name'", e)
+            null
         }
     }
 }

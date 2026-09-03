@@ -45,12 +45,13 @@ class WhatsAppForwardTool : BaseTool() {
 
         VoiceManager.speakNative("Forwarding message to $resolvedTarget on WhatsApp...", flush = true)
 
-        val launchIntent = context.packageManager.getLaunchIntentForPackage("com.whatsapp")
-        if (launchIntent != null) {
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(launchIntent)
-        }
+        val sendMessageTool = SendMessageTool()
+        val forwardParams = mapOf(
+            "contact" to resolvedTarget,
+            "message" to if (text.isNotBlank()) "[Forwarded]: $text" else "Forwarded Message",
+            "app" to "WhatsApp"
+        )
 
-        return ToolResult.success("Opened WhatsApp to forward message to $resolvedTarget.")
+        return sendMessageTool.execute(forwardParams)
     }
 }
