@@ -1,4 +1,4 @@
-// Copyright 2026 PokeClaw (agents.io). All rights reserved.
+// Copyright 2026 Saarthi (agents.io). All rights reserved.
 // Licensed under the Apache License, Version 2.0.
 
 package io.agents.pokeclaw.agent
@@ -12,11 +12,9 @@ import io.agents.pokeclaw.utils.XLog
 /**
  * 3-Tier Pipeline Router.
  *
- * Tier 1: Deterministic parser (regex) → 0 LLM calls
+ * Tier 1: Deterministic parser (regex) → 0 LLM calls (Memory updates, calls, messaging, intents)
  * Tier 2: LLM classifier (1 call) → routes to skill or agent
  * Tier 3: UI agent loop (3-30 calls) → full perception/reasoning/action
- *
- * 3-tier routing: deterministic → skill → agent loop.
  */
 class PipelineRouter(private val context: Context) {
 
@@ -24,7 +22,7 @@ class PipelineRouter(private val context: Context) {
         /** Tier 1: Execute Android intent directly */
         data class DirectIntent(val intent: Intent, val description: String) : Route()
 
-        /** Tier 1: Execute a tool directly (e.g., screenshot, back, home) */
+        /** Tier 1: Execute a tool directly (e.g., screenshot, memory update, back, home) */
         data class DirectTool(val toolName: String, val params: Map<String, Any>, val description: String) : Route()
 
         /** Tier 2: Execute a registered skill */
@@ -39,30 +37,17 @@ class PipelineRouter(private val context: Context) {
 
     /**
      * Route a user task through the 3-tier pipeline.
-     *
-     * @param task user's task text
-     * @return the routing decision
      */
     fun route(task: String): Route {
-        // Compound tasks (containing "and", "then", "after") should go to agent loop,
-        // not be partially handled by Tier 1 deterministic matching.
-        val lower = task.lowercase()
-        if (lower.contains(" and ") || lower.contains(" then ") || lower.contains(" after ")) {
-            XLog.i(TAG, "Compound task detected, skipping Tier 1: $task")
-            return Route.AgentLoop(task)
-        }
-
-        // Tier 1: Deterministic regex matching
+        // Tier 1: ALWAYS evaluate TaskParser first for memory updates, calls, messaging & direct tools (<10ms)
         val parseResult = TaskParser.parse(task)
         if (parseResult != null) {
             XLog.i(TAG, "Tier 1 match: ${parseResult.action} → ${parseResult.description}")
 
-            // Intent-based action (call, alarm, settings, URL)
             if (parseResult.intent != null) {
                 return Route.DirectIntent(parseResult.intent, parseResult.description)
             }
 
-            // Tool-based action (screenshot, back, home, open app)
             if (parseResult.toolName != null) {
                 return Route.DirectTool(
                     parseResult.toolName,
@@ -70,6 +55,13 @@ class PipelineRouter(private val context: Context) {
                     parseResult.description
                 )
             }
+        }
+
+        // Compound tasks (containing "and", "then", "after") go to agent loop if not resolved in Tier 1
+        val lower = task.lowercase()
+        if (lower.contains(" and ") || lower.contains(" then ") || lower.contains(" after ")) {
+            XLog.i(TAG, "Compound task detected, going to agent loop: $task")
+            return Route.AgentLoop(task)
         }
 
         // Tier 1.5: Skill trigger matching (deterministic, 0 LLM calls)
@@ -107,10 +99,6 @@ class PipelineRouter(private val context: Context) {
         return result.data ?: result.error ?: ""
     }
 
-    /**
-     * Extract parameter values from a task string using trigger patterns.
-     * E.g., "search for cat videos" + pattern "search for {query}" → {"query": "cat videos"}
-     */
     private fun extractSkillParams(task: String, patterns: List<String>): Map<String, String> {
         val lower = task.lowercase()
         for (pattern in patterns) {

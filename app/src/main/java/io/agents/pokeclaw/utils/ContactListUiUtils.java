@@ -3,6 +3,10 @@
 
 package io.agents.pokeclaw.utils;
 
+import android.accessibilityservice.AccessibilityService;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -12,6 +16,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
+import io.agents.pokeclaw.ClawApplication;
 import io.agents.pokeclaw.service.ClawAccessibilityService;
 
 /**
@@ -70,6 +75,13 @@ public final class ContactListUiUtils {
                     service.openApp(packageName);
                 }
             } else {
+                if (isOpenChatroom(root)) {
+                    XLog.w(TAG, "prepareForContactLookup: inside active open chatroom, pressing Back to return to Home Chats screen");
+                    service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+                    Thread.sleep(Math.max(settleMs, 300L));
+                    continue;
+                }
+
                 if (dismissBlockingOverlay(service, root, settleMs)) {
                     XLog.i(TAG, "prepareForContactLookup: dismissed overlay, re-checking readiness");
                     continue;
@@ -81,7 +93,7 @@ public final class ContactListUiUtils {
                 }
 
                 XLog.i(TAG, "prepareForContactLookup: screen not ready, pressing back");
-                service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK);
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
             }
 
             Thread.sleep(Math.max(settleMs, 700L));
@@ -162,7 +174,7 @@ public final class ContactListUiUtils {
                 break;
             }
 
-            service.performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK);
+            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
             Thread.sleep(Math.max(settleMs, 700L));
             if (!prepareForContactLookup(service, activePackage, 2, settleMs)) {
                 break;
@@ -192,7 +204,7 @@ public final class ContactListUiUtils {
 
             Rect bounds = new Rect();
             node.getBoundsInScreen(bounds);
-            int score = scoreCandidate(node, bounds);
+            int score = scoreCandidate(node, bounds, normalizedAliases);
 
             if (ContactMatchUtils.matchesCandidate(
                 node.getText() != null ? node.getText().toString() : null,
@@ -212,11 +224,22 @@ public final class ContactListUiUtils {
         return bestTextMatch != null ? bestTextMatch : bestDescMatch;
     }
 
-    private static int scoreCandidate(AccessibilityNodeInfo node, Rect bounds) {
+    private static int scoreCandidate(AccessibilityNodeInfo node, Rect bounds, Set<String> normalizedAliases) {
         int score = 0;
         if (node.isClickable()) score += 20;
         if (node.getText() != null && node.getText().length() > 0) score += 25;
         if (node.getContentDescription() != null && node.getContentDescription().length() > 0) score += 5;
+
+        // EXACT FULL MATCH SCORING (+1,000 points)
+        String nodeText = ContactMatchUtils.normalizeText(node.getText() != null ? node.getText().toString() : "");
+        if (normalizedAliases != null) {
+            for (String alias : normalizedAliases) {
+                if (!alias.isEmpty() && nodeText.equals(alias)) {
+                    score += 1000; // Exact full match wins over prefix matches like "Kamya Mom"
+                    break;
+                }
+            }
+        }
 
         // Prefer nodes in the upper search results area (Y between 150px and 800px)
         if (bounds.centerY() >= 150 && bounds.centerY() <= 800) {
@@ -359,6 +382,29 @@ public final class ContactListUiUtils {
             return clickContactNodeSafely(service, bestMatch) ? SearchAttemptResult.FOUND : SearchAttemptResult.NO_MATCH;
         }
 
+        // Multi-word fallback: if full query returned no search results, try key sub-terms locally
+        String[] words = cleanQuery.split("\\s+");
+        if (words.length > 1) {
+            XLog.i(TAG, "trySearchAndClick: query '" + cleanQuery + "' returned 0 matches, trying key sub-terms...");
+            for (String word : words) {
+                String cleanWord = word.trim();
+                if (cleanWord.length() < 3) continue;
+                if (cleanWord.equalsIgnoreCase("group") || cleanWord.equalsIgnoreCase("chat") || cleanWord.equalsIgnoreCase("contact")) continue;
+
+                XLog.i(TAG, "trySearchAndClick: fallback trying sub-term '" + cleanWord + "'");
+                clearText(searchField);
+                setText(searchField, cleanWord);
+                Thread.sleep(Math.max(settleMs, 500L));
+
+                root = service.getRootInActiveWindow();
+                bestMatch = findBestVisibleResultNode(root, normalizedAliases, digitAliases);
+                if (bestMatch != null) {
+                    XLog.i(TAG, "trySearchAndClick: sub-term '" + cleanWord + "' matched result text=" + bestMatch.getText() + " desc=" + bestMatch.getContentDescription());
+                    return clickContactNodeSafely(service, bestMatch) ? SearchAttemptResult.FOUND : SearchAttemptResult.NO_MATCH;
+                }
+            }
+        }
+
         XLog.i(TAG, "trySearchAndClick: no filtered result matched query");
         return SearchAttemptResult.NO_MATCH;
     }
@@ -387,11 +433,11 @@ public final class ContactListUiUtils {
 
         // Only fall back to clipboard paste if ACTION_SET_TEXT returned false
         try {
-            android.content.Context ctx = io.agents.pokeclaw.ClawApplication.Companion.getInstance();
-            android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
-                    ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            Context ctx = ClawApplication.Companion.getInstance();
+            ClipboardManager clipboard = (ClipboardManager)
+                    ctx.getSystemService(Context.CLIPBOARD_SERVICE);
             if (clipboard != null) {
-                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("search_query", text));
+                clipboard.setPrimaryClip(ClipData.newPlainText("search_query", text));
                 return node.performAction(AccessibilityNodeInfo.ACTION_PASTE);
             }
         } catch (Exception ignored) {}
@@ -421,8 +467,50 @@ public final class ContactListUiUtils {
         return candidate;
     }
 
+    public static boolean isOpenChatroom(AccessibilityNodeInfo root) {
+        if (root == null) return false;
+
+        boolean hasBackButton = NodeFinder.INSTANCE.findNodeByIdOrText(root,
+            "com.whatsapp:id/back", "action_bar_back", "navigate up", "back"
+        ) != null;
+
+        boolean hasMessageEntry = false;
+        List<AccessibilityNodeInfo> editables = new ArrayList<>();
+        collectEditTexts(root, editables);
+        for (AccessibilityNodeInfo edit : editables) {
+            Rect bounds = new Rect();
+            edit.getBoundsInScreen(bounds);
+            if (bounds.top > 1000) {
+                hasMessageEntry = true;
+                break;
+            }
+        }
+
+        boolean hasCallButtons = NodeFinder.INSTANCE.findNodeByIdOrText(root,
+            "com.whatsapp:id/video_call", "com.whatsapp:id/voice_call", "video call", "voice call"
+        ) != null;
+
+        return hasBackButton && (hasMessageEntry || hasCallButtons);
+    }
+
+    private static void collectEditTexts(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> results) {
+        if (node == null || !node.isVisibleToUser()) return;
+        if (node.isEditable() || (node.getClassName() != null && node.getClassName().toString().contains("EditText"))) {
+            results.add(node);
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) collectEditTexts(child, results);
+        }
+    }
+
     public static boolean isContactLookupReady(AccessibilityNodeInfo root) {
         if (root == null) return false;
+
+        // MUST NOT declare ready if inside an open chatroom!
+        if (isOpenChatroom(root)) {
+            return false;
+        }
 
         if (UiActionMatchUtils.findBestSearchField(root) != null) return true;
 

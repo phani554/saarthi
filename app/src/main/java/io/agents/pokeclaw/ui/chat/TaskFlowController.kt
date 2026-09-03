@@ -136,7 +136,28 @@ class TaskFlowController(
                         currentVoiceState = VoiceInteractionState.TASK_EXECUTING
                     }
                     VoiceInteractionState.TASK_EXECUTING -> {
-                        XLog.i(TAG, "Speech input ignored during active task execution")
+                        XLog.i(TAG, "Speech input received during active task execution: '$userSpeech'")
+                        val lower = userSpeech.lowercase().trim()
+                        val isCancelCommand = lower.contains("stop") || lower.contains("cancel") ||
+                                lower.contains("wait") || lower.contains("rok do") || lower.contains("bhai ruk") ||
+                                lower.contains("vaddu") || lower.contains("nayi") || lower.contains("halt")
+
+                        if (isCancelCommand) {
+                            XLog.w(TAG, "Voice stop command received during task execution — cancelling task immediately")
+                            appViewModel.stopTask()
+                            currentVoiceState = VoiceInteractionState.IDLE
+                            preTaskHistoryBuilder.clear()
+                            VoiceManager.speak("Task stopped.")
+                            activity.runOnUiThread {
+                                addSystem("Task cancelled via voice command.")
+                            }
+                        } else {
+                            XLog.i(TAG, "Voice redirection command received during active task — updating task goal to: '$userSpeech'")
+                            appViewModel.stopTask()
+                            currentVoiceState = VoiceInteractionState.PRE_TASK_CONFIRMATION
+                            preTaskHistoryBuilder.clear()
+                            processVoiceTurn(userSpeech)
+                        }
                     }
                 }
             } catch (e: Exception) {

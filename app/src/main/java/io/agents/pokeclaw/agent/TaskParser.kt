@@ -33,7 +33,9 @@ object TaskParser {
     fun parse(task: String, installedPackages: List<String> = emptyList()): ParseResult? {
         val lower = task.lowercase().trim()
 
-        return matchWhatsAppCall(lower, task)
+        return matchMemoryStatement(lower, task)
+            ?: matchWhatsAppCall(lower, task)
+            ?: matchSendMessage(lower, task)
             ?: matchCall(lower, task)
             ?: matchSms(lower, task)
             ?: matchAlarm(lower, task)
@@ -46,6 +48,26 @@ object TaskParser {
     }
 
     // ==================== Pattern Matchers ====================
+
+    private val MEMORY_STATEMENT_PATTERN = Regex(
+        """(?:remember\s+that\s+|note\s+that\s+|my\s+(?:favorite|preferred|project|address)\s+is\s+|set\s+my\s+|update\s+my\s+)(.+)""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun matchMemoryStatement(lower: String, original: String): ParseResult? {
+        val match = MEMORY_STATEMENT_PATTERN.find(original) ?: return null
+        val fact = match.groupValues[1].trim()
+        if (fact.isBlank()) return null
+
+        XLog.i(TAG, "TaskParser matched Memory Statement: '$fact'")
+        return ParseResult(
+            action = "update_memory",
+            intent = null,
+            toolName = "update_memory",
+            toolParams = mapOf("old_fact" to fact, "new_fact" to fact),
+            description = "Updated memory with '$fact'"
+        )
+    }
 
     private val WHATSAPP_CALL_PATTERN = Regex(
         """(?:open\s+a\s+|start\s+a\s+|make\s+a\s+)?whatsapp\s+(video|voice)?\s*call\s+(?:to\s+)?(.+)""", RegexOption.IGNORE_CASE
@@ -67,6 +89,29 @@ object TaskParser {
             toolName = "place_call",
             toolParams = mapOf("contact" to contact, "call_type" to callType),
             description = "Starting $callType with $contact"
+        )
+    }
+
+    private val SEND_MSG_PATTERN = Regex(
+        """(?:send\s+(?:a\s+)?message\s+(?:to\s+)?|send\s+hi\s+to\s+|tell\s+|text\s+)(.+?)\s+(?:saying|about|to|and\s+ask\s+her|and\s+ask\s+him|for)?\s+(.+)""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun matchSendMessage(lower: String, original: String): ParseResult? {
+        val match = SEND_MSG_PATTERN.find(original) ?: return null
+        val contact = match.groupValues[1].trim()
+        val msgText = match.groupValues[2].trim()
+
+        if (contact.isBlank() || msgText.isBlank()) return null
+
+        XLog.i(TAG, "TaskParser matched Send Message: contact='$contact', msg='$msgText'")
+
+        return ParseResult(
+            action = "send_message",
+            intent = null,
+            toolName = "send_message",
+            toolParams = mapOf("contact" to contact, "message" to msgText),
+            description = "Sending message to $contact"
         )
     }
 

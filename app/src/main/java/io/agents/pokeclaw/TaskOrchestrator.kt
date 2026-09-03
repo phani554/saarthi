@@ -7,7 +7,10 @@ import io.agents.pokeclaw.agent.AgentCallback
 import io.agents.pokeclaw.agent.AgentConfig
 import io.agents.pokeclaw.agent.AgentService
 import io.agents.pokeclaw.agent.AgentServiceFactory
+import io.agents.pokeclaw.agent.GlobalTaskStateCleaner
 import io.agents.pokeclaw.agent.PipelineRouter
+import io.agents.pokeclaw.agent.TaskQueueDecomposer
+import io.agents.pokeclaw.agent.TaskQueueManager
 import io.agents.pokeclaw.agent.skill.SkillExecutor
 import io.agents.pokeclaw.agent.skill.SkillRegistry
 import io.agents.pokeclaw.channel.Channel
@@ -15,6 +18,7 @@ import io.agents.pokeclaw.channel.ChannelManager
 import io.agents.pokeclaw.floating.FloatingCircleManager
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.service.ForegroundService
+import io.agents.pokeclaw.service.VoiceManager
 import io.agents.pokeclaw.tool.ToolResult
 import io.agents.pokeclaw.utils.XLog
 
@@ -86,8 +90,11 @@ class TaskOrchestrator(
     }
 
     private fun releaseTask(): TaskSessionState {
+        VoiceManager.cleanupAllResidualState()
         io.agents.pokeclaw.agent.TaskExecutionState.instance.reset()
-        return taskSessionStore.release()
+        val released = taskSessionStore.release()
+        TaskQueueManager.processNext(this)
+        return released
     }
 
     fun isTaskRunning(): Boolean = taskSessionStore.isTaskRunning()
@@ -95,9 +102,8 @@ class TaskOrchestrator(
     // ==================== Task Execution ====================
 
     fun cancelCurrentTask() {
+        GlobalTaskStateCleaner.cleanAll("Task cancelled by user")
         if (!taskSessionStore.markStopping()) return
-        io.agents.pokeclaw.agent.TaskExecutionState.instance.abandonTask("Task cancelled by user")
-        io.agents.pokeclaw.service.VoiceManager.stop()
         if (::agentService.isInitialized) {
             agentService.cancel()
         }
@@ -137,6 +143,16 @@ class TaskOrchestrator(
                 ChannelManager.sendMessage(channel, "Another task is still running. Stop it first.", messageID)
                 return
             }
+        }
+
+        // Atomic Task Decomposition: split compound tasks into atomic sub-tasks
+        val decomposedParts = TaskQueueDecomposer.decompose(task)
+        if (decomposedParts.size > 1) {
+            XLog.i(TAG, "TaskOrchestrator: decomposing compound task into ${decomposedParts.size} atomic sub-tasks: $decomposedParts")
+            taskSessionStore.release()
+            TaskQueueDecomposer.enqueueSubTasks(decomposedParts, channel, messageID)
+            TaskQueueManager.processNext(this)
+            return
         }
 
         // Tier 1: Deterministic routing

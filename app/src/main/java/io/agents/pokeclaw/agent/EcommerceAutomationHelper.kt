@@ -7,13 +7,14 @@ import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.service.SearchBarService
 import io.agents.pokeclaw.tool.ToolResult
 import io.agents.pokeclaw.tool.impl.AddToCartTool
+import io.agents.pokeclaw.tool.impl.ReadCartTool
 import io.agents.pokeclaw.utils.NodeFinder
 import io.agents.pokeclaw.utils.XLog
 
 /**
  * Ultra-fast E-Commerce & Quick Commerce Automation Engine for Blinkit, Zepto, Flipkart Minutes, Amazon, etc.
- * Combines search bar navigation, query typing, product search, and cart addition into
- * 1 fast, smooth step (< 800ms) without multi-turn LLM inference latency.
+ * Performs initial cart inspection first to skip already added items (halving execution time),
+ * and combines search bar navigation, query typing, product search, and cart addition in 1 fast step.
  */
 object EcommerceAutomationHelper {
 
@@ -60,6 +61,61 @@ object EcommerceAutomationHelper {
 
         XLog.w(TAG, "fastSearchAndAddToCart: add_to_cart result = ${result.error ?: "failed"}")
         return result
+    }
+
+    /**
+     * Process multi-product orders with initial cart pre-inspection.
+     * Inspects active cart first to skip items already added in previous sessions, halving execution time.
+     */
+    fun processMultiProductOrder(service: ClawAccessibilityService, prompt: String): ToolResult {
+        val items = extractMultiProducts(prompt)
+        if (items.isEmpty()) return ToolResult.error("No multi-product list extracted")
+
+        XLog.i(TAG, "processMultiProductOrder: starting multi-item order for ${items.size} items: $items")
+
+        // Initial Cart Pre-Check: inspect cart first
+        val readCartTool = ReadCartTool()
+        val initialCartResult = readCartTool.execute(emptyMap())
+        val cartText = initialCartResult.data.orEmpty().lowercase()
+        XLog.i(TAG, "processMultiProductOrder: initial cart inspection -> $cartText")
+
+        val itemsToAdd = items.filter { item ->
+            val isAlreadyInCart = cartText.contains(item.lowercase())
+            if (isAlreadyInCart) {
+                XLog.i(TAG, "Item '$item' is ALREADY in cart. Skipping duplicate addition!")
+            }
+            !isAlreadyInCart
+        }
+
+        if (itemsToAdd.isEmpty()) {
+            return ToolResult.success("All ${items.size} items are ALREADY present in the cart! $cartText")
+        }
+
+        XLog.i(TAG, "processMultiProductOrder: adding ${itemsToAdd.size} items (${items.size - itemsToAdd.size} skipped as already in cart)")
+
+        val successItems = mutableListOf<String>()
+        val failedItems = mutableListOf<String>()
+
+        for (item in itemsToAdd) {
+            val result = fastSearchAndAddToCart(service, item)
+            if (result.isSuccess) {
+                successItems.add(item)
+            } else {
+                failedItems.add(item)
+            }
+        }
+
+        val summary = buildString {
+            append("Cart Order Progress: Added ").append(successItems.size).append(" items (").append(successItems.joinToString(", ")).append(").")
+            if (items.size > itemsToAdd.size) {
+                append(" Skipped ").append(items.size - itemsToAdd.size).append(" items already in cart.")
+            }
+            if (failedItems.isNotEmpty()) {
+                append(" Could not add ").append(failedItems.size).append(" items (").append(failedItems.joinToString(", ")).append(").")
+            }
+        }
+
+        return ToolResult.success(summary)
     }
 
     /**

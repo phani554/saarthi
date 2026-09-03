@@ -28,9 +28,8 @@ data class TaskSessionState(
 
 /**
  * Single authoritative state holder for the currently running task session.
- *
- * The orchestrator mutates this store; UI and service layers can observe it
- * without having to infer task truth from multiple ad-hoc fields.
+ * Never auto-returns/switches screens on task completion so the user remains
+ * on the active target app/call display.
  */
 class TaskSessionStore {
 
@@ -46,7 +45,7 @@ class TaskSessionStore {
         messageId: String,
         channel: Channel,
         taskText: String = "",
-        autoReturnToChat: Boolean = channel == Channel.LOCAL,
+        autoReturnToChat: Boolean = false,
     ): Boolean {
         synchronized(lock) {
             if (_state.value.isRunning) return false

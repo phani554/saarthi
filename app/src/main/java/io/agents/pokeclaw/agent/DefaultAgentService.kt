@@ -60,56 +60,14 @@ class DefaultAgentService : AgentService {
          * Shorter than Cloud prompt but includes essential rules.
          * Task-only — chat is handled separately.
          */
-        private const val LOCAL_TASK_PROMPT = """You are a phone assistant. You control an Android phone using tools. The user gave you a task or information.
+        private const val LOCAL_TASK_PROMPT = """You are Saarthi, an AI phone assistant controlling an Android phone using tools.
 
-## How to work
-1. **Informational statements / facts** (e.g. "my address is X", "my favorite milk is Y", "remember that Z", "for group W, reply..."):
-   - Do NOT call get_screen_info, open_app, or any phone UI tools!
-   - Confirm you have noted and remembered the information.
-   - Immediately call finish(summary="Got it! I've noted that [information].")
-
-2. **Phone action tasks** (e.g. "open WhatsApp and send hi to Mom", "order milk on Blinkit"):
-   - Call get_screen_info to see what's on screen
-   - Decide which tool to use and call it
-   - Check the result, then decide next step
-   - When done, call finish(summary="what you did or found")
-
-## Tool selection guide
-- Open an app → open_app(package_name="com.example.app")
-- Tap something → tap_node(node_id="n3") or tap(x=500, y=300)
-- Type text → input_text(text="hello") or input_text(text="hello", node_id="n5")
-- Press back/home/enter → system_key(key="back")
-- Scroll to find something → scroll_to_find(text="Settings")
-- Find and tap text → find_and_tap(text="Send")
-- Send a message → send_message(contact="Mom", message="hi", app="WhatsApp")
-- Make a phone call → make_call(contact="Mom")
-- Check battery/wifi/storage/bluetooth/screen/device/time → get_device_info(category="battery")
-- Read notifications → get_notifications()
-- Read clipboard → clipboard(action="get")
-- Write text to clipboard → clipboard(action="set", text="...")
-- List installed apps → get_installed_apps()
-- Take screenshot → take_screenshot()
-- Wait for loading → wait(duration_ms=2000)
-
-## Rules
-- One tool call per turn. Check screen after each action.
-- If something doesn't work, try a different approach. After 3 failures, call finish and explain what went wrong.
-- finish(summary) must contain the ACTUAL DATA the user asked for. "Battery is at 73%" not "I checked battery."
-- Use get_device_info for battery/wifi/storage/bluetooth/screen/device/time queries. Do NOT open Settings app for these.
-- Use get_notifications to read notifications. Do NOT pull down notification shade.
-- Use clipboard(action="get") ONLY when the user asks about the CURRENT clipboard contents (for example "read my clipboard" or "what did I copy").
-- If the user asks you to copy/search/send/summarize information FROM another source (email, browser, notes, messages, screen, etc), first go to that source and find the information there. Do NOT assume it is already on the clipboard.
-- If you need the clipboard after finding the source data, use clipboard(action="set", text="...") yourself.
-- Use get_installed_apps() when the user asks what apps are installed.
-- Use input_text to type. Do NOT tap on autocomplete suggestions.
-- Multi-product & Multi-step Execution: When given a request to order or add MULTIPLE products (e.g. 4 items) and send a message, process ALL items sequentially in the SAME task run (find_search_bar -> type product -> add_to_cart for Item 1, 2, 3, 4 -> send_message). Do NOT call finish or ask the user to proceed after just one product! Continue until ALL products are added and the message is sent.
-- Flipkart & Quick Commerce Mode Switch: On Flipkart (com.flipkart.android), for quick commerce/grocery items, verify that Flipkart is in Minutes mode (check top banner for "Minutes" tab or top search bar "Search in minutes"). If in normal store mode, tap the top banner "Minutes" tab (bounds x:348..612, y:126..282) immediately before searching!
-- Fast Search Bar & Add to Cart: Use find_search_bar(query="...") to search products directly in 1 step without scrolling down. Use add_to_cart(product_name="...") on search results to tap "ADD" buttons directly.
-- Group Task Summaries: Use get_group_task_summary(group_name="...") to extract actionable tasks and TODOs from WhatsApp group chats.
-- Optimize search queries: when searching in shopping apps (Blinkit, Zepto, Amazon), convert colloquial terms like "small pepsi bottle 250ml" into concise product keywords like "Pepsi" or "Amul Milk". If sizes/variants are ambiguous, pick the best matching item or ask the user.
-- STRICT ABANDON RULE: If an item is "Out of stock", "Sold out", or "Currently unavailable", DO NOT keep searching, scrolling, or opening product pages for it! Skip that item immediately and move to the next item or call finish. Spend AT MOST 3 rounds per item. Do NOT endlessly scroll brand/catalog pages.
-- Never say you cannot access the user's clipboard, notifications, or phone state when a matching tool exists. Use the tool first.
-- Do NOT auto-fill passwords, confirm payments, or delete data."""
+## Execution Rules
+1. Action Tasks: Use high-level direct tools (send_message, place_call, forward_whatsapp_message, send_distress_signal, find_search_bar, add_to_cart, read_cart) to execute tasks end-to-end in 1 fast step whenever possible.
+2. Fact / Memory Statements: If user shares a preference, confirm and call finish(summary="Got it! Noted.").
+3. Precision: Never guess or tap random suggestions. When searching for contacts or items, use exact keywords from memory/request.
+4. Out of Stock: If an item is out of stock, skip it immediately or call finish.
+5. Completion: When done, call finish(summary="actual data or summary")."""
 
         /** Maximum number of retries on LLM API call failure */
         private const val MAX_API_RETRIES = 3
@@ -450,6 +408,18 @@ class DefaultAgentService : AgentService {
             if (roundFromEnd <= KEEP_RECENT_ROUNDS) break // protected zone
 
             val aiIndex = aiIndices[roundIdx]
+            val aiMsg = messages[aiIndex] as AiMessage
+
+            // Prune long reasoning/thinking text from older AiMessages
+            if (aiMsg.text() != null && aiMsg.text().length > 80) {
+                val requests = aiMsg.toolExecutionRequests()
+                val shortText = "Step executed."
+                messages[aiIndex] = if (requests != null && requests.isNotEmpty()) {
+                    AiMessage.from(shortText, requests)
+                } else {
+                    AiMessage.from(shortText)
+                }
+            }
 
             // Collect ToolExecutionResultMessage indices for this round
             var j = aiIndex + 1
@@ -643,8 +613,8 @@ class DefaultAgentService : AgentService {
             iterations++
             callback.onLoopStart(iterations)
 
-            if (System.currentTimeMillis() - taskStartTime > 35_000L) {
-                XLog.w(TAG, "runAgentLoop: 35s task time budget reached — completing task cleanly")
+            if (System.currentTimeMillis() - taskStartTime > 180_000L) {
+                XLog.w(TAG, "runAgentLoop: 180s task time limit reached — completing task cleanly")
                 val budgetMsg = "Task executed within time limit."
                 TtsRouter.speakFinalWrapUp(budgetMsg)
                 callback.onComplete(iterations, budgetMsg, totalTokens, actualModelName)
@@ -853,10 +823,15 @@ class DefaultAgentService : AgentService {
                 }
 
                 // End-to-end direct completion tools: complete task immediately upon tool success (0 extra LLM rounds)
-                val directCompletionTools = setOf("place_call", "send_message", "forward_whatsapp_message", "send_distress_signal")
+                val directCompletionTools = setOf("place_call", "send_message", "forward_whatsapp_message", "send_distress_signal", "add_to_cart", "update_memory")
                 if (toolName in directCompletionTools && result.isSuccess) {
                     val completionMsg = result.data ?: "✓ $toolName executed successfully"
                     XLog.i(TAG, "Direct completion tool '$toolName' succeeded — completing task end-to-end immediately")
+                    TaskDependencyGraph.recordOutcome(
+                        TaskExecutionState.instance.taskGoal,
+                        isSuccess = true,
+                        summary = completionMsg
+                    )
                     TtsRouter.speakFinalWrapUp(completionMsg)
                     callback.onComplete(iterations, completionMsg, totalTokens, actualModelName)
                     return
@@ -884,8 +859,19 @@ class DefaultAgentService : AgentService {
                                 if (added.isNotEmpty()) append("\nNew on screen: ${added.take(10).joinToString(", ")}")
                                 if (removed.isNotEmpty()) append("\nGone from screen: ${removed.take(10).joinToString(", ")}")
                             }
+                            // Chain of Thought Backtracking check for accidental navigation (e.g. Settings / launcher)
+                            val service = ClawAccessibilityService.getConnectedInstance(100L)
+                            val currentPkg = service?.rootInActiveWindow?.packageName?.toString().orEmpty()
+                            val isAccidentalNav = currentPkg.contains("settings") || currentPkg.contains("permission")
+                            var backtrackNotice = ""
+                            if (isAccidentalNav && service != null) {
+                                XLog.w(TAG, "Chain of Thought Backtracking: accidental navigation to '$currentPkg' detected! Pressing Back.")
+                                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                                backtrackNotice = "\n\n[Chain of Thought Self-Correction] Accidental navigation to '$currentPkg' detected. Auto-backtracked using Back key to unblock screen."
+                            }
+
                             val baseData = if (result.isSuccess) (result.data ?: "✓ Action succeeded") else "✗ Error: ${result.error}"
-                            "$baseData\n\nScreen after action:\n${screenAfter.data}$diffSection"
+                            "$baseData$backtrackNotice\n\nScreen after action:\n${screenAfter.data}$diffSection"
                         } else {
                             XLog.w(TAG, "Opt3: get_screen_info failed after $toolName: ${screenAfter?.error}")
                             if (result.isSuccess) (result.data ?: "✓ Action succeeded") else "✗ Error: ${result.error}"
@@ -936,19 +922,23 @@ class DefaultAgentService : AgentService {
                             val dismissed = method.invoke(null, service, root, 300L) as? Boolean ?: false
                             if (dismissed) {
                                 XLog.i(TAG, "Active recovery: auto-dismissed blocking overlay or permission dialog")
-                                messages.add(UserMessage.from("[System Notice] Auto-recovery dismissed a blocking popup/dialog on screen. Resume task from current screen."))
+                                val cotPrompt = ChainOfThoughtLearnings.getReasoningPrompt(ChainOfThoughtLearnings.IssueType.SUB_SCREEN_OVERLAY, "Blocking overlay auto-dismissed")
+                                messages.add(UserMessage.from(cotPrompt))
                             } else {
                                 XLog.i(TAG, "Active recovery: pressing Back key to unblock screen")
                                 service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                                messages.add(UserMessage.from("[System Notice] Auto-recovery pressed Back to clear unresponsiveness. Resume task from current screen."))
+                                val cotPrompt = ChainOfThoughtLearnings.getReasoningPrompt(ChainOfThoughtLearnings.IssueType.SUB_SCREEN_OVERLAY, "Pressed Back key to clear unresponsive screen")
+                                messages.add(UserMessage.from(cotPrompt))
                             }
                         } catch (_: Exception) {
                             service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                            messages.add(UserMessage.from("[System Notice] Auto-recovery pressed Back to clear unresponsiveness. Resume task from current screen."))
+                            val cotPrompt = ChainOfThoughtLearnings.getReasoningPrompt(ChainOfThoughtLearnings.IssueType.UNRESPONSIVE_BUTTON, "Pressed Back key to unblock screen")
+                            messages.add(UserMessage.from(cotPrompt))
                         }
                     }
                 } else {
-                    messages.add(UserMessage.from(detection.recoveryHint))
+                    val cotPrompt = ChainOfThoughtLearnings.getReasoningPrompt(ChainOfThoughtLearnings.IssueType.UNRESPONSIVE_BUTTON, detection.signal.description)
+                    messages.add(UserMessage.from(cotPrompt))
                 }
 
                 // Gentle senior citizen voice guidance if 12+ steps pass

@@ -29,6 +29,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.util.Locale
 import java.util.concurrent.Executors
+import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -60,7 +61,13 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
     private var mediaPlayer: MediaPlayer? = null
     private val speechExecutor = Executors.newSingleThreadExecutor()
-    private val mainHandler = Handler(Looper.getMainLooper())
+    private val mainHandler by lazy {
+        try {
+            Handler(Looper.getMainLooper())
+        } catch (_: Exception) {
+            Handler(Looper.myLooper() ?: Looper.getMainLooper())
+        }
+    }
 
     private val _engineState = MutableStateFlow<VoiceEngineState>(VoiceEngineState.Idle)
     val engineState: StateFlow<VoiceEngineState> = _engineState.asStateFlow()
@@ -140,11 +147,12 @@ object VoiceManager : TextToSpeech.OnInitListener {
     /**
      * Starts direct in-app voice capture via microphone.
      * Audio is captured directly into memory without launching system speech dialog popups.
+     * Never blocks user mic tap — stops any active audio playback immediately when tapped.
      */
     fun startInAppVoiceCapture(context: Context, onResult: (String?) -> Unit) {
         if (isPlayingAudio) {
-            XLog.w(TAG, "Voice capture blocked: audio playback (TTS) is currently active")
-            return
+            XLog.i(TAG, "Audio playback active during voice capture request — stopping audio immediately to listen to user")
+            stopAudioPlayback()
         }
         if (VoiceRecorder.isRecording()) {
             VoiceRecorder.stopRecording()
@@ -390,9 +398,10 @@ object VoiceManager : TextToSpeech.OnInitListener {
     }
 
     /**
-     * Synchronously stops ALL audio playback (both MediaPlayer and Native TextToSpeech).
+     * Synchronously stops ALL audio playback (both MediaPlayer and Native TextToSpeech) and clears pending callbacks.
      */
     fun stopAudioPlayback() {
+        mainHandler.removeCallbacksAndMessages(null)
         try {
             mediaPlayer?.stop()
             mediaPlayer?.release()
@@ -401,6 +410,22 @@ object VoiceManager : TextToSpeech.OnInitListener {
         try {
             tts?.stop()
         } catch (_: Exception) {}
+        isPlayingAudio = false
+        _engineState.value = VoiceEngineState.Idle
+    }
+
+    /**
+     * Purge all pending speech tasks, handler callbacks, and stop TTS/media player playback.
+     */
+    fun cleanupAllResidualState() {
+        XLog.i(TAG, "Purging all pending speech tasks, handler callbacks, and stopping TTS")
+        mainHandler.removeCallbacksAndMessages(null)
+        try {
+            (speechExecutor as? ThreadPoolExecutor)?.queue?.clear()
+        } catch (_: Exception) {}
+
+        stopAudioPlayback()
+        unlockTtsEngineTask()
         isPlayingAudio = false
         _engineState.value = VoiceEngineState.Idle
     }

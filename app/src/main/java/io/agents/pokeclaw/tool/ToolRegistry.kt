@@ -45,12 +45,14 @@ object ToolRegistry {
         register(GetNotificationsTool())
         register(MakeCallTool())
         register(FinishTool())
-        // Knowledge Base tools — shared vault available in all modes
+        // Knowledge Base & Memory Tools — shared vault available in all modes
         register(KbWriteTool())
         register(KbReadTool())
         register(KbSearchTool())
         register(KbAppendTool())
         register(KbAddTodoTool())
+        register(InspectMemoryTool())
+        register(UpdateMemoryTool())
     }
 
     private fun registerTvTools() {
@@ -76,10 +78,12 @@ object ToolRegistry {
         register(AutoReplyTool())
         register(FindSearchBarTool())
         register(AddToCartTool())
+        register(ReadCartTool())
         register(GroupTaskSummaryTool())
         register(PlaceCallTool())
         register(WhatsAppForwardTool())
         register(SendDistressSignalTool())
+        register(EnqueueSubtaskTool())
     }
 
     fun register(tool: BaseTool) {

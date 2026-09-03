@@ -3,6 +3,9 @@
 
 package io.agents.pokeclaw.tool.impl;
 
+import android.accessibilityservice.AccessibilityService;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
 import android.view.accessibility.AccessibilityNodeInfo;
 
 import io.agents.pokeclaw.ClawApplication;
@@ -11,6 +14,8 @@ import io.agents.pokeclaw.service.ClawAccessibilityService;
 import io.agents.pokeclaw.tool.BaseTool;
 import io.agents.pokeclaw.tool.ToolParameter;
 import io.agents.pokeclaw.tool.ToolResult;
+import io.agents.pokeclaw.utils.ContactListUiUtils;
+import io.agents.pokeclaw.utils.NodeFinder;
 import io.agents.pokeclaw.utils.XLog;
 
 import java.util.Arrays;
@@ -106,14 +111,29 @@ public class OpenAppTool extends BaseTool {
         }
         dismissChainLaunchDialog(service);
 
+        // Precaution: Ensure opened app is on its clean Home Screen (not inside an old sub-screen)
+        ensureCleanAppHomeScreen(service, packageName);
+
         if ("com.flipkart.android".equals(packageName)) {
-            try { Thread.sleep(800); } catch (InterruptedException ignored) {
-                Thread.currentThread().interrupt();
-            }
-            io.agents.pokeclaw.utils.NodeFinder.INSTANCE.ensureFlipkartMinutesMode(service);
+            NodeFinder.INSTANCE.ensureFlipkartMinutesMode(service);
         }
 
         return true;
+    }
+
+    private static void ensureCleanAppHomeScreen(ClawAccessibilityService service, String packageName) {
+        try {
+            AccessibilityNodeInfo root = service.getRootInActiveWindow();
+            if (root == null) return;
+
+            // Precaution for WhatsApp: return from open chatroom to Home Chats screen
+            if ("com.whatsapp".equals(packageName) && ContactListUiUtils.isOpenChatroom(root)) {
+                XLog.w(TAG, "ensureCleanAppHomeScreen: WhatsApp opened inside an active chatroom! Pressing Back to return to Home Chats screen.");
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+            }
+        } catch (Exception e) {
+            XLog.w(TAG, "ensureCleanAppHomeScreen exception: " + e.getMessage());
+        }
     }
 
     /**
@@ -227,11 +247,11 @@ public class OpenAppTool extends BaseTool {
         }
         // Try to find by searching installed app labels AND package names
         try {
-            android.content.pm.PackageManager pm = ClawApplication.Companion.getInstance().getPackageManager();
+            PackageManager pm = ClawApplication.Companion.getInstance().getPackageManager();
             String bestMatch = null;
             int bestScore = 0;
 
-            for (android.content.pm.ApplicationInfo app : pm.getInstalledApplications(0)) {
+            for (ApplicationInfo app : pm.getInstalledApplications(0)) {
                 // Skip system apps without launcher intent
                 if (pm.getLaunchIntentForPackage(app.packageName) == null) continue;
 

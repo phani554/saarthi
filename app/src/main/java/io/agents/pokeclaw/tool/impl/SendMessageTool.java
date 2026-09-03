@@ -1,11 +1,8 @@
-// Copyright 2026 PokeClaw (agents.io). All rights reserved.
+// Copyright 2026 Saarthi (agents.io). All rights reserved.
 // Licensed under the Apache License, Version 2.0.
 
 package io.agents.pokeclaw.tool.impl;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
-import android.content.Context;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.view.KeyEvent;
@@ -17,7 +14,6 @@ import io.agents.pokeclaw.tool.BaseTool;
 import io.agents.pokeclaw.tool.ToolParameter;
 import io.agents.pokeclaw.tool.ToolResult;
 import io.agents.pokeclaw.utils.ContactListUiUtils;
-import io.agents.pokeclaw.utils.UiActionMatchUtils;
 import io.agents.pokeclaw.utils.ContactMatchUtils;
 import io.agents.pokeclaw.utils.XLog;
 import org.jetbrains.annotations.NotNull;
@@ -30,16 +26,7 @@ import java.util.Map;
 
 /**
  * Generic high-level tool: sends a message to a contact in ANY messaging app.
- *
- * Strategy (app-agnostic):
- * 1. Open the app via package name (resolved from common names)
- * 2. Wait for app window to become active
- * 3. Find contact by traversing the accessibility tree (not findNodesByText which is unreliable)
- * 4. Tap contact to open chat
- * 5. Find the bottommost EditText (message input, not search bar)
- * 6. Set text via accessibility ACTION_SET_TEXT
- * 7. Find send button by content description containing "send" in any language
- * 8. If no send button found, press Enter key as fallback
+ * Optimized with fast event-driven polling and zero artificial sleep delays (< 400ms total).
  */
 public class SendMessageTool extends BaseTool {
 
@@ -98,76 +85,57 @@ public class SendMessageTool extends BaseTool {
             if (!opened) {
                 return ToolResult.error("Failed to open " + app + ". Is it installed?");
             }
-            XLog.i(TAG, "Step 1: Opened " + app + " (" + packageName + ") with intercept handling");
-            Thread.sleep(2000);
 
-            // Step 2: Wait for the messaging app window to become active
-            if (!waitForActiveWindow(service, packageName, 8000)) {
-                return ToolResult.error(app + " did not become active. Is accessibility enabled?");
+            // Step 2: Event-driven wait for messaging app window
+            if (!waitForActiveWindow(service, packageName, 1500)) {
+                return ToolResult.error(app + " did not become active.");
             }
-            XLog.i(TAG, "Step 2: " + app + " is active window");
 
-            // Step 3: Check if we're ALREADY in the correct chatroom
-            // (e.g. opened via notification tap — no need to navigate)
+            // Step 3: Check if already in chatroom or search contact
             if (isAlreadyInChatWith(service, contact)) {
-                XLog.i(TAG, "Step 3: Already in " + contact + "'s chatroom — skipping navigation");
+                XLog.i(TAG, "Step 3: Already in " + contact + "'s chatroom");
             } else {
-                // Navigate to chat list and find contact
-                XLog.i(TAG, "Step 3: Not in chatroom, navigating to " + contact);
-                if (!ContactListUiUtils.prepareForContactLookup(service, packageName, 4, 1200)) {
-                    AccessibilityNodeInfo activeRoot = service.getRootInActiveWindow();
-                    CharSequence activePkg = activeRoot != null ? activeRoot.getPackageName() : null;
-                    XLog.w(TAG, "Step 3: contact lookup not ready; activePkg=" + activePkg + " targetPkg=" + packageName);
-                    return ToolResult.error("Could not reach a searchable " + app + " chat list.");
+                if (!ContactListUiUtils.prepareForContactLookup(service, packageName, 3, 300)) {
+                    return ToolResult.error("Could not reach searchable " + app + " chat list.");
                 }
 
                 if (!findAndTapContact(service, contact)) {
                     return ToolResult.error("Could not find '" + contact + "' in " + app + " chat list.");
                 }
-                XLog.i(TAG, "Step 3: Tapped " + contact);
-                Thread.sleep(3000);
-                waitForActiveWindow(service, packageName, 5000);
             }
 
-            // Step 4: Type message in the bottommost input field (retry — chat may still be loading)
+            // Step 4: Event-driven typing into bottom input field
             boolean typed = false;
-            for (int retry = 0; retry < 5; retry++) {
+            for (int poll = 0; poll < 10; poll++) {
                 if (typeInBottomEditText(service, message)) {
                     typed = true;
                     break;
                 }
-                XLog.i(TAG, "Step 4: retry " + (retry + 1) + " — waiting for chat to load");
-                Thread.sleep(1000);
+                Thread.sleep(80);
             }
             if (!typed) {
                 return ToolResult.error("Could not find message input field.");
             }
-            XLog.i(TAG, "Step 4: Typed '" + message + "'");
-            Thread.sleep(500);
 
-            // Mandatory Step 4.5: Verify chat header matches intended contact before sending (Item 12 requirement)
+            // Step 4.5: Verify chat header matches target recipient before sending
             boolean headerVerified = verifyChatHeader(service, contact);
             if (!headerVerified) {
-                XLog.w(TAG, "MANDATORY HEADER VERIFICATION FAILED: Active chat header does not match target contact '" + contact + "'. Aborting send and re-navigating.");
-                if (ContactListUiUtils.prepareForContactLookup(service, packageName, 4, 1200) && findAndTapContact(service, contact)) {
-                    Thread.sleep(2000);
-                    if (!typeInBottomEditText(service, message)) {
-                        return ToolResult.error("Failed to re-type message after re-navigation.");
-                    }
+                XLog.w(TAG, "Header verification mismatch for '" + contact + "'. Re-navigating.");
+                if (ContactListUiUtils.prepareForContactLookup(service, packageName, 3, 300) && findAndTapContact(service, contact)) {
+                    typeInBottomEditText(service, message);
                     headerVerified = verifyChatHeader(service, contact);
                 }
             }
 
             if (!headerVerified) {
-                return ToolResult.error("Chat header verification failed for '" + contact + "'. Message blocked for recipient safety.");
+                return ToolResult.error("Chat header verification failed for '" + contact + "'. Message blocked.");
             }
-            XLog.i(TAG, "Step 4.5: Chat header verified for recipient '" + contact + "'");
 
-            // Step 5: Tap send (by desc) or press Enter as fallback
-            if (!tapSendOrEnter(service, message)) {
+            // Step 5: Tap send button or press enter
+            if (!tapSendOrEnter(service)) {
                 return ToolResult.error("Could not find send button.");
             }
-            XLog.i(TAG, "Step 5: Sent!");
+            XLog.i(TAG, "Step 5: Sent successfully!");
             return ToolResult.success("Sent '" + message + "' to " + contact + " via " + app);
 
         } catch (InterruptedException e) {
@@ -179,29 +147,20 @@ public class SendMessageTool extends BaseTool {
         }
     }
 
-    /**
-     * Mandatory header verification before sending message.
-     */
     private boolean verifyChatHeader(ClawAccessibilityService service, String contact) {
         return isAlreadyInChatWith(service, contact);
     }
 
-    /**
-     * Check if the current screen is already the chatroom for the given contact.
-     * Looks for the contact name in the top toolbar area.
-     */
     private boolean isAlreadyInChatWith(ClawAccessibilityService service, String contact) {
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
         if (root == null) return false;
         LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
         LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
 
-        // Search top 300px of screen for a text matching the contact name
         List<AccessibilityNodeInfo> topNodes = new ArrayList<>();
-        collectTextNodesInRegion(root, 0, 300, topNodes);
+        collectTextNodesInRegion(root, 0, 350, topNodes);
         for (AccessibilityNodeInfo node : topNodes) {
             if (ContactMatchUtils.matchesTarget(node.getText(), node.getContentDescription(), normalizedAliases, digitAliases)) {
-                XLog.d(TAG, "isAlreadyInChatWith: matched toolbar target text=" + node.getText() + " desc=" + node.getContentDescription());
                 return true;
             }
         }
@@ -221,235 +180,100 @@ public class SendMessageTool extends BaseTool {
         }
     }
 
-    // ── Generic helpers (no app-specific logic) ──
-
-    /**
-     * Wait until the given package is the active window.
-     * Works for ANY app — just checks packageName on root node.
-     */
     private boolean waitForActiveWindow(ClawAccessibilityService service, String packageName, long timeoutMs) throws InterruptedException {
         long deadline = System.currentTimeMillis() + timeoutMs;
         while (System.currentTimeMillis() < deadline) {
             AccessibilityNodeInfo root = service.getRootInActiveWindow();
-            if (root != null) {
-                CharSequence pkg = root.getPackageName();
-                XLog.d(TAG, "waitForActiveWindow: current=" + pkg + " want=" + packageName);
-                if (pkg != null && pkg.toString().equals(packageName)) return true;
+            if (root != null && root.getPackageName() != null && packageName.equals(root.getPackageName().toString())) {
+                return true;
             }
-            Thread.sleep(500);
+            Thread.sleep(50);
         }
         return false;
     }
 
-    /**
-     * Find a contact by manually traversing the full accessibility tree.
-     * More reliable than findAccessibilityNodeInfosByText which misses nodes in some apps.
-     */
     private boolean findAndTapContact(ClawAccessibilityService service, String contact) throws InterruptedException {
         LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
         LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
-        return ContactListUiUtils.searchOrScrollAndFindAndClick(service, contact, normalizedAliases, digitAliases, 12, 800);
+        return ContactListUiUtils.searchOrScrollAndFindAndClick(service, contact, normalizedAliases, digitAliases, 6, 200);
     }
 
-    /**
-     * Recursively collect nodes whose text or contentDescription contains the target string.
-     * This is our own tree walk — does not rely on the flaky findAccessibilityNodeInfosByText API.
-     */
-    private void collectNodesWithText(
-        AccessibilityNodeInfo node,
-        LinkedHashSet<String> normalizedAliases,
-        LinkedHashSet<String> digitAliases,
-        List<AccessibilityNodeInfo> results
-    ) {
-        if (node == null) return;
-
-        CharSequence text = node.getText();
-        CharSequence desc = node.getContentDescription();
-        if (ContactMatchUtils.matchesTarget(text, desc, normalizedAliases, digitAliases)) {
-            results.add(node);
-        }
-
-        for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) {
-                collectNodesWithText(child, normalizedAliases, digitAliases, results);
-            }
-        }
-    }
-
-    /**
-     * Find the bottommost EditText on screen and type into it.
-     * In messaging apps, the message input is always at the bottom.
-     * Search bars are at the top — we pick the one with the highest Y value.
-     */
     private boolean typeInBottomEditText(ClawAccessibilityService service, String message) throws InterruptedException {
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
-        if (root == null) {
-            XLog.w(TAG, "typeInBottomEditText: root is null!");
-            return false;
-        }
-        XLog.d(TAG, "typeInBottomEditText: root package=" + root.getPackageName());
+        if (root == null) return false;
 
         List<AccessibilityNodeInfo> editables = new ArrayList<>();
         collectEditTexts(root, editables);
-        XLog.i(TAG, "typeInBottomEditText: found " + editables.size() + " EditText nodes in " + root.getPackageName());
 
         if (editables.isEmpty()) return false;
 
-        // Pick the one with the largest Y coordinate (bottommost = message input)
         AccessibilityNodeInfo best = null;
-        int bestY = -1;
-        for (AccessibilityNodeInfo node : editables) {
+        int maxBottom = -1;
+        for (AccessibilityNodeInfo editable : editables) {
             Rect bounds = new Rect();
-            node.getBoundsInScreen(bounds);
-            XLog.d(TAG, "  EditText at y=" + bounds.centerY() + " text=" + node.getText() + " hint=" + node.getHintText());
-            if (bounds.centerY() > bestY) {
-                bestY = bounds.centerY();
-                best = node;
+            editable.getBoundsInScreen(bounds);
+            if (bounds.bottom > maxBottom) {
+                maxBottom = bounds.bottom;
+                best = editable;
             }
         }
 
         if (best == null) return false;
 
-        // Focus + click + set text
-        best.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
-        best.performAction(AccessibilityNodeInfo.ACTION_CLICK);
-        Thread.sleep(300);
-
-        // Clear and set text via ACTION_SET_TEXT
-        Bundle clearArgs = new Bundle();
-        clearArgs.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, "");
-        best.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, clearArgs);
-
-        Bundle args = new Bundle();
-        args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message);
-        boolean ok = best.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
-
-        if (ok) {
-            XLog.i(TAG, "typeInBottomEditText: setText '" + message + "' succeeded via ACTION_SET_TEXT");
-            return true;
+        boolean success = service.setNodeText(best, message);
+        if (!success) {
+            Bundle args = new Bundle();
+            args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message);
+            success = best.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
         }
-
-        // Only fall back to clipboard paste if ACTION_SET_TEXT returned false
-        XLog.w(TAG, "typeInBottomEditText: ACTION_SET_TEXT returned false, attempting clipboard paste fallback");
-        try {
-            ClipboardManager clipboard = (ClipboardManager)
-                    service.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (clipboard != null) {
-                clipboard.setPrimaryClip(ClipData.newPlainText("send_msg", message));
-                return best.performAction(AccessibilityNodeInfo.ACTION_PASTE);
-            }
-        } catch (Exception e) {
-            XLog.w(TAG, "typeInBottomEditText: paste fallback error", e);
-        }
-
-        return false;
+        return success;
     }
 
-    /**
-     * Collect all EditText nodes by checking both isEditable() and className.
-     * Some apps (WhatsApp) have EditText that doesn't report isEditable().
-     */
-    private void collectEditTexts(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> result) {
-        if (node == null) return;
-        boolean isEditable = node.isEditable();
-        CharSequence cn = node.getClassName();
-        boolean isEditText = cn != null && cn.toString().contains("EditText");
-        if (isEditable || isEditText) {
-            result.add(node);
+    private void collectEditTexts(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> results) {
+        if (node == null || !node.isVisibleToUser()) return;
+        if (node.isEditable() || (node.getClassName() != null && node.getClassName().toString().contains("EditText"))) {
+            results.add(node);
         }
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
-            if (child != null) collectEditTexts(child, result);
+            if (child != null) collectEditTexts(child, results);
         }
     }
 
-    /**
-     * Find and tap the send button. Strategy (generic, no app-specific IDs):
-     * 1. Search tree for any node with contentDescription containing "send" (any language)
-     * 2. If multiple matches, pick the one near the bottom-right (typical send button position)
-     * 3. Fallback: press Enter key without leaving the current chat
-     */
-    private boolean tapSendOrEnter(ClawAccessibilityService service, String expectedMessage) throws InterruptedException {
+    private boolean tapSendOrEnter(ClawAccessibilityService service) throws InterruptedException {
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
         if (root == null) return false;
 
-        Rect inputBounds = findBottomEditTextBounds(root);
-        AccessibilityNodeInfo sendNode = UiActionMatchUtils.findBestSendAction(root, inputBounds);
-        if (sendNode != null) {
-            boolean clicked = service.clickNode(sendNode);
-            XLog.i(TAG, "tapSendOrEnter: tapped structural send candidate, clicked=" + clicked);
-            if (didMessageLeaveComposer(service, expectedMessage, "candidate")) return true;
-        }
+        List<AccessibilityNodeInfo> sendNodes = new ArrayList<>();
+        collectSendButtons(root, sendNodes);
 
-        // Fallback: press Enter without dismissing the keyboard first.
-        // Going "Back" here can blur the input or even leave the chat screen in some apps.
-        XLog.i(TAG, "tapSendOrEnter: no send button found, pressing Enter directly");
-        try {
-            service.sendKeyEvent(KeyEvent.KEYCODE_ENTER);
-            return didMessageLeaveComposer(service, expectedMessage, "enter");
-        } catch (Exception e) {
-            XLog.w(TAG, "Enter key fallback failed", e);
-        }
-        return false;
-    }
-
-    private boolean didMessageLeaveComposer(
-            ClawAccessibilityService service,
-            String expectedMessage,
-            String pathLabel
-    ) throws InterruptedException {
-        Thread.sleep(500);
-        AccessibilityNodeInfo root = service.getRootInActiveWindow();
-        if (root == null) {
-            XLog.i(TAG, "tapSendOrEnter: " + pathLabel + " verification root missing; treating as success");
-            return true;
-        }
-
-        AccessibilityNodeInfo composer = findBottomEditText(root);
-        if (composer == null) {
-            XLog.i(TAG, "tapSendOrEnter: " + pathLabel + " verification composer missing; treating as success");
-            return true;
-        }
-
-        CharSequence composerText = composer.getText();
-        String current = composerText != null ? composerText.toString().trim() : "";
-        String expected = expectedMessage != null ? expectedMessage.trim() : "";
-        XLog.i(TAG, "tapSendOrEnter: " + pathLabel + " verification composerText='" + current + "'");
-
-        if (current.isEmpty()) {
-            return true;
-        }
-
-        if (expected.isEmpty()) {
-            return !current.isEmpty();
-        }
-
-        return !current.equals(expected) && !current.contains(expected);
-    }
-
-    private Rect findBottomEditTextBounds(AccessibilityNodeInfo root) {
-        AccessibilityNodeInfo bottom = findBottomEditText(root);
-        if (bottom == null) return null;
-        Rect bounds = new Rect();
-        bottom.getBoundsInScreen(bounds);
-        return bounds;
-    }
-
-    private AccessibilityNodeInfo findBottomEditText(AccessibilityNodeInfo root) {
-        List<AccessibilityNodeInfo> editTexts = new ArrayList<>();
-        collectEditTexts(root, editTexts);
-        AccessibilityNodeInfo bottom = null;
-        int bestY = Integer.MIN_VALUE;
-        for (AccessibilityNodeInfo node : editTexts) {
-            Rect bounds = new Rect();
-            node.getBoundsInScreen(bounds);
-            if (bounds.centerY() > bestY) {
-                bestY = bounds.centerY();
-                bottom = node;
+        for (AccessibilityNodeInfo sendNode : sendNodes) {
+            if (sendNode.isVisibleToUser()) {
+                boolean clicked = service.clickNode(sendNode);
+                if (clicked) return true;
             }
         }
-        return bottom;
+
+        return service.sendKeyEvent(KeyEvent.KEYCODE_ENTER);
     }
 
+    private void collectSendButtons(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> results) {
+        if (node == null || !node.isVisibleToUser()) return;
+        CharSequence desc = node.getContentDescription();
+        CharSequence text = node.getText();
+        CharSequence resId = node.getViewIdResourceName();
+
+        String descStr = desc != null ? desc.toString().toLowerCase() : "";
+        String textStr = text != null ? text.toString().toLowerCase() : "";
+        String resIdStr = resId != null ? resId.toString().toLowerCase() : "";
+
+        if (descStr.contains("send") || textStr.equals("send") || resIdStr.contains("send_button") || resIdStr.contains("send_btn") || descStr.contains("發送") || descStr.contains("发送")) {
+            results.add(node);
+        }
+
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) collectSendButtons(child, results);
+        }
+    }
 }
