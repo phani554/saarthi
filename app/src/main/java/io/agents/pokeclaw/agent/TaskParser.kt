@@ -1,4 +1,4 @@
-// Copyright 2026 PokeClaw (agents.io). All rights reserved.
+// Copyright 2026 Saarthi (agents.io). All rights reserved.
 // Licensed under the Apache License, Version 2.0.
 
 package io.agents.pokeclaw.agent
@@ -6,15 +6,13 @@ package io.agents.pokeclaw.agent
 import android.content.Intent
 import android.net.Uri
 import android.provider.AlarmClock
+import android.provider.Settings
 import io.agents.pokeclaw.utils.XLog
 
 /**
  * Tier 1: Deterministic task parser.
  * Matches user input against regex patterns to resolve tasks that can be
- * handled with a direct Android intent — zero LLM calls.
- *
- * Tier 1 deterministic parser with regex patterns.
- * Handles ~30% of tasks with 0 LLM calls, < 1 second.
+ * handled with a direct Android intent or direct tool — zero LLM calls, < 100ms response time.
  */
 object TaskParser {
 
@@ -35,7 +33,8 @@ object TaskParser {
     fun parse(task: String, installedPackages: List<String> = emptyList()): ParseResult? {
         val lower = task.lowercase().trim()
 
-        return matchCall(lower, task)
+        return matchWhatsAppCall(lower, task)
+            ?: matchCall(lower, task)
             ?: matchSms(lower, task)
             ?: matchAlarm(lower, task)
             ?: matchTimer(lower, task)
@@ -48,6 +47,29 @@ object TaskParser {
 
     // ==================== Pattern Matchers ====================
 
+    private val WHATSAPP_CALL_PATTERN = Regex(
+        """(?:open\s+a\s+|start\s+a\s+|make\s+a\s+)?whatsapp\s+(video|voice)?\s*call\s+(?:to\s+)?(.+)""", RegexOption.IGNORE_CASE
+    )
+
+    private fun matchWhatsAppCall(lower: String, original: String): ParseResult? {
+        val match = WHATSAPP_CALL_PATTERN.find(lower) ?: return null
+        val mode = match.groupValues[1].lowercase()
+        val contact = match.groupValues[2].trim()
+
+        if (contact.isBlank()) return null
+
+        val callType = if (mode.contains("video")) "whatsapp_video" else "whatsapp_voice"
+        XLog.i(TAG, "TaskParser matched WhatsApp Call: type=$callType, contact='$contact'")
+
+        return ParseResult(
+            action = "place_call",
+            intent = null,
+            toolName = "place_call",
+            toolParams = mapOf("contact" to contact, "call_type" to callType),
+            description = "Starting $callType with $contact"
+        )
+    }
+
     private val CALL_PATTERN = Regex(
         """(?:call|phone|ring|dial|打電話|打畀|致電)\s+(.+)""", RegexOption.IGNORE_CASE
     )
@@ -55,7 +77,6 @@ object TaskParser {
     private fun matchCall(lower: String, original: String): ParseResult? {
         val match = CALL_PATTERN.find(lower) ?: return null
         val target = match.groupValues[1].trim()
-        // Check if target looks like a phone number
         val numberMatch = Regex("""[\d\s\-+()]{7,}""").find(target)
         return if (numberMatch != null) {
             val number = numberMatch.value.replace(Regex("""[\s\-()]"""), "")
@@ -64,12 +85,7 @@ object TaskParser {
                 intent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")),
                 description = "Dialing $number"
             )
-        } else {
-            // Contact name — fall through to agent loop which can open Phone,
-            // search for the contact, and dial. "call" is in looksLikeTask
-            // so agent loop will get screen context.
-            null
-        }
+        } else null
     }
 
     private val SMS_PATTERN = Regex(
@@ -193,7 +209,6 @@ object TaskParser {
     private fun matchOpenSettings(lower: String): ParseResult? {
         if (!lower.contains("settings") && !lower.contains("設定")) return null
 
-        // Check for specific settings keywords
         for ((keyword, action) in SETTINGS_KEYWORDS) {
             if (lower.contains(keyword)) {
                 return ParseResult(
@@ -204,11 +219,10 @@ object TaskParser {
             }
         }
 
-        // Generic "open settings"
         if (lower.matches(Regex(".*(?:open|go to|打開)\\s*(?:the\\s*)?settings.*"))) {
             return ParseResult(
                 action = "open_settings",
-                intent = Intent(android.provider.Settings.ACTION_SETTINGS),
+                intent = Intent(Settings.ACTION_SETTINGS),
                 description = "Opening Settings"
             )
         }
@@ -224,7 +238,13 @@ object TaskParser {
         val match = OPEN_APP_PATTERN.find(lower) ?: return null
         val appName = match.groupValues[1].trim()
 
-        // Don't match if the task has more complexity (e.g., "open YouTube and search for cats")
+        val lowerApp = appName.lowercase()
+        if (lowerApp.contains("call") || lowerApp.contains("video") || lowerApp.contains("message") ||
+            lowerApp.contains("chat") || lowerApp.contains("send") || lowerApp.contains("order") ||
+            lowerApp.contains("buy") || lowerApp.contains("search") || lowerApp.contains("forward")) {
+            return null
+        }
+
         if (lower.contains(" and ") || lower.contains(" then ") || lower.contains("，然後")) return null
 
         return ParseResult(

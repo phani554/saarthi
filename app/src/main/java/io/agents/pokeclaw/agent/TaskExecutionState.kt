@@ -1,9 +1,16 @@
-// Copyright 2026 PokeClaw (agents.io). All rights reserved.
+// Copyright 2026 Saarthi (agents.io). All rights reserved.
 // Licensed under the Apache License, Version 2.0.
 
 package io.agents.pokeclaw.agent
 
 import io.agents.pokeclaw.utils.XLog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.CopyOnWriteArrayList
 
 enum class ChecklistStatus {
@@ -20,9 +27,16 @@ data class ChecklistItem(
 )
 
 /**
- * Manages task execution state, checklist memory, and clean abandonment across agent turns.
+ * Single-source-of-truth manager for task execution state, checklist memory,
+ * and structured task CoroutineScope cancellation.
  */
 class TaskExecutionState private constructor() {
+
+    private val _currentState = MutableStateFlow<AgentTaskState>(AgentTaskState.Idle)
+    val currentState: StateFlow<AgentTaskState> = _currentState.asStateFlow()
+
+    @Volatile
+    private var taskScope: CoroutineScope? = null
 
     var taskGoal: String = ""
         private set
@@ -48,6 +62,52 @@ class TaskExecutionState private constructor() {
     }
 
     @Synchronized
+    fun setState(newState: AgentTaskState) {
+        val oldState = _currentState.value
+        if (oldState == newState) return
+
+        XLog.i(TAG, "State transition: ${oldState.javaClass.simpleName} -> ${newState.javaClass.simpleName} ($newState)")
+        _currentState.value = newState
+
+        // Explicitly cancel task scope on terminal/abort/call states
+        when (newState) {
+            is AgentTaskState.CallInProgress,
+            is AgentTaskState.Completed,
+            is AgentTaskState.Failed,
+            is AgentTaskState.Aborted,
+            is AgentTaskState.Idle -> {
+                cancelTaskScope("State changed to ${newState.javaClass.simpleName}")
+            }
+            else -> {
+                // Ensure active task scope for active states
+                if (taskScope == null) {
+                    getOrCreateTaskScope()
+                }
+            }
+        }
+    }
+
+    @Synchronized
+    fun getOrCreateTaskScope(): CoroutineScope {
+        var scope = taskScope
+        if (scope == null) {
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            taskScope = scope
+            XLog.d(TAG, "Created new task CoroutineScope: $scope")
+        }
+        return scope
+    }
+
+    @Synchronized
+    fun cancelTaskScope(reason: String) {
+        taskScope?.let { scope ->
+            XLog.i(TAG, "Cancelling task CoroutineScope ($reason)")
+            scope.cancel(reason)
+            taskScope = null
+        }
+    }
+
+    @Synchronized
     fun startTask(goal: String, defaultChecklist: List<String> = emptyList()) {
         reset()
         this.taskGoal = goal
@@ -56,12 +116,14 @@ class TaskExecutionState private constructor() {
         this.stepCount = 0
         this.activeFunctionName = "INITIALIZING"
 
+        getOrCreateTaskScope()
+        setState(AgentTaskState.Planning(goal))
+
         if (defaultChecklist.isNotEmpty()) {
             defaultChecklist.forEachIndexed { index, item ->
                 _checklist.add(ChecklistItem("step_$index", item, ChecklistStatus.NOT_STARTED))
             }
         } else {
-            // Auto-generate high-level checklist based on goal
             generateChecklistFromGoal(goal)
         }
         XLog.i(TAG, "Task execution state started for goal: '$goal' (${_checklist.size} steps)")
@@ -100,6 +162,8 @@ class TaskExecutionState private constructor() {
     @Synchronized
     fun incrementStep() {
         stepCount++
+        val plan = _checklist.map { it.description }
+        setState(AgentTaskState.Executing(taskGoal, stepCount, plan))
     }
 
     @Synchronized
@@ -135,6 +199,7 @@ class TaskExecutionState private constructor() {
                 item.status = ChecklistStatus.FAILED
             }
         }
+        setState(AgentTaskState.Aborted(reason))
         XLog.w(TAG, "Task ABANDONED: $reason")
     }
 
@@ -147,6 +212,7 @@ class TaskExecutionState private constructor() {
         abandonReason = ""
         stepCount = 0
         _checklist.clear()
+        setState(AgentTaskState.Idle)
         XLog.i(TAG, "Task execution state reset")
     }
 

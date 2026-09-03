@@ -3,10 +3,15 @@
 
 package io.agents.pokeclaw.tool.impl;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.graphics.Rect;
 import android.os.Bundle;
+import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
+import io.agents.pokeclaw.agent.knowledge.ContactAliasResolver;
 import io.agents.pokeclaw.service.ClawAccessibilityService;
 import io.agents.pokeclaw.tool.BaseTool;
 import io.agents.pokeclaw.tool.ToolParameter;
@@ -19,6 +24,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -77,7 +83,7 @@ public class SendMessageTool extends BaseTool {
         }
 
         String rawContact = requireString(params, "contact");
-        String contact = io.agents.pokeclaw.agent.knowledge.ContactAliasResolver.INSTANCE.resolve(rawContact);
+        String contact = ContactAliasResolver.INSTANCE.resolve(rawContact);
         String message = requireString(params, "message");
         Object appParam = params.get("app");
         String app = appParam != null ? appParam.toString() : "WhatsApp";
@@ -139,6 +145,24 @@ public class SendMessageTool extends BaseTool {
             XLog.i(TAG, "Step 4: Typed '" + message + "'");
             Thread.sleep(500);
 
+            // Mandatory Step 4.5: Verify chat header matches intended contact before sending (Item 12 requirement)
+            boolean headerVerified = verifyChatHeader(service, contact);
+            if (!headerVerified) {
+                XLog.w(TAG, "MANDATORY HEADER VERIFICATION FAILED: Active chat header does not match target contact '" + contact + "'. Aborting send and re-navigating.");
+                if (ContactListUiUtils.prepareForContactLookup(service, packageName, 4, 1200) && findAndTapContact(service, contact)) {
+                    Thread.sleep(2000);
+                    if (!typeInBottomEditText(service, message)) {
+                        return ToolResult.error("Failed to re-type message after re-navigation.");
+                    }
+                    headerVerified = verifyChatHeader(service, contact);
+                }
+            }
+
+            if (!headerVerified) {
+                return ToolResult.error("Chat header verification failed for '" + contact + "'. Message blocked for recipient safety.");
+            }
+            XLog.i(TAG, "Step 4.5: Chat header verified for recipient '" + contact + "'");
+
             // Step 5: Tap send (by desc) or press Enter as fallback
             if (!tapSendOrEnter(service, message)) {
                 return ToolResult.error("Could not find send button.");
@@ -156,14 +180,21 @@ public class SendMessageTool extends BaseTool {
     }
 
     /**
+     * Mandatory header verification before sending message.
+     */
+    private boolean verifyChatHeader(ClawAccessibilityService service, String contact) {
+        return isAlreadyInChatWith(service, contact);
+    }
+
+    /**
      * Check if the current screen is already the chatroom for the given contact.
      * Looks for the contact name in the top toolbar area.
      */
     private boolean isAlreadyInChatWith(ClawAccessibilityService service, String contact) {
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
         if (root == null) return false;
-        java.util.LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
-        java.util.LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
+        LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
+        LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
 
         // Search top 300px of screen for a text matching the contact name
         List<AccessibilityNodeInfo> topNodes = new ArrayList<>();
@@ -215,8 +246,8 @@ public class SendMessageTool extends BaseTool {
      * More reliable than findAccessibilityNodeInfosByText which misses nodes in some apps.
      */
     private boolean findAndTapContact(ClawAccessibilityService service, String contact) throws InterruptedException {
-        java.util.LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
-        java.util.LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
+        LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
+        LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
         return ContactListUiUtils.searchOrScrollAndFindAndClick(service, contact, normalizedAliases, digitAliases, 12, 800);
     }
 
@@ -226,8 +257,8 @@ public class SendMessageTool extends BaseTool {
      */
     private void collectNodesWithText(
         AccessibilityNodeInfo node,
-        java.util.LinkedHashSet<String> normalizedAliases,
-        java.util.LinkedHashSet<String> digitAliases,
+        LinkedHashSet<String> normalizedAliases,
+        LinkedHashSet<String> digitAliases,
         List<AccessibilityNodeInfo> results
     ) {
         if (node == null) return;
@@ -302,10 +333,10 @@ public class SendMessageTool extends BaseTool {
         // Only fall back to clipboard paste if ACTION_SET_TEXT returned false
         XLog.w(TAG, "typeInBottomEditText: ACTION_SET_TEXT returned false, attempting clipboard paste fallback");
         try {
-            android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
-                    service.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            ClipboardManager clipboard = (ClipboardManager)
+                    service.getSystemService(Context.CLIPBOARD_SERVICE);
             if (clipboard != null) {
-                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("send_msg", message));
+                clipboard.setPrimaryClip(ClipData.newPlainText("send_msg", message));
                 return best.performAction(AccessibilityNodeInfo.ACTION_PASTE);
             }
         } catch (Exception e) {
@@ -355,7 +386,7 @@ public class SendMessageTool extends BaseTool {
         // Going "Back" here can blur the input or even leave the chat screen in some apps.
         XLog.i(TAG, "tapSendOrEnter: no send button found, pressing Enter directly");
         try {
-            service.sendKeyEvent(android.view.KeyEvent.KEYCODE_ENTER);
+            service.sendKeyEvent(KeyEvent.KEYCODE_ENTER);
             return didMessageLeaveComposer(service, expectedMessage, "enter");
         } catch (Exception e) {
             XLog.w(TAG, "Enter key fallback failed", e);

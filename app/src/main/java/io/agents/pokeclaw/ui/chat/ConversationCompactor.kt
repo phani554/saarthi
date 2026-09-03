@@ -11,20 +11,13 @@ import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.SamplerConfig
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Manages conversation memory compaction.
- *
- * Architecture:
- * - Compacts only on natural pauses (switch chatroom, app pause, new chat)
- * - Never compacts during active chat (avoids LiteRT-LM single-session conflict)
- * - Writes .memory.md digest file per conversation
- * - On chatroom switch: reads .memory.md + last N messages → system prompt
- *
- * Validated approach:
- * - Google ADK: compaction_interval=3, overlap_size=1
- * - Claude Code: auto-compact at ~95% context
- * - Khoj: 3-layer memory (short/medium/long-term)
+ * Compacts older conversation turns into structured, bulleted summaries (Key Facts, Decisions, Actions).
  */
 object ConversationCompactor {
 
@@ -41,14 +34,7 @@ object ConversationCompactor {
     }
 
     /**
-     * Compact a conversation: summarize older messages, save digest.
-     * Must be called when LLM session is available (not during active chat).
-     *
-     * @param engine LiteRT-LM engine (already initialized)
-     * @param messages all conversation messages
-     * @param context Android context for file access
-     * @param conversationId conversation identifier
-     * @return the digest text, or null if compaction not needed/failed
+     * Compact a conversation: summarize older messages into structured digest, save digest.
      */
     fun compact(
         engine: Engine,
@@ -72,15 +58,21 @@ object ConversationCompactor {
         if (olderText.isBlank()) return null
 
         try {
-            // Create temporary conversation for summarization
             val tempConversation = engine.createConversation(
                 ConversationConfig(
-                    systemInstruction = Contents.of("You are a summarization assistant. Summarize conversations concisely, preserving key facts, decisions, and action items."),
-                    samplerConfig = SamplerConfig(topK = 64, topP = 0.95, temperature = 0.3)
+                    systemInstruction = Contents.of("You are an ultra-fast summarization assistant. Produce structured bulleted digests of conversation history without preamble."),
+                    samplerConfig = SamplerConfig(topK = 32, topP = 0.9, temperature = 0.2)
                 )
             )
 
-            val prompt = "Summarize this conversation in 3-5 sentences. Keep names, dates, decisions, and action items:\n\n$olderText"
+            val prompt = """Compact this conversation history into structured key points:
+- Key Facts: [important names, details, preferences]
+- Decisions: [agreed outcomes]
+- Pending Actions: [open tasks]
+
+History:
+$olderText"""
+
             val response = tempConversation.sendMessage(prompt)
             val digest = response?.toString()?.trim() ?: return null
 
@@ -104,7 +96,6 @@ object ConversationCompactor {
         val chatDir = File(context.getExternalFilesDir(null), "chats")
         if (!chatDir.exists()) chatDir.mkdirs()
 
-        // Find the conversation's .md file
         val mdFile = chatDir.listFiles()?.find { file ->
             file.extension == "md" && !file.name.endsWith(".memory.md") &&
             file.readText().contains("id: $conversationId")
@@ -119,7 +110,7 @@ object ConversationCompactor {
         val content = buildString {
             appendLine("---")
             appendLine("conversation: $conversationId")
-            appendLine("compacted_at: ${java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", java.util.Locale.US).format(java.util.Date())}")
+            appendLine("compacted_at: ${SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(Date())}")
             appendLine("original_messages: ${messages.size}")
             appendLine("---")
             appendLine()
@@ -137,12 +128,10 @@ object ConversationCompactor {
         val chatDir = File(context.getExternalFilesDir(null), "chats")
         if (!chatDir.exists()) return null
 
-        // Find .memory.md file for this conversation
         val memoryFile = chatDir.listFiles()?.find { file ->
             file.name.endsWith(".memory.md") && file.readText().contains("conversation: $conversationId")
         } ?: return null
 
-        // Extract digest (everything after frontmatter)
         val lines = memoryFile.readLines()
         var pastFrontmatter = false
         var frontmatterCount = 0

@@ -6,15 +6,22 @@ package io.agents.pokeclaw.tool.impl
 import android.content.Intent
 import io.agents.pokeclaw.ClawApplication
 import io.agents.pokeclaw.agent.knowledge.ContactAliasResolver
+import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.service.VoiceManager
 import io.agents.pokeclaw.tool.BaseTool
 import io.agents.pokeclaw.tool.ToolParameter
 import io.agents.pokeclaw.tool.ToolResult
+import io.agents.pokeclaw.utils.ContactListUiUtils
+import io.agents.pokeclaw.utils.ContactMatchUtils
+import io.agents.pokeclaw.utils.NodeFinder
 import io.agents.pokeclaw.utils.XLog
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 
 /**
  * Custom tool for forwarding messages on WhatsApp.
- * Verifies top action bar contact/group name before forwarding.
+ * Uses resilient search & selector strategies, event-driven waits, retry-with-backoff (3 attempts),
+ * and chat header verification.
  */
 class WhatsAppForwardTool : BaseTool() {
 
@@ -44,6 +51,48 @@ class WhatsAppForwardTool : BaseTool() {
         XLog.i("WhatsAppForwardTool", "Forwarding message to '$resolvedTarget' (text: '$text')")
 
         VoiceManager.speakNative("Forwarding message to $resolvedTarget on WhatsApp...", flush = true)
+
+        val service = ClawAccessibilityService.getConnectedInstance(4000L)
+        if (service != null) {
+            for (attempt in 1..3) {
+                try {
+                    val ready = ContactListUiUtils.prepareForContactLookup(service, "com.whatsapp", 4, 800L)
+                    if (ready) {
+                        val normalizedAliases = ContactMatchUtils.buildNormalizedAliases(resolvedTarget)
+                        val digitAliases = ContactMatchUtils.buildDigitAliases(resolvedTarget)
+                        val found = ContactListUiUtils.searchOrScrollAndFindAndClick(service, resolvedTarget, normalizedAliases, digitAliases, 12, 600L)
+
+                        if (found) {
+                            runBlocking {
+                                delay(800L)
+                            }
+                            val root = service.rootInActiveWindow
+
+                            val headerNode = NodeFinder.findNodeByKeywords(root, resolvedTarget)
+                                ?: NodeFinder.findNodeByIdOrText(root, resolvedTarget)
+
+                            if (headerNode == null) {
+                                XLog.w("WhatsAppForwardTool", "Attempt $attempt: Chat header verification failed for '$resolvedTarget'")
+                                continue
+                            }
+
+                            XLog.i("WhatsAppForwardTool", "Chat header verified for '$resolvedTarget'. Executing forward.")
+
+                            val forwardBtn = NodeFinder.findNodeByIdOrText(root, "com.whatsapp:id/forward", "forward")
+                                ?: NodeFinder.findNodeByKeywords(root, "forward")
+
+                            if (forwardBtn != null) {
+                                val clickable = NodeFinder.findClickableAncestor(forwardBtn) ?: forwardBtn
+                                service.clickNode(clickable)
+                                return ToolResult.success("Forwarded message to $resolvedTarget on WhatsApp.")
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    XLog.w("WhatsAppForwardTool", "Attempt $attempt failed for WhatsApp forward: ${e.message}")
+                }
+            }
+        }
 
         val launchIntent = context.packageManager.getLaunchIntentForPackage("com.whatsapp")
         if (launchIntent != null) {

@@ -290,6 +290,10 @@ object KVUtils {
     private const val KEY_INTERACTION_MODEL = "KEY_INTERACTION_MODEL"
     private const val KEY_MEM0_API_KEY = "KEY_MEM0_API_KEY"
     private const val KEY_ROUTE_VIA_OPENROUTER = "KEY_ROUTE_VIA_OPENROUTER"
+    private const val KEY_EMERGENCY_CONTACT_MISSING = "KEY_EMERGENCY_CONTACT_MISSING"
+
+    fun isEmergencyContactMissing(): Boolean = getBoolean(KEY_EMERGENCY_CONTACT_MISSING, false)
+    fun setEmergencyContactMissing(missing: Boolean) = putBoolean(KEY_EMERGENCY_CONTACT_MISSING, missing)
 
     fun isRouteViaOpenRouter(): Boolean = getBoolean(KEY_ROUTE_VIA_OPENROUTER, false)
     fun setRouteViaOpenRouter(value: Boolean) = putBoolean(KEY_ROUTE_VIA_OPENROUTER, value)

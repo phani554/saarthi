@@ -6,15 +6,21 @@ package io.agents.pokeclaw.tool.impl
 import android.content.Intent
 import io.agents.pokeclaw.ClawApplication
 import io.agents.pokeclaw.agent.knowledge.ContactAliasResolver
+import io.agents.pokeclaw.data.memory.HybridMemoryRepository
 import io.agents.pokeclaw.service.VoiceManager
 import io.agents.pokeclaw.tool.BaseTool
 import io.agents.pokeclaw.tool.ToolParameter
 import io.agents.pokeclaw.tool.ToolResult
+import io.agents.pokeclaw.utils.KVUtils
 import io.agents.pokeclaw.utils.XLog
+import kotlinx.coroutines.runBlocking
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Emergency Distress Signal Tool — sends an urgent SOS distress message to the user's caretaker
- * via WhatsApp or SMS with active device status.
+ * via WhatsApp or SMS with active device status and situational context.
  */
 class SendDistressSignalTool : BaseTool() {
 
@@ -32,19 +38,41 @@ class SendDistressSignalTool : BaseTool() {
     )
 
     override fun execute(params: Map<String, Any>): ToolResult {
-        val rawCaretaker = optionalString(params, "caretaker", "caretaker").ifBlank { "caretaker" }
+        val rawCaretaker = optionalString(params, "caretaker", "emergency_contact").ifBlank { "emergency_contact" }
         val customMsg = optionalString(params, "message", "").trim()
 
         val context = ClawApplication.instance
-        val resolvedCaretaker = ContactAliasResolver.resolve(rawCaretaker)
+        var resolvedCaretaker = ContactAliasResolver.resolve(rawCaretaker)
 
-        val alertText = if (customMsg.isNotBlank()) {
-            "🚨 EMERGENCY DISTRESS ALERT 🚨\n$customMsg\n(Sent via Saarthi AI Emergency System)"
-        } else {
-            "🚨 EMERGENCY DISTRESS ALERT 🚨\nUser requires urgent assistance! Please contact or check on them immediately.\n(Sent via Saarthi AI Emergency System)"
+        // Query Mem0 specifically for emergency_contact key
+        if (resolvedCaretaker == "emergency_contact" || resolvedCaretaker == "caretaker") {
+            val (memories, _) = runBlocking { HybridMemoryRepository.searchMemories("emergency contact caretaker") }
+            if (memories.isNotBlank()) {
+                val lines = memories.split("\n")
+                val matched = lines.find { it.contains("emergency", ignoreCase = true) || it.contains("caretaker", ignoreCase = true) }
+                if (matched != null) {
+                    resolvedCaretaker = matched.substringAfter(":").trim().ifBlank { resolvedCaretaker }
+                }
+            }
         }
 
-        XLog.w("SendDistressSignalTool", "Executing emergency distress signal to '$resolvedCaretaker': $alertText")
+        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+        val alertText = if (customMsg.isNotBlank()) {
+            "🚨 EMERGENCY DISTRESS ALERT 🚨\n[$timestamp]\n$customMsg\n(Sent via Saarthi AI Emergency System)"
+        } else {
+            "🚨 EMERGENCY DISTRESS ALERT 🚨\n[$timestamp]\nUser requires urgent assistance! Please contact or check on them immediately.\n(Sent via Saarthi AI Emergency System)"
+        }
+
+        val hasContactOnFile = resolvedCaretaker.isNotBlank() && resolvedCaretaker != "emergency_contact" && resolvedCaretaker != "caretaker"
+
+        if (!hasContactOnFile) {
+            XLog.w("SendDistressSignalTool", "No emergency contact on file! Flagging setup for next session.")
+            KVUtils.setEmergencyContactMissing(true)
+        } else {
+            KVUtils.setEmergencyContactMissing(false)
+        }
+
+        XLog.w("SendDistressSignalTool", "Executing emergency distress signal to '$resolvedCaretaker' (contactOnFile=$hasContactOnFile): $alertText")
         VoiceManager.speakNative("Sending emergency distress signal to $resolvedCaretaker now...", flush = true)
 
         val launchIntent = context.packageManager.getLaunchIntentForPackage("com.whatsapp")
@@ -53,6 +81,11 @@ class SendDistressSignalTool : BaseTool() {
             context.startActivity(launchIntent)
         }
 
-        return ToolResult.success("Emergency distress alert sent to $resolvedCaretaker.")
+        return ToolResult.success(
+            if (hasContactOnFile)
+                "Emergency distress alert sent to $resolvedCaretaker."
+            else
+                "Emergency distress alert triggered, but no emergency contact was found on file. Prompting setup at next session start."
+        )
     }
 }

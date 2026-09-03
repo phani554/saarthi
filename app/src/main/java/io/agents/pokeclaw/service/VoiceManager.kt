@@ -10,6 +10,8 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.util.Base64
 import android.widget.Toast
+import io.agents.pokeclaw.agent.AgentTaskState
+import io.agents.pokeclaw.agent.TaskExecutionState
 import io.agents.pokeclaw.utils.KVUtils
 import io.agents.pokeclaw.utils.XLog
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +30,7 @@ import java.io.FileOutputStream
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 sealed class VoiceEngineState {
     object Idle : VoiceEngineState()
@@ -41,6 +44,7 @@ sealed class VoiceEngineState {
 /**
  * Voice Audio Engine: Handles voice input (Sarvam STT / Gemini STT / Native)
  * and voice output (Sarvam TTS / Native TTS).
+ * Guarantees strict single-audio-playback mutual exclusion between Native TTS and Sarvam MediaPlayer.
  */
 object VoiceManager : TextToSpeech.OnInitListener {
 
@@ -68,8 +72,8 @@ object VoiceManager : TextToSpeech.OnInitListener {
     }
 
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
         .addInterceptor(loggingInterceptor)
         .build()
 
@@ -99,7 +103,39 @@ object VoiceManager : TextToSpeech.OnInitListener {
     @Volatile
     private var isPlayingAudio = false
 
+    private val isVoiceLoopArmed = AtomicBoolean(false)
+
     fun isPlayingAudio(): Boolean = isPlayingAudio
+
+    /**
+     * Arms the voice auto-loop strictly gated behind AgentTaskState == WaitingForUser.
+     * Collapses concurrent re-arm attempts using an AtomicBoolean flag.
+     */
+    fun armVoiceLoop(context: Context, onResult: (String?) -> Unit) {
+        val currentState = TaskExecutionState.instance.currentState.value
+        if (currentState !is AgentTaskState.WaitingForUser) {
+            XLog.w(TAG, "armVoiceLoop BLOCKED: Task state is ${currentState.javaClass.simpleName}, expected WaitingForUser")
+            return
+        }
+
+        if (!isVoiceLoopArmed.compareAndSet(false, true)) {
+            XLog.d(TAG, "Voice loop already armed, collapsing duplicate re-arm request")
+            return
+        }
+
+        XLog.i(TAG, "Voice auto-loop ARMED for WaitingForUser state")
+        startInAppVoiceCapture(context) { transcript ->
+            isVoiceLoopArmed.set(false)
+            onResult(transcript)
+        }
+    }
+
+    fun disarmVoiceLoop() {
+        if (isVoiceLoopArmed.getAndSet(false)) {
+            XLog.i(TAG, "Voice auto-loop DISARMED")
+            stopInAppVoiceCapture()
+        }
+    }
 
     /**
      * Starts direct in-app voice capture via microphone.
@@ -137,12 +173,11 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
     fun lockTtsEngineForTask(): TaskTtsEngineLock {
         val sarvamKey = KVUtils.getSarvamApiKey().trim()
-        val latency = pingTtsLatencyMs()
-        currentTaskEngineLock = if (sarvamKey.isNotEmpty() && latency < 600L) {
-            XLog.i(TAG, "Locked SARVAM_CLOUD TTS engine for task lifetime (ping=$latency ms)")
+        currentTaskEngineLock = if (sarvamKey.isNotEmpty()) {
+            XLog.i(TAG, "Locked SARVAM_CLOUD TTS engine for task lifetime")
             TaskTtsEngineLock.SARVAM_CLOUD
         } else {
-            XLog.i(TAG, "Locked NATIVE_LOCAL TTS engine for task lifetime (ping=$latency ms)")
+            XLog.i(TAG, "Locked NATIVE_LOCAL TTS engine for task lifetime")
             TaskTtsEngineLock.NATIVE_LOCAL
         }
         return currentTaskEngineLock
@@ -161,7 +196,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
     }
 
     /**
-     * Speaks text using the locked TTS engine or latency-evaluated engine.
+     * Speaks text using the locked TTS engine or fast local evaluation.
      */
     fun speak(text: String, flush: Boolean = false) {
         if (!isVoiceOutputEnabled || text.isBlank()) return
@@ -174,7 +209,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
             currentTaskEngineLock
         } else {
             val sarvamKey = KVUtils.getSarvamApiKey().trim()
-            if (sarvamKey.isNotEmpty() && pingTtsLatencyMs() < 600L) TaskTtsEngineLock.SARVAM_CLOUD else TaskTtsEngineLock.NATIVE_LOCAL
+            if (sarvamKey.isNotEmpty()) TaskTtsEngineLock.SARVAM_CLOUD else TaskTtsEngineLock.NATIVE_LOCAL
         }
 
         if (lock == TaskTtsEngineLock.SARVAM_CLOUD) {
@@ -189,6 +224,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
     }
 
     private fun speakNativeInternal(cleanText: String, flush: Boolean) {
+        stopAudioPlayback()
         isPlayingAudio = true
         _engineState.value = VoiceEngineState.Speaking
         val locale = when (lastDetectedLanguageCode) {
@@ -209,7 +245,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 _engineState.value = VoiceEngineState.Idle
             }
             onPlaybackFinished?.invoke()
-        }, 2500L)
+        }, 2000L)
     }
 
     /**
@@ -222,6 +258,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
         if (cleanText.isBlank()) return
 
         speechExecutor.submit {
+            stopAudioPlayback()
             if (VoiceRecorder.isRecording()) {
                 VoiceRecorder.stopRecording()
             }
@@ -236,7 +273,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
                     if (_engineState.value == VoiceEngineState.Speaking) {
                         _engineState.value = VoiceEngineState.Idle
                     }
-                }, 1800L)
+                }, 1500L)
             }
         }
     }
@@ -253,6 +290,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
     private fun speakSarvamTts(text: String, apiKey: String): Boolean {
         return try {
+            stopAudioPlayback()
             isPlayingAudio = true
             _engineState.value = VoiceEngineState.Speaking
             val jsonBody = JSONObject().apply {
@@ -322,7 +360,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
                     _engineState.value = VoiceEngineState.Idle
                     mainHandler.postDelayed({
                         onPlaybackFinished?.invoke()
-                    }, 400L)
+                    }, 300L)
                 }
                 setOnErrorListener { _, _, _ ->
                     tempFile.delete()
@@ -338,11 +376,17 @@ object VoiceManager : TextToSpeech.OnInitListener {
         }
     }
 
-    private fun stopAudioPlayback() {
+    /**
+     * Synchronously stops ALL audio playback (both MediaPlayer and Native TextToSpeech).
+     */
+    fun stopAudioPlayback() {
         try {
             mediaPlayer?.stop()
             mediaPlayer?.release()
             mediaPlayer = null
+        } catch (_: Exception) {}
+        try {
+            tts?.stop()
         } catch (_: Exception) {}
         isPlayingAudio = false
         _engineState.value = VoiceEngineState.Idle
@@ -350,34 +394,17 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
     fun stop() {
         stopAudioPlayback()
-        tts?.stop()
         _engineState.value = VoiceEngineState.Idle
     }
 
     private fun cleanTextForSpeech(raw: String): String {
-        return raw.replace(Regex("""```[\s\S]*?```"""), "") // Remove code blocks
-            .replace(Regex("""\{[\s\S]*?\}"""), "")       // Remove JSON
-            .replace(Regex("""https?://\S+"""), "")        // Remove URLs
-            .replace(Regex("""[*#_~`\[\]]"""), "")        // Remove markdown symbols
-            .replace(Regex("""[\u2600-\u26FF\u2700-\u27BF]"""), "") // Remove emojis
+        return raw.replace(Regex("""```[\s\S]*?```"""), "")
+            .replace(Regex("""\{[\s\S]*?\}"""), "")
+            .replace(Regex("""https?://\S+"""), "")
+            .replace(Regex("""[*#_~`\[\]]"""), "")
+            .replace(Regex("""[\u2600-\u26FF\u2700-\u27BF]"""), "")
             .replace(Regex("""\s+"""), " ")
             .trim()
-    }
-
-    fun pingTtsLatencyMs(): Long {
-        val start = System.currentTimeMillis()
-        return try {
-            val request = Request.Builder()
-                .url("https://api.sarvam.ai/text-to-speech")
-                .head()
-                .build()
-            val response = httpClient.newCall(request).execute()
-            val elapsed = System.currentTimeMillis() - start
-            response.close()
-            elapsed
-        } catch (_: Exception) {
-            9999L
-        }
     }
 
     fun resolveGeminiApiKey(): String {

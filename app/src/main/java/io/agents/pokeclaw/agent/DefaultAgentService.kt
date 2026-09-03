@@ -903,7 +903,7 @@ class DefaultAgentService : AgentService {
                 val result = ToolRegistry.getInstance().getTool(req.name() ?: "")
                 null // error tracked per-tool above; simplified here
             }
-            val detection = stuckDetector.record(lastAction, lastScreenHash, screenDiffCount, null)
+            val detection = stuckDetector.record(TaskExecutionState.instance.activePackageName, lastAction, lastScreenHash, screenDiffCount, null)
             if (detection != null) {
                 when (detection.level) {
                     StuckDetector.RecoveryLevel.AUTO_KILL -> {

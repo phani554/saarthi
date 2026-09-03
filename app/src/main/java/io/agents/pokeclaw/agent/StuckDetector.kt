@@ -1,23 +1,15 @@
-// Copyright 2026 PokeClaw (agents.io). All rights reserved.
+// Copyright 2026 Saarthi (agents.io). All rights reserved.
 // Licensed under the Apache License, Version 2.0.
 
 package io.agents.pokeclaw.agent
 
+import io.agents.pokeclaw.data.memory.HybridMemoryRepository
 import io.agents.pokeclaw.utils.XLog
+import kotlinx.coroutines.runBlocking
 import java.util.ArrayDeque
 
 /**
- * Detects stuck agent loops using 5 signals.
- *
- * Architecture reference:
- * - Sliding window (8 steps), same-action, screen-unchanged, high-repetition
- * - ralph-claude-code: repeated-error detection
- * - PokeClaw original: screen diff (previousScreenTexts)
- *
- * Recovery is 3-level:
- *   Level 1: Inject recovery hint into prompt
- *   Level 2: Suggest strategy switch (different tool)
- *   Level 3: Auto-kill (force finish)
+ * Detects stuck agent loops using 5 signals and remembers successful recovery sequences via Mem0.
  */
 class StuckDetector(private val windowSize: Int = 8) {
 
@@ -26,6 +18,9 @@ class StuckDetector(private val windowSize: Int = 8) {
     private val screenDiffCounts = ArrayDeque<Int>(windowSize + 1)
     private val errors = ArrayDeque<String>(windowSize + 1)
     private var consecutiveStuckSteps = 0
+
+    private var pendingFingerprint: String? = null
+    private var pendingRecoveryAction: String? = null
 
     sealed class Signal(val description: String) {
         class SameAction(val action: String, val count: Int) :
@@ -53,20 +48,11 @@ class StuckDetector(private val windowSize: Int = 8) {
     data class Detection(
         val signal: Signal,
         val level: RecoveryLevel,
-        val recoveryHint: String
+        val recoveryHint: String,
+        val fingerprint: String
     )
 
-    /**
-     * Record one agent loop step and check for stuck patterns.
-     *
-     * @param action tool name + args fingerprint (e.g. "find_and_tap:cat videos")
-     * @param screenHash hash of current screen content
-     * @param screenDiffCount number of text lines changed vs previous screen
-     * @param error error message if tool failed, null otherwise
-     * @return Detection if stuck, null if OK
-     */
-    fun record(action: String, screenHash: Int, screenDiffCount: Int, error: String?): Detection? {
-        // Add to sliding windows
+    fun record(packageName: String, action: String, screenHash: Int, screenDiffCount: Int, error: String?): Detection? {
         actions.addLast(action)
         if (actions.size > windowSize) actions.removeFirst()
 
@@ -80,10 +66,17 @@ class StuckDetector(private val windowSize: Int = 8) {
             errors.addLast(error)
             if (errors.size > windowSize) errors.removeFirst()
         } else {
-            errors.clear() // consecutive errors broken
+            // Task made progress after recovery
+            val fp = pendingFingerprint
+            val act = pendingRecoveryAction
+            if (fp != null && act != null) {
+                confirmAndSaveRecovery(fp, act)
+                pendingFingerprint = null
+                pendingRecoveryAction = null
+            }
+            errors.clear()
         }
 
-        // Check all 5 signals
         val signal = checkSameAction()
             ?: checkScreenUnchanged()
             ?: checkZeroDiff()
@@ -97,15 +90,55 @@ class StuckDetector(private val windowSize: Int = 8) {
                 consecutiveStuckSteps >= 3 -> RecoveryLevel.STRATEGY_SWITCH
                 else -> RecoveryLevel.HINT
             }
-            val hint = generateRecoveryHint(signal, level)
-            val detection = Detection(signal, level, hint)
-            XLog.w(TAG, "[StuckDetector] ${signal.description} → Level ${level.name}")
+
+            val fingerprint = "pkg:${packageName}_act:${action.take(30)}_hash:${screenHash}"
+            val rememberedRecovery = checkRememberedRecovery(fingerprint)
+
+            val hint = if (!rememberedRecovery.isNullOrBlank()) {
+                XLog.i(TAG, "Replaying remembered recovery sequence from Mem0 for $fingerprint: $rememberedRecovery")
+                "[System Notice - Remembered Fix] $rememberedRecovery"
+            } else {
+                generateRecoveryHint(signal, level)
+            }
+
+            pendingFingerprint = fingerprint
+            pendingRecoveryAction = hint
+
+            val detection = Detection(signal, level, hint, fingerprint)
+            XLog.w(TAG, "[StuckDetector] ${signal.description} → Level ${level.name} (fp=$fingerprint)")
             return detection
         }
 
-        // No stuck signal → reset counter
         consecutiveStuckSteps = 0
         return null
+    }
+
+    private fun checkRememberedRecovery(fingerprint: String): String? {
+        return try {
+            val (memories, _) = runBlocking { HybridMemoryRepository.searchMemories("stuck_recovery_$fingerprint") }
+            if (memories.isNotBlank()) {
+                val lines = memories.split("\n")
+                val match = lines.find { it.contains("stuck_recovery_") }
+                match?.substringAfter(":")?.trim()
+            } else null
+        } catch (e: Exception) {
+            XLog.w(TAG, "Error checking remembered recovery in Mem0: ${e.message}")
+            null
+        }
+    }
+
+    private fun confirmAndSaveRecovery(fingerprint: String, recoveryAction: String) {
+        try {
+            XLog.i(TAG, "Confirming & persisting successful recovery memory to Mem0 for $fingerprint")
+            runBlocking {
+                HybridMemoryRepository.recordTurnAsync(
+                    userQuery = "stuck_recovery_$fingerprint",
+                    aiResponse = recoveryAction
+                )
+            }
+        } catch (e: Exception) {
+            XLog.w(TAG, "Failed to persist recovery memory: ${e.message}")
+        }
     }
 
     private fun checkSameAction(): Signal? {
@@ -185,6 +218,8 @@ class StuckDetector(private val windowSize: Int = 8) {
         screenDiffCounts.clear()
         errors.clear()
         consecutiveStuckSteps = 0
+        pendingFingerprint = null
+        pendingRecoveryAction = null
     }
 
     companion object {
