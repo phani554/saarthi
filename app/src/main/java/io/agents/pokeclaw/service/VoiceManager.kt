@@ -197,6 +197,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
     /**
      * Speaks text using the locked TTS engine or fast local evaluation.
+     * STRICT MANDATE: Never invoke Sarvam Cloud TTS during active task execution!
      */
     fun speak(text: String, flush: Boolean = false) {
         if (!isVoiceOutputEnabled || text.isBlank()) return
@@ -204,6 +205,18 @@ object VoiceManager : TextToSpeech.OnInitListener {
         if (cleanText.isBlank()) return
 
         stopAudioPlayback()
+
+        val currentState = TaskExecutionState.instance.currentState.value
+        val isExecutingState = currentState is AgentTaskState.Executing ||
+                currentState is AgentTaskState.Recovering
+
+        if (isExecutingState) {
+            XLog.i(TAG, "Task is EXECUTING -> FORCE Native Local TTS (0ms cloud latency)")
+            if (isTtsInitialized) {
+                speakNativeInternal(cleanText, flush)
+            }
+            return
+        }
 
         val lock = if (currentTaskEngineLock != TaskTtsEngineLock.UNLOCKED) {
             currentTaskEngineLock
@@ -401,8 +414,10 @@ object VoiceManager : TextToSpeech.OnInitListener {
         return raw.replace(Regex("""```[\s\S]*?```"""), "")
             .replace(Regex("""\{[\s\S]*?\}"""), "")
             .replace(Regex("""https?://\S+"""), "")
-            .replace(Regex("""[*#_~`\[\]]"""), "")
-            .replace(Regex("""[\u2600-\u26FF\u2700-\u27BF]"""), "")
+            .replace(Regex("""[*#_~`\[\]()<=>|/\\+@$%^&-]"""), " ")
+            .replace(Regex("""[\u2600-\u26FF\u2700-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF]"""), "")
+            .replace(Regex("""[✓✗🚨]"""), "")
+            .replace(Regex("""\b(com|org|net|app|id|pkg|view|node|btn|tv|fyt)\.\S+"""), "")
             .replace(Regex("""\s+"""), " ")
             .trim()
     }

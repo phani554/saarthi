@@ -3,13 +3,14 @@
 
 package io.agents.pokeclaw.agent.knowledge
 
-import io.agents.pokeclaw.agent.llm.LlmSessionManager
+import io.agents.pokeclaw.data.memory.HybridMemoryRepository
 import io.agents.pokeclaw.utils.XLog
+import kotlinx.coroutines.runBlocking
 
 /**
  * Resolves nicknames, abbreviations, and semantic shortcuts (e.g. "major project group", "bhai")
  * to the actual contact or WhatsApp group name (e.g. "Final Year Project", "Rahul")
- * using learned memory and AI reasoning.
+ * using Mem0 in-memory cache and fast deterministic rules.
  */
 object ContactAliasResolver {
 
@@ -17,41 +18,45 @@ object ContactAliasResolver {
 
     /**
      * Resolve a raw contact or group reference to its actual display name.
-     * Uses learned memory from MemoryManager and single-shot AI matching.
+     * Plain names/numbers return immediately in 0ms.
+     * Explicit aliases query Mem0 memory in-memory cache.
      */
     fun resolve(rawName: String): String {
         val clean = rawName.trim()
         if (clean.isBlank()) return clean
 
-        val memory = MemoryManager.getMemoryPromptSection()
+        // Fast path (< 1ms): standard contact names & phone numbers return directly
+        if (isPlainNameOrNumber(clean)) {
+            XLog.d(TAG, "ContactAliasResolver fast path: '$clean'")
+            return clean
+        }
 
-        // If memory contains an explicit mapping, try fast AI resolution
-        val systemPrompt = "You resolve contact nicknames, abbreviations, and indirect references to their exact target contact or WhatsApp group display name based on user memory."
-        val prompt = """User memory:
-$memory
-
-Raw contact/group reference: "$clean"
-
-Task: What is the exact display name of this contact or WhatsApp group?
-Rules:
-1. If user memory links "$clean" to an actual group or person name (e.g. "major project group" -> "Final Year Project"), output ONLY the exact group/person name.
-2. If no alias is in memory, output the cleaned name.
-3. Reply with ONLY the resolved display name. No quotes, no explanation."""
-
+        // Fast Mem0 memory query for alias references
         return try {
-            val result = LlmSessionManager.singleShotCloud(systemPrompt, prompt, 0.1)
-                ?: LlmSessionManager.singleShotLocal(systemPrompt, prompt, 0.1)
-
-            val resolved = result?.trim()?.removeSurrounding("\"")?.removeSurrounding("'")
-            if (!resolved.isNullOrBlank() && resolved.length < 50) {
-                XLog.i(TAG, "ContactAliasResolver: '$clean' -> '$resolved'")
-                resolved
-            } else {
-                clean
+            val (memories, _) = runBlocking { HybridMemoryRepository.searchMemories("alias $clean") }
+            if (memories.isNotBlank()) {
+                val lines = memories.split("\n")
+                val matched = lines.find { it.contains(clean, ignoreCase = true) }
+                if (matched != null) {
+                    val resolved = matched.substringAfter(":").substringAfter("=").trim()
+                    if (resolved.isNotBlank() && resolved.length < 50) {
+                        XLog.i(TAG, "ContactAliasResolver Mem0 match: '$clean' -> '$resolved'")
+                        return resolved
+                    }
+                }
             }
+            clean
         } catch (e: Exception) {
-            XLog.w(TAG, "ContactAliasResolver failed, returning raw name '$clean'", e)
+            XLog.w(TAG, "ContactAliasResolver Mem0 check failed: ${e.message}")
             clean
         }
+    }
+
+    private fun isPlainNameOrNumber(name: String): Boolean {
+        val lower = name.lowercase()
+        val isAliasTrigger = lower.contains("my ") || lower.contains("sister") || lower.contains("bhai") ||
+                lower.contains("caretaker") || lower.contains("wife") || lower.contains("husband") ||
+                lower.contains("brother") || lower.contains("friend") || lower.contains("group")
+        return !isAliasTrigger
     }
 }

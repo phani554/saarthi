@@ -3,7 +3,6 @@
 
 package io.agents.pokeclaw.tool.impl.mobile;
 
-import io.agents.pokeclaw.R;
 import io.agents.pokeclaw.service.ClawAccessibilityService;
 import io.agents.pokeclaw.tool.BaseTool;
 import io.agents.pokeclaw.tool.ToolParameter;
@@ -15,7 +14,7 @@ import java.util.Map;
 
 /**
  * Tap a UI element by its node ID (e.g. "n3") from get_screen_info output.
- * More reliable than coordinate-based tap — IDs are assigned per screen refresh.
+ * Uses resilient ACTION_CLICK + ancestor fallback + gesture tap, returning rich, informative label feedback.
  */
 public class TapNodeTool extends BaseTool {
 
@@ -59,17 +58,25 @@ public class TapNodeTool extends BaseTool {
         // Normalize: strip brackets if user passes "[n3]"
         nodeId = nodeId.replace("[", "").replace("]", "").trim();
 
+        ClawAccessibilityService.NodeMetadata meta = service.getNodeMetadata(nodeId);
         int[] coords = service.getNodeCoordinates(nodeId);
-        if (coords == null) {
+        if (coords == null && meta == null) {
             return ToolResult.error("Node " + nodeId + " not found. Call get_screen_info first to refresh node IDs.");
         }
-        int x = coords[0];
-        int y = coords[1];
+
+        int x = meta != null ? meta.coords[0] : coords[0];
+        int y = meta != null ? meta.coords[1] : coords[1];
         String boundsError = validateCoordinates(x, y);
         if (boundsError != null) return ToolResult.error(boundsError);
+
         service.dismissKeyboard();
-        boolean success = service.performTap(x, y);
-        return success ? ToolResult.success("Tapped node " + nodeId + " at (" + x + ", " + y + ")")
-                : ToolResult.error("Failed to tap node " + nodeId + " at (" + x + ", " + y + ")");
+        boolean success = service.clickNodeById(nodeId);
+
+        String label = meta != null ? meta.getDisplayLabel() : nodeId;
+        String cls = (meta != null && !meta.className.isEmpty()) ? " (" + meta.className.substring(meta.className.lastIndexOf('.') + 1) + ")" : "";
+
+        return success
+                ? ToolResult.success("Successfully tapped node " + nodeId + " '" + label + "'" + cls + " at (" + x + ", " + y + ")")
+                : ToolResult.error("Failed to tap node " + nodeId + " '" + label + "' at (" + x + ", " + y + ")");
     }
 }

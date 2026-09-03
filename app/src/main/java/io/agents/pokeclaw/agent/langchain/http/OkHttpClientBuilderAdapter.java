@@ -13,22 +13,23 @@ import dev.langchain4j.http.client.HttpClient;
 import dev.langchain4j.http.client.HttpClientBuilder;
 
 import okhttp3.OkHttpClient;
-import okhttp3.logging.HttpLoggingInterceptor;
 import okhttp3.Interceptor;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.ResponseBody;
 import okhttp3.MediaType;
+import okio.Buffer;
 
 /**
  * Adapts OkHttp's builder to LangChain4j's HttpClientBuilder SPI.
+ * Enforces fast 8s connect and 15s read timeouts to prevent tasks from hanging on network stalls.
  */
 public class OkHttpClientBuilderAdapter implements HttpClientBuilder {
 
     private static final String TAG = "OkHttp";
 
-    private Duration connectTimeout = Duration.ofSeconds(60);
-    private Duration readTimeout = Duration.ofSeconds(300);
+    private Duration connectTimeout = Duration.ofSeconds(8);
+    private Duration readTimeout = Duration.ofSeconds(15);
 
     /**
      * Whether to write raw request/response data to a file (sandbox cache directory)
@@ -36,7 +37,7 @@ public class OkHttpClientBuilderAdapter implements HttpClientBuilder {
     private boolean fileLoggingEnabled = false;
     private File cacheDir;
 
-    /** Whether to print the request body to logcat (off by default; LLM request bodies are large and repetitive) */
+    /** Whether to print the request body to logcat */
     private boolean logRequestBody = false;
 
     public OkHttpClientBuilderAdapter() {
@@ -79,18 +80,15 @@ public class OkHttpClientBuilderAdapter implements HttpClientBuilder {
     public HttpClient build() {
         final boolean logReqBody = this.logRequestBody;
 
-        // Custom interceptor: always print response; request body controlled by logRequestBody flag
         Interceptor llmLoggingInterceptor = chain -> {
             Request request = chain.request();
             long startMs = System.nanoTime();
 
-            // Request: log URL + method only; body controlled by flag
             XLog.d(TAG, "--> " + request.method() + " " + request.url());
             if (logReqBody && request.body() != null) {
-                okio.Buffer buf = new okio.Buffer();
+                Buffer buf = new Buffer();
                 request.body().writeTo(buf);
                 String body = buf.readUtf8();
-                // Truncate overly long body to avoid logcat overflow
                 if (body.length() > 4000) {
                     XLog.d(TAG, "Request body: " + body.substring(0, 4000) + "...[truncated, total=" + body.length() + "]");
                 } else {
@@ -101,13 +99,11 @@ public class OkHttpClientBuilderAdapter implements HttpClientBuilder {
             Response response = chain.proceed(request);
             long durationMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startMs);
 
-            // Response: always print body
             ResponseBody responseBody = response.body();
             String respStr = "";
             if (responseBody != null) {
                 MediaType contentType = responseBody.contentType();
                 respStr = responseBody.string();
-                // Re-wrap (string() can only be consumed once)
                 response = response.newBuilder()
                         .body(ResponseBody.create(contentType, respStr))
                         .build();

@@ -6,15 +6,12 @@ package io.agents.pokeclaw.utils;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
- * Shared matching rules for contact names and phone numbers.
- *
- * The goal is not fuzzy AI matching. It is deterministic matching that is
- * tolerant to common formatting differences like:
- * - "Monica" vs "monica"
- * - "+1 604-555-1234" vs "16045551234"
- * - "6045551234" vs "5551234" in app toolbars/chat lists
+ * Shared deterministic matching rules for contact names, aliases, and phone numbers.
+ * Enforces strict exact-word / boundary matching to eliminate false substring matches
+ * (e.g. preventing "Moments" or "Tomorrow" from matching "Mom", or "Kamyab" from matching "Kamya").
  */
 public final class ContactMatchUtils {
     private ContactMatchUtils() {}
@@ -73,18 +70,37 @@ public final class ContactMatchUtils {
         Set<String> normalizedAliases,
         Set<String> digitAliases
     ) {
-        if (candidate == null || candidate.isEmpty()) return false;
+        if (candidate == null || candidate.isBlank()) return false;
 
         String normalizedCandidate = normalizeText(candidate);
+        if (normalizedCandidate.isEmpty()) return false;
+
         for (String alias : normalizedAliases) {
-            if (!alias.isEmpty() && normalizedCandidate.contains(alias)) {
+            if (alias.isEmpty()) continue;
+
+            // 1. Exact full text match
+            if (normalizedCandidate.equals(alias)) {
+                return true;
+            }
+
+            // 2. Candidate starts with alias followed by word boundary (e.g. "Kamya Gupta" starts with "kamya ")
+            if (normalizedCandidate.startsWith(alias + " ")) {
+                return true;
+            }
+
+            // 3. Exact word boundary match (prevents "Tomorrow" from matching "mom")
+            if (normalizedCandidate.matches(".*\\b" + Pattern.quote(alias) + "\\b.*")) {
                 return true;
             }
         }
 
         String candidateDigits = digitsOnly(candidate);
         for (String alias : digitAliases) {
-            if (!alias.isEmpty() && candidateDigits.contains(alias)) {
+            if (alias.isEmpty()) continue;
+            if (candidateDigits.equals(alias)) {
+                return true;
+            }
+            if (alias.length() >= 7 && candidateDigits.endsWith(alias)) {
                 return true;
             }
         }

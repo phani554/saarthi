@@ -3,6 +3,7 @@
 
 package io.agents.pokeclaw.tool.impl
 
+import io.agents.pokeclaw.agent.EcommerceAutomationHelper
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.service.SearchBarService
 import io.agents.pokeclaw.tool.BaseTool
@@ -33,6 +34,10 @@ class FindSearchBarTool : BaseTool() {
         val query = optionalString(params, "query", "").trim()
 
         if (query.isNotEmpty()) {
+            val fastResult = EcommerceAutomationHelper.fastSearchAndAddToCart(service, query)
+            if (fastResult.isSuccess) {
+                return fastResult
+            }
             val typed = SearchBarService.navigateAndType(service, query)
             return if (typed) {
                 ToolResult.success("Navigated to search bar and typed '$query'")

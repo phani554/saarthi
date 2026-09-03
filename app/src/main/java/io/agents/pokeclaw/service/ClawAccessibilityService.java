@@ -5,8 +5,13 @@ package io.agents.pokeclaw.service;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
+import android.os.PowerManager;
 import android.provider.Settings;
 import android.graphics.Bitmap;
 import android.graphics.Path;
@@ -16,19 +21,31 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import io.agents.pokeclaw.ClawApplication;
+import io.agents.pokeclaw.R;
+import io.agents.pokeclaw.ui.chat.ComposeChatActivity;
+import io.agents.pokeclaw.ui.settings.SettingsActivity;
 import io.agents.pokeclaw.utils.XLog;
 import io.agents.pokeclaw.utils.KVUtils;
+
+import android.util.DisplayMetrics;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
+
+import androidx.core.app.NotificationCompat;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import io.agents.pokeclaw.utils.UiTextMatchUtils;
@@ -136,34 +153,34 @@ public class ClawAccessibilityService extends AccessibilityService {
     private void startKeepAliveForeground() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                android.app.NotificationManager nm = (android.app.NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
                 if (nm != null) {
-                    android.app.NotificationChannel channel = new android.app.NotificationChannel(
+                    NotificationChannel channel = new NotificationChannel(
                             "saathi_accessibility_channel",
                             "Saathi Service Active",
-                            android.app.NotificationManager.IMPORTANCE_LOW
+                            NotificationManager.IMPORTANCE_LOW
                     );
                     channel.setDescription("Keeps Saathi accessibility service active in background");
                     nm.createNotificationChannel(channel);
                 }
             }
 
-            Intent intent = new Intent(this, io.agents.pokeclaw.ui.chat.ComposeChatActivity.class);
-            android.app.PendingIntent pi = android.app.PendingIntent.getActivity(
+            Intent intent = new Intent(this, ComposeChatActivity.class);
+            PendingIntent pi = PendingIntent.getActivity(
                     this, 0, intent,
-                    android.app.PendingIntent.FLAG_IMMUTABLE | android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                    PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT
             );
 
-            androidx.core.app.NotificationCompat.Builder builder = new androidx.core.app.NotificationCompat.Builder(this, "saathi_accessibility_channel")
-                    .setSmallIcon(io.agents.pokeclaw.R.drawable.ic_launcher)
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(this, "saathi_accessibility_channel")
+                    .setSmallIcon(R.drawable.ic_launcher)
                     .setContentTitle("Saathi AI Agent")
                     .setContentText("Accessibility Service Active")
-                    .setPriority(androidx.core.app.NotificationCompat.PRIORITY_LOW)
+                    .setPriority(NotificationCompat.PRIORITY_LOW)
                     .setOngoing(true)
                     .setContentIntent(pi);
 
             if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(2002, builder.build(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                startForeground(2002, builder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
             } else {
                 startForeground(2002, builder.build());
             }
@@ -226,7 +243,7 @@ public class ClawAccessibilityService extends AccessibilityService {
 
         mainHandler.postDelayed(() -> {
             try {
-                Intent intent = new Intent(this, io.agents.pokeclaw.ui.settings.SettingsActivity.class);
+                Intent intent = new Intent(this, SettingsActivity.class);
                 intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                         | Intent.FLAG_ACTIVITY_CLEAR_TOP
                         | Intent.FLAG_ACTIVITY_SINGLE_TOP
@@ -241,10 +258,10 @@ public class ClawAccessibilityService extends AccessibilityService {
     // ======================== Gesture Operations ========================
 
     /**
-     * Performs a tap at the given screen coordinates.
+     * Performs a tap at the given screen coordinates (fast 30ms gesture).
      */
     public boolean performTap(int x, int y) {
-        return performTap(x, y, 100);
+        return performTap(x, y, 30);
     }
 
     public boolean performTap(int x, int y, long durationMs) {
@@ -409,9 +426,37 @@ public class ClawAccessibilityService extends AccessibilityService {
     /**
      * Collects a tree representation of the current screen for AI analysis.
      */
-    /** Node ID → center coordinates mapping for tap_node tool */
-    private final java.util.concurrent.ConcurrentHashMap<String, int[]> nodeIdMap = new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.concurrent.atomic.AtomicInteger nodeCounter = new java.util.concurrent.atomic.AtomicInteger(0);
+    /** Node metadata container for informative tool feedback & resilient tapping */
+    public static class NodeMetadata {
+        public final String nodeId;
+        public final String text;
+        public final String desc;
+        public final String viewId;
+        public final String className;
+        public final int[] coords;
+        public final AccessibilityNodeInfo node;
+
+        public NodeMetadata(String nodeId, String text, String desc, String viewId, String className, int[] coords, AccessibilityNodeInfo node) {
+            this.nodeId = nodeId;
+            this.text = text != null ? text : "";
+            this.desc = desc != null ? desc : "";
+            this.viewId = viewId != null ? viewId : "";
+            this.className = className != null ? className : "";
+            this.coords = coords;
+            this.node = node;
+        }
+
+        public String getDisplayLabel() {
+            if (!text.isEmpty()) return text;
+            if (!desc.isEmpty()) return desc;
+            if (!viewId.isEmpty()) return viewId;
+            return className.isEmpty() ? nodeId : className;
+        }
+    }
+
+    private final ConcurrentHashMap<String, int[]> nodeIdMap = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, NodeMetadata> nodeMetaMap = new ConcurrentHashMap<>();
+    private final AtomicInteger nodeCounter = new AtomicInteger(0);
 
     public String getScreenTree() {
         try {
@@ -420,6 +465,7 @@ public class ClawAccessibilityService extends AccessibilityService {
                 return null;
             }
             nodeIdMap.clear();
+            nodeMetaMap.clear();
             nodeCounter.set(0);
             StringBuilder sb = new StringBuilder();
             buildNodeTree(root, sb, 0);
@@ -433,6 +479,25 @@ public class ClawAccessibilityService extends AccessibilityService {
     /** Get center coordinates for a node ID (e.g. "n3"). Returns null if not found. */
     public int[] getNodeCoordinates(String nodeId) {
         return nodeIdMap.get(nodeId);
+    }
+
+    /** Get node metadata for a node ID (e.g. "n3"). */
+    public NodeMetadata getNodeMetadata(String nodeId) {
+        return nodeMetaMap.get(nodeId);
+    }
+
+    /** Click node by node ID with ancestor & gesture fallback. */
+    public boolean clickNodeById(String nodeId) {
+        NodeMetadata meta = nodeMetaMap.get(nodeId);
+        if (meta != null && meta.node != null) {
+            boolean clicked = clickNode(meta.node);
+            if (clicked) return true;
+        }
+        int[] coords = nodeIdMap.get(nodeId);
+        if (coords != null && coords.length >= 2) {
+            return performTap(coords[0], coords[1]);
+        }
+        return false;
     }
 
     /**
@@ -461,10 +526,10 @@ public class ClawAccessibilityService extends AccessibilityService {
     public boolean isKeyboardVisible() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                List<android.view.accessibility.AccessibilityWindowInfo> windows = getWindows();
+                List<AccessibilityWindowInfo> windows = getWindows();
                 if (windows != null) {
-                    for (android.view.accessibility.AccessibilityWindowInfo window : windows) {
-                        if (window != null && window.getType() == android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
+                    for (AccessibilityWindowInfo window : windows) {
+                        if (window != null && window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) {
                             return true;
                         }
                     }
@@ -543,7 +608,17 @@ public class ClawAccessibilityService extends AccessibilityService {
 
             // Assign node ID for tap_node tool
             String nodeId = "n" + nodeCounter.incrementAndGet();
-            nodeIdMap.put(nodeId, new int[]{cx, cy});
+            int[] coords = new int[]{cx, cy};
+            nodeIdMap.put(nodeId, coords);
+            nodeMetaMap.put(nodeId, new NodeMetadata(
+                nodeId,
+                hasText ? node.getText().toString() : "",
+                hasDesc ? node.getContentDescription().toString() : "",
+                node.getViewIdResourceName(),
+                cn != null ? cn.toString() : "",
+                coords,
+                node
+            ));
 
             // Format: [n1] "text" tap edit (cx,cy)
             StringBuilder line = new StringBuilder();
@@ -837,11 +912,11 @@ public class ClawAccessibilityService extends AccessibilityService {
     public boolean unlockScreen() {
         try {
             // 1. Wake up screen
-            android.os.PowerManager pm = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
             if (pm != null && !pm.isInteractive()) {
                 @SuppressWarnings("deprecation")
-                android.os.PowerManager.WakeLock wl = pm.newWakeLock(
-                        android.os.PowerManager.SCREEN_DIM_WAKE_LOCK | android.os.PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                PowerManager.WakeLock wl = pm.newWakeLock(
+                        PowerManager.SCREEN_DIM_WAKE_LOCK | PowerManager.ACQUIRE_CAUSES_WAKEUP,
                         "PokeClaw:unlock"
                 );
                 wl.acquire(3000);
@@ -851,7 +926,7 @@ public class ClawAccessibilityService extends AccessibilityService {
             }
 
             // 2. Simulate swipe-up gesture to unlock
-            android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+            DisplayMetrics dm = getResources().getDisplayMetrics();
             int centerX = dm.widthPixels / 2;
             int bottomY = (int) (dm.heightPixels * 0.8);
             int topY = (int) (dm.heightPixels * 0.2);
@@ -877,7 +952,7 @@ public class ClawAccessibilityService extends AccessibilityService {
 
         // Use a background executor for the callback to avoid deadlock
         // when takeScreenshot is called from the main thread (Tier 1 tools).
-        java.util.concurrent.Executor bgExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        Executor bgExecutor = Executors.newSingleThreadExecutor();
         takeScreenshot(Display.DEFAULT_DISPLAY, bgExecutor,
                 new TakeScreenshotCallback() {
                     @Override

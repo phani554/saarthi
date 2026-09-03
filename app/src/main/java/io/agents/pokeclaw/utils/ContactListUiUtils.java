@@ -217,7 +217,22 @@ public final class ContactListUiUtils {
         if (node.isClickable()) score += 20;
         if (node.getText() != null && node.getText().length() > 0) score += 25;
         if (node.getContentDescription() != null && node.getContentDescription().length() > 0) score += 5;
-        if (bounds.centerY() > 0) score += Math.min(bounds.centerY() / 10, 80);
+
+        // Prefer nodes in the upper search results area (Y between 150px and 800px)
+        if (bounds.centerY() >= 150 && bounds.centerY() <= 800) {
+            score += 50;
+        } else if (bounds.centerY() > 1200) {
+            score -= 30; // Penalize lower screen items (message previews/status)
+        }
+
+        // View ID resource scoring
+        String viewId = node.getViewIdResourceName() != null ? node.getViewIdResourceName().toLowerCase() : "";
+        if (viewId.contains("title") || viewId.contains("contact_name") || viewId.contains("name") || viewId.contains("entry_name")) {
+            score += 100; // Primary contact title
+        } else if (viewId.contains("snippet") || viewId.contains("status") || viewId.contains("last_msg") || viewId.contains("subtitle")) {
+            score -= 100; // Subtitle / message body snippet (penalize)
+        }
+
         return score;
     }
 

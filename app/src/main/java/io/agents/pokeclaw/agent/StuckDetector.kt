@@ -9,7 +9,8 @@ import kotlinx.coroutines.runBlocking
 import java.util.ArrayDeque
 
 /**
- * Detects stuck agent loops using 5 signals and remembers successful recovery sequences via Mem0.
+ * Detects stuck agent loops using 5 signals and manages active recovery without abrupt task abandonment.
+ * Remembers successful recovery sequences via Mem0.
  */
 class StuckDetector(private val windowSize: Int = 8) {
 
@@ -40,9 +41,9 @@ class StuckDetector(private val windowSize: Int = 8) {
     }
 
     enum class RecoveryLevel {
-        HINT,           // Level 1: inject recovery hint
-        STRATEGY_SWITCH, // Level 2: suggest different approach
-        AUTO_KILL        // Level 3: force finish
+        HINT,             // Level 1: inject recovery hint into prompt
+        AUTO_DISMISS,     // Level 2: auto-dismiss blocking overlay / press back
+        STRATEGY_SWITCH   // Level 3: re-open app / switch strategy
     }
 
     data class Detection(
@@ -66,7 +67,6 @@ class StuckDetector(private val windowSize: Int = 8) {
             errors.addLast(error)
             if (errors.size > windowSize) errors.removeFirst()
         } else {
-            // Task made progress after recovery
             val fp = pendingFingerprint
             val act = pendingRecoveryAction
             if (fp != null && act != null) {
@@ -86,8 +86,8 @@ class StuckDetector(private val windowSize: Int = 8) {
         if (signal != null) {
             consecutiveStuckSteps++
             val level = when {
-                consecutiveStuckSteps >= 5 -> RecoveryLevel.AUTO_KILL
-                consecutiveStuckSteps >= 3 -> RecoveryLevel.STRATEGY_SWITCH
+                consecutiveStuckSteps >= 5 -> RecoveryLevel.STRATEGY_SWITCH
+                consecutiveStuckSteps >= 3 -> RecoveryLevel.AUTO_DISMISS
                 else -> RecoveryLevel.HINT
             }
 
@@ -105,7 +105,7 @@ class StuckDetector(private val windowSize: Int = 8) {
             pendingRecoveryAction = hint
 
             val detection = Detection(signal, level, hint, fingerprint)
-            XLog.w(TAG, "[StuckDetector] ${signal.description} → Level ${level.name} (fp=$fingerprint)")
+            XLog.w(TAG, "[StuckDetector] ${signal.description} → Level ${level.name} (fp=$fingerprint, count=$consecutiveStuckSteps)")
             return detection
         }
 
@@ -195,20 +195,22 @@ class StuckDetector(private val windowSize: Int = 8) {
                     "Your last action '${signal.action}' is not producing results. Try a completely different approach."
             }
             is Signal.ScreenUnchanged ->
-                "The screen has not changed for ${signal.steps} steps. Your actions may not be having any effect. Try pressing system_key(key=\"back\") or system_key(key=\"home\") and restart from a different angle."
+                "The screen has not changed for ${signal.steps} steps. Try pressing system_key(key=\"back\") or selecting an alternative button on screen."
             is Signal.ZeroDiff ->
-                "No new content has appeared on screen. You may be stuck. Try navigating away and back, or use a different tool."
+                "No new content has appeared on screen. Try navigating away and back, or use a different tool."
             is Signal.HighRepetition ->
-                "You are repeating '${signal.action}' too frequently. This approach is not working. Try something fundamentally different."
+                "You are repeating '${signal.action}' too frequently. Try something fundamentally different."
             is Signal.RepeatedError ->
-                "The same error keeps occurring: '${signal.error}'. Do not retry the same approach. Try a different tool or strategy."
+                "The same error keeps occurring: '${signal.error}'. Try a different tool or strategy."
         }
 
         return when (level) {
             RecoveryLevel.HINT ->
                 "[System Notice] $base"
-            RecoveryLevel.STRATEGY_SWITCH, RecoveryLevel.AUTO_KILL ->
-                "[System Warning] You appear stuck on this screen step. Try pressing system_key(key=\"back\"), or call finish asking the user for guidance or to complete the step manually."
+            RecoveryLevel.AUTO_DISMISS ->
+                "[System Recovery] Screen unresponsiveness detected. Attempting active recovery (dismissing overlay or pressing back)."
+            RecoveryLevel.STRATEGY_SWITCH ->
+                "[System Recovery] Persistent screen state detected. Please switch strategy, re-open app, or navigate via search bar."
         }
     }
 

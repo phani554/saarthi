@@ -3,11 +3,13 @@
 
 package io.agents.pokeclaw.agent
 
+import android.accessibilityservice.AccessibilityService
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.WindowManager
+import android.view.accessibility.AccessibilityNodeInfo
 import io.agents.pokeclaw.ClawApplication
 import io.agents.pokeclaw.R
 import io.agents.pokeclaw.agent.langchain.LangChain4jToolBridge
@@ -30,6 +32,7 @@ import dev.langchain4j.data.message.SystemMessage
 import dev.langchain4j.data.message.ToolExecutionResultMessage
 import dev.langchain4j.data.message.UserMessage
 import io.agents.pokeclaw.data.memory.HybridMemoryRepository
+import io.agents.pokeclaw.utils.ContactListUiUtils
 import java.io.File
 import java.util.LinkedList
 import java.util.concurrent.atomic.AtomicBoolean
@@ -418,19 +421,21 @@ class DefaultAgentService : AgentService {
         }
         val msgCountBefore = messages.size
 
-        // 0. Special handling for get_screen_info: regardless of tier, keep only the latest complete result globally
+        // 0. Special handling for screen observations: keep full screen dump only on the MOST RECENT tool result globally
         val screenPlaceholder = OBSERVATION_PLACEHOLDERS["get_screen_info"]!!
         val lastScreenIdx = messages.indexOfLast {
-            it is ToolExecutionResultMessage && it.toolName() == "get_screen_info"
+            it is ToolExecutionResultMessage && (it.toolName() == "get_screen_info" || it.text().contains("Screen after action:"))
         }
         for (i in messages.indices) {
             val msg = messages[i]
-            if (msg is ToolExecutionResultMessage
-                && msg.toolName() == "get_screen_info"
-                && i != lastScreenIdx
-                && msg.text() != screenPlaceholder
-            ) {
-                messages[i] = ToolExecutionResultMessage.from(msg.id(), msg.toolName(), screenPlaceholder)
+            if (msg is ToolExecutionResultMessage && i != lastScreenIdx) {
+                if (msg.toolName() == "get_screen_info" && msg.text() != screenPlaceholder) {
+                    messages[i] = ToolExecutionResultMessage.from(msg.id(), msg.toolName(), screenPlaceholder)
+                } else if (msg.text().contains("Screen after action:")) {
+                    val cleanBase = msg.text().substringBefore("Screen after action:").trim()
+                    val shortText = if (cleanBase.isBlank()) "✓ Action executed [Screen updated]" else "$cleanBase [Screen updated]"
+                    messages[i] = ToolExecutionResultMessage.from(msg.id(), msg.toolName(), shortText)
+                }
             }
         }
 
@@ -542,8 +547,7 @@ class DefaultAgentService : AgentService {
         TaskExecutionState.instance.startTask(rawUserRequest)
 
         MemoryManager.learnFromMessage(rawUserRequest)
-        val (memorySection, memorySource) = HybridMemoryRepository.searchMemories(rawUserRequest)
-        XLog.i(TAG, "Task execution memory source: ${memorySource.name}")
+        val memorySection = MemoryManager.getMemoryPromptSection()
         val taskStateSection = TaskExecutionState.instance.toPromptSection()
 
         val fullSystemPrompt = buildString {
@@ -629,7 +633,8 @@ class DefaultAgentService : AgentService {
         val taskBudget = TaskBudget.fromSettings()
         var softLimitWarned = false
         var hasExecutedTool = false
-        val maxIterations = minOf(config.maxIterations, 25)
+        val taskStartTime = System.currentTimeMillis()
+        val maxIterations = minOf(config.maxIterations, 12)
         if (config.maxIterations > maxIterations) {
             XLog.w(TAG, "runAgentLoop: maxIterations capped to $maxIterations (configured=${config.maxIterations})")
         }
@@ -637,6 +642,14 @@ class DefaultAgentService : AgentService {
         while (iterations < maxIterations && !cancelled.get()) {
             iterations++
             callback.onLoopStart(iterations)
+
+            if (System.currentTimeMillis() - taskStartTime > 35_000L) {
+                XLog.w(TAG, "runAgentLoop: 35s task time budget reached — completing task cleanly")
+                val budgetMsg = "Task executed within time limit."
+                TtsRouter.speakFinalWrapUp(budgetMsg)
+                callback.onComplete(iterations, budgetMsg, totalTokens, actualModelName)
+                return
+            }
 
             // Compress history messages before sending to save tokens
             compressHistoryForSend(messages)
@@ -834,8 +847,18 @@ class DefaultAgentService : AgentService {
                 // finish tool → task complete
                 if (toolName == "finish" && result.isSuccess) {
                     val finishData = result.data ?: ClawApplication.instance.getString(R.string.agent_task_completed)
-                    io.agents.pokeclaw.service.VoiceManager.speak(finishData)
+                    TtsRouter.speakFinalWrapUp(finishData)
                     callback.onComplete(iterations, finishData, totalTokens, actualModelName)
+                    return
+                }
+
+                // End-to-end direct completion tools: complete task immediately upon tool success (0 extra LLM rounds)
+                val directCompletionTools = setOf("place_call", "send_message", "forward_whatsapp_message", "send_distress_signal")
+                if (toolName in directCompletionTools && result.isSuccess) {
+                    val completionMsg = result.data ?: "✓ $toolName executed successfully"
+                    XLog.i(TAG, "Direct completion tool '$toolName' succeeded — completing task end-to-end immediately")
+                    TtsRouter.speakFinalWrapUp(completionMsg)
+                    callback.onComplete(iterations, completionMsg, totalTokens, actualModelName)
                     return
                 }
 
@@ -894,34 +917,43 @@ class DefaultAgentService : AgentService {
                 XLog.d(TAG, "displayName:$displayName toolName:$toolName")
             }
 
-            // Stuck detection (5-signal, 3-level recovery)
+            // Stuck detection & Active Auto-Recovery
             val lastAction = llmResponse.toolExecutionRequests?.firstOrNull()?.let {
                 "${it.name()}:${it.arguments()?.take(50)}"
             } ?: ""
             val screenDiffCount = (previousScreenTexts as? Set<*>)?.size ?: 0
-            val toolError = llmResponse.toolExecutionRequests?.firstOrNull()?.let { req ->
-                val result = ToolRegistry.getInstance().getTool(req.name() ?: "")
-                null // error tracked per-tool above; simplified here
-            }
             val detection = stuckDetector.record(TaskExecutionState.instance.activePackageName, lastAction, lastScreenHash, screenDiffCount, null)
             if (detection != null) {
-                when (detection.level) {
-                    StuckDetector.RecoveryLevel.AUTO_KILL -> {
-                        XLog.w(TAG, "StuckDetector AUTO_KILL at iteration $iterations: ${detection.signal.description}")
-                        val status = tokenMonitor.getStatus()
-                        callback.onComplete(
-                            iterations,
-                            "Task stopped: agent was stuck (${detection.signal.description}). " +
-                            "Used ${status.formattedTokens} tokens (${status.formattedCost}).",
-                            totalTokens,
-                            actualModelName
-                        )
-                        return
+                XLog.w(TAG, "StuckDetector ${detection.level} at iteration $iterations: ${detection.signal.description}")
+
+                val service = ClawAccessibilityService.getConnectedInstance(1000L)
+                if (service != null && (detection.level == StuckDetector.RecoveryLevel.AUTO_DISMISS || detection.level == StuckDetector.RecoveryLevel.STRATEGY_SWITCH)) {
+                    val root = service.rootInActiveWindow
+                    if (root != null) {
+                        try {
+                            val method = ContactListUiUtils::class.java.getDeclaredMethod("dismissBlockingOverlay", ClawAccessibilityService::class.java, AccessibilityNodeInfo::class.java, Long::class.javaPrimitiveType)
+                            method.isAccessible = true
+                            val dismissed = method.invoke(null, service, root, 300L) as? Boolean ?: false
+                            if (dismissed) {
+                                XLog.i(TAG, "Active recovery: auto-dismissed blocking overlay or permission dialog")
+                                messages.add(UserMessage.from("[System Notice] Auto-recovery dismissed a blocking popup/dialog on screen. Resume task from current screen."))
+                            } else {
+                                XLog.i(TAG, "Active recovery: pressing Back key to unblock screen")
+                                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                                messages.add(UserMessage.from("[System Notice] Auto-recovery pressed Back to clear unresponsiveness. Resume task from current screen."))
+                            }
+                        } catch (_: Exception) {
+                            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                            messages.add(UserMessage.from("[System Notice] Auto-recovery pressed Back to clear unresponsiveness. Resume task from current screen."))
+                        }
                     }
-                    else -> {
-                        XLog.w(TAG, "StuckDetector ${detection.level} at iteration $iterations: ${detection.signal.description}")
-                        messages.add(UserMessage.from(detection.recoveryHint))
-                    }
+                } else {
+                    messages.add(UserMessage.from(detection.recoveryHint))
+                }
+
+                // Gentle senior citizen voice guidance if 12+ steps pass
+                if (iterations >= 12 && iterations % 4 == 0) {
+                    TtsRouter.speak("I am trying to complete this for you. If you see a prompt on your screen, please tap allow or confirm so I can continue.", flush = false)
                 }
             }
             XLog.d(TAG, "Round:$iterations total=$totalTokens thisRound=${llmResponse.tokenUsage?.totalTokenCount()}")

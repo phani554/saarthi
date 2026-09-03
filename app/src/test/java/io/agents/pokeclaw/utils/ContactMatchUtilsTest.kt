@@ -18,6 +18,56 @@ class ContactMatchUtilsTest {
     }
 
     @Test
+    fun `matches exact word boundary and avoids false substring matches`() {
+        assertTrue(
+            ContactMatchUtils.matchesTarget(
+                "Message to Mom",
+                null,
+                "Mom"
+            )
+        )
+        assertFalse(
+            ContactMatchUtils.matchesTarget(
+                "Tomorrow at 5pm",
+                null,
+                "Mom"
+            )
+        )
+        assertFalse(
+            ContactMatchUtils.matchesTarget(
+                "Moments of joy",
+                null,
+                "Mom"
+            )
+        )
+    }
+
+    @Test
+    fun `matches contact name prefix and exact full name`() {
+        assertTrue(
+            ContactMatchUtils.matchesTarget(
+                "Kamya Gupta",
+                null,
+                "Kamya"
+            )
+        )
+        assertTrue(
+            ContactMatchUtils.matchesTarget(
+                "Kamya Gupta",
+                null,
+                "Kamya Gupta"
+            )
+        )
+        assertFalse(
+            ContactMatchUtils.matchesTarget(
+                "Kamyab",
+                null,
+                "Kamya"
+            )
+        )
+    }
+
+    @Test
     fun `matches phone numbers across formatting differences`() {
         assertTrue(
             ContactMatchUtils.matchesTarget(
