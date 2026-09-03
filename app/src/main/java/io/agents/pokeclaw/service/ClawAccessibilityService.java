@@ -487,13 +487,12 @@ public class ClawAccessibilityService extends AccessibilityService {
      * Dismisses/hides the soft keyboard if it is currently visible on screen.
      */
     public boolean dismissKeyboard() {
-        if (!isKeyboardVisible()) {
-            return false;
-        }
-        XLog.i(TAG, "dismissKeyboard: soft keyboard detected, dismissing via GLOBAL_ACTION_BACK");
+        boolean visible = isKeyboardVisible();
+        XLog.i(TAG, "dismissKeyboard: isKeyboardVisible=" + visible);
+        // Execute back action to hide soft keyboard if visible or recently focused input field
         boolean result = performGlobalAction(GLOBAL_ACTION_BACK);
         try {
-            Thread.sleep(200);
+            Thread.sleep(250);
         } catch (InterruptedException ignored) {
             Thread.currentThread().interrupt();
         }

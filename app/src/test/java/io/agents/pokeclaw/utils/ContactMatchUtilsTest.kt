@@ -52,4 +52,41 @@ class ContactMatchUtilsTest {
             )
         )
     }
+
+    @Test
+    fun `rejects official group when target asks for unofficial group`() {
+        val aliases = ContactMatchUtils.buildNormalizedAliases("Major Project Unofficial")
+        val digits = ContactMatchUtils.buildDigitAliases("Major Project Unofficial")
+
+        assertFalse(
+            ContactMatchUtils.matchesCandidate(
+                "Major Project Official",
+                aliases,
+                digits
+            )
+        )
+        assertTrue(
+            ContactMatchUtils.matchesCandidate(
+                "Major Project Unofficial",
+                aliases,
+                digits
+            )
+        )
+    }
+
+    @Test
+    fun `detects conflicting qualifiers correctly`() {
+        assertTrue(
+            ContactMatchUtils.hasConflictingQualifier(
+                "Major Project Unofficial",
+                "Major Project Official"
+            )
+        )
+        assertFalse(
+            ContactMatchUtils.hasConflictingQualifier(
+                "Major Project Unofficial",
+                "Major Project Unofficial"
+            )
+        )
+    }
 }

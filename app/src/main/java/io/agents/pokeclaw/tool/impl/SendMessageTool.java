@@ -3,10 +3,16 @@
 
 package io.agents.pokeclaw.tool.impl;
 
+import android.accessibilityservice.AccessibilityService;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.Context;
 import android.graphics.Rect;
 import android.os.Bundle;
+import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
+import io.agents.pokeclaw.agent.knowledge.ContactAliasResolver;
 import io.agents.pokeclaw.service.ClawAccessibilityService;
 import io.agents.pokeclaw.tool.BaseTool;
 import io.agents.pokeclaw.tool.ToolParameter;
@@ -19,6 +25,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -77,7 +84,7 @@ public class SendMessageTool extends BaseTool {
         }
 
         String rawContact = requireString(params, "contact");
-        String contact = io.agents.pokeclaw.agent.knowledge.ContactAliasResolver.INSTANCE.resolve(rawContact);
+        String contact = ContactAliasResolver.INSTANCE.resolve(rawContact);
         String message = requireString(params, "message");
         Object appParam = params.get("app");
         String app = appParam != null ? appParam.toString() : "WhatsApp";
@@ -119,9 +126,17 @@ public class SendMessageTool extends BaseTool {
                     return ToolResult.error("Could not find '" + contact + "' in " + app + " chat list.");
                 }
                 XLog.i(TAG, "Step 3: Tapped " + contact);
-                Thread.sleep(3000);
-                waitForActiveWindow(service, packageName, 5000);
+                waitForActiveWindow(service, packageName, 3000);
             }
+
+            // Step 3b: Mandatory Target Chat Title Verification Guard
+            if (!verifyOpenChatHeader(service, contact)) {
+                Thread.sleep(800);
+                if (!verifyOpenChatHeader(service, contact)) {
+                    return ToolResult.error("Opened chat header title does not match requested target '" + contact + "'. Exited chat to prevent sending message to wrong group or recipient.");
+                }
+            }
+            XLog.i(TAG, "Step 3b: Verified open chat header title matches target '" + contact + "'");
 
             // Step 4: Type message in the bottommost input field (retry — chat may still be loading)
             boolean typed = false;
@@ -156,25 +171,45 @@ public class SendMessageTool extends BaseTool {
     }
 
     /**
-     * Check if the current screen is already the chatroom for the given contact.
-     * Looks for the contact name in the top toolbar area.
+     * Strictly verifies that the currently open chatroom's top action bar header title matches
+     * the target contact/group name without any conflicting qualifiers (e.g. "official" vs "unofficial").
      */
-    private boolean isAlreadyInChatWith(ClawAccessibilityService service, String contact) {
+    private boolean verifyOpenChatHeader(ClawAccessibilityService service, String contact) {
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
         if (root == null) return false;
-        java.util.LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
-        java.util.LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
 
-        // Search top 300px of screen for a text matching the contact name
+        LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
+        LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
+
         List<AccessibilityNodeInfo> topNodes = new ArrayList<>();
-        collectTextNodesInRegion(root, 0, 300, topNodes);
+        collectTextNodesInRegion(root, 0, 350, topNodes);
+
         for (AccessibilityNodeInfo node : topNodes) {
-            if (ContactMatchUtils.matchesTarget(node.getText(), node.getContentDescription(), normalizedAliases, digitAliases)) {
-                XLog.d(TAG, "isAlreadyInChatWith: matched toolbar target text=" + node.getText() + " desc=" + node.getContentDescription());
+            CharSequence text = node.getText();
+            CharSequence desc = node.getContentDescription();
+            String title = text != null ? text.toString() : (desc != null ? desc.toString() : "");
+            if (title.isBlank()) continue;
+
+            if (ContactMatchUtils.hasConflictingQualifier(contact, title)) {
+                XLog.w(TAG, "verifyOpenChatHeader: CONFLICTING QUALIFIER detected! Target=" + contact + " Header=" + title);
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+                return false;
+            }
+
+            if (ContactMatchUtils.matchesTarget(text, desc, normalizedAliases, digitAliases)) {
+                XLog.i(TAG, "verifyOpenChatHeader: Verified chat title match -> " + title);
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Check if the current screen is already the chatroom for the given contact.
+     * Looks for the contact name in the top toolbar area.
+     */
+    private boolean isAlreadyInChatWith(ClawAccessibilityService service, String contact) {
+        return verifyOpenChatHeader(service, contact);
     }
 
     private void collectTextNodesInRegion(AccessibilityNodeInfo node, int minY, int maxY, List<AccessibilityNodeInfo> result) {
@@ -215,8 +250,8 @@ public class SendMessageTool extends BaseTool {
      * More reliable than findAccessibilityNodeInfosByText which misses nodes in some apps.
      */
     private boolean findAndTapContact(ClawAccessibilityService service, String contact) throws InterruptedException {
-        java.util.LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
-        java.util.LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
+        LinkedHashSet<String> normalizedAliases = ContactMatchUtils.buildNormalizedAliases(contact);
+        LinkedHashSet<String> digitAliases = ContactMatchUtils.buildDigitAliases(contact);
         return ContactListUiUtils.searchOrScrollAndFindAndClick(service, contact, normalizedAliases, digitAliases, 12, 800);
     }
 
@@ -226,8 +261,8 @@ public class SendMessageTool extends BaseTool {
      */
     private void collectNodesWithText(
         AccessibilityNodeInfo node,
-        java.util.LinkedHashSet<String> normalizedAliases,
-        java.util.LinkedHashSet<String> digitAliases,
+        LinkedHashSet<String> normalizedAliases,
+        LinkedHashSet<String> digitAliases,
         List<AccessibilityNodeInfo> results
     ) {
         if (node == null) return;
@@ -302,10 +337,10 @@ public class SendMessageTool extends BaseTool {
         // Only fall back to clipboard paste if ACTION_SET_TEXT returned false
         XLog.w(TAG, "typeInBottomEditText: ACTION_SET_TEXT returned false, attempting clipboard paste fallback");
         try {
-            android.content.ClipboardManager clipboard = (android.content.ClipboardManager)
-                    service.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            ClipboardManager clipboard = (ClipboardManager)
+                    service.getSystemService(Context.CLIPBOARD_SERVICE);
             if (clipboard != null) {
-                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("send_msg", message));
+                clipboard.setPrimaryClip(ClipData.newPlainText("send_msg", message));
                 return best.performAction(AccessibilityNodeInfo.ACTION_PASTE);
             }
         } catch (Exception e) {
@@ -355,7 +390,7 @@ public class SendMessageTool extends BaseTool {
         // Going "Back" here can blur the input or even leave the chat screen in some apps.
         XLog.i(TAG, "tapSendOrEnter: no send button found, pressing Enter directly");
         try {
-            service.sendKeyEvent(android.view.KeyEvent.KEYCODE_ENTER);
+            service.sendKeyEvent(KeyEvent.KEYCODE_ENTER);
             return didMessageLeaveComposer(service, expectedMessage, "enter");
         } catch (Exception e) {
             XLog.w(TAG, "Enter key fallback failed", e);

@@ -359,7 +359,6 @@ class TaskFlowController(
             when (event) {
                 is TaskEvent.Completed -> {
                     replaceTypingIndicator(event.answer, event.modelName)
-                    VoiceManager.speakAsync(event.answer, flush = true)
                     cleanupAfterTask()
                     checkAutoReplyConfirmation()
                 }
@@ -392,10 +391,11 @@ class TaskFlowController(
                 is TaskEvent.ToolAction -> {
                     uiState.isAwaitingReply.value = false
                     uiState.isTaskRunning.value = true
-                    if (!event.toolName.contains("Finish", ignoreCase = true)) {
+                    val name = event.toolName
+                    if (!name.contains("Finish", ignoreCase = true) && !name.contains("Get Screen", ignoreCase = true)) {
                         removeTypingIndicator()
-                        addSystem("${event.toolName}...")
-                        VoiceManager.speakNative("${event.toolName}...")
+                        addSystem("$name...")
+                        VoiceManager.speakNative("Executing $name...")
                     }
                 }
                 is TaskEvent.ToolResult -> {

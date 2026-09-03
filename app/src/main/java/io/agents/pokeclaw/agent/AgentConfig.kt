@@ -125,7 +125,7 @@ Rule 14: App Navigation & Quick-Commerce Mode Switching Rules (Flipkart / Blinki
   - Mode Verification: On shopping apps like Flipkart (com.flipkart.android), if the task is for quick-commerce / grocery / 10-minute items (milk, bread, snacks, vegetables), VERIFY that the app is in Minutes mode (check top banner for "Minutes" tab or top search bar "Search in minutes"). If in normal store mode, tap the top banner "Minutes" tab (bounds x:348..612, y:126..282) or "Minutes" tab node immediately to switch modes before searching!
   - Fast Search Bar Navigation: Use find_search_bar(query="...") directly to locate search bar, focus, clear, and type query in 1 step. Do NOT scroll down on the home screen when looking for the search bar (scrolling down pushes the top search widget off-screen).
   - Fast Add to Cart: On search result screens, use add_to_cart(product_name="...") to locate product cards and tap the "ADD" / "ADD TO CART" button directly.
-  - WhatsApp Navigation & Target Chat Verification Guard (CRITICAL): Before tapping Send or Forwarding a message on WhatsApp, inspect the top action bar contact/group header on the chat screen to verify that the chat title matches the requested target contact/group! If the chat title does NOT match, tap back or search for the correct contact before sending! When tapping chat rows, target the title/text area on the right side (65% X offset) to avoid opening profile photo popups on the left.
+  - WhatsApp Navigation & Target Chat Verification Guard (STRICT SAFETY RULE): Before typing, tapping Send, calling, or forwarding a message on WhatsApp, inspect the top action bar contact/group header on the chat screen to verify that the chat title strictly matches the requested target contact/group name (including distinguishing modifiers like "official" vs "unofficial"). If the open chat title does NOT match (e.g. user requested "Unofficial" group but screen shows "Official" group), DO NOT SEND OR CALL! Immediately call system_key(key="back") to exit the wrong chat and search for the exact name! When tapping chat rows, target the title/text area on the right side (65% X offset) to avoid opening profile photo popups on the left.
   - Group Task Summarization: Use get_group_task_summary(group_name="...") to extract actionable tasks and TODOs from WhatsApp group chats.
   BAD: "I found your emails"
   GOOD: "3 unread: 1. Mom: 'Dinner at 7?' 2. GitHub: PR merged 3. Amazon: order shipped"
@@ -170,6 +170,9 @@ Rule 17: Search Query Optimization in E-Commerce & App Tools.
   When searching for products in shopping/quick-commerce apps (Blinkit, Zepto, Instamart, Amazon), DO NOT type colloquial phrases like "small pepsi bottle 250ml" directly into search inputs.
   Rewrite the query to the core product/brand keywords (e.g. "Pepsi", "Amul Milk", "Lays Chips") so search engines return accurate results.
   If multiple sizes or variants appear in search results, select the best matching product or ask the user for clarification.
+
+Rule 18: Keyboard Minimization in Search Fields.
+  Whenever a soft keyboard opens after typing into a search bar, filter, or input field, minimize/dismiss the keyboard (call system_key(key="back") or let input_text dismiss it) so lower screen search results are fully visible and clickable.
 
 ## STRICT ABANDON & OUT-OF-STOCK RULES (STRICT EFFICIENCY ENFORCEMENT)
 

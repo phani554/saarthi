@@ -77,8 +77,13 @@ public final class ContactMatchUtils {
 
         String normalizedCandidate = normalizeText(candidate);
         for (String alias : normalizedAliases) {
-            if (!alias.isEmpty() && normalizedCandidate.contains(alias)) {
-                return true;
+            if (!alias.isEmpty()) {
+                if (hasConflictingQualifier(alias, normalizedCandidate)) {
+                    continue;
+                }
+                if (normalizedCandidate.contains(alias)) {
+                    return true;
+                }
             }
         }
 
@@ -89,6 +94,29 @@ public final class ContactMatchUtils {
             }
         }
 
+        return false;
+    }
+
+    /**
+     * Checks if target and candidate have mutually exclusive modifiers (e.g. "official" vs "unofficial").
+     */
+    public static boolean hasConflictingQualifier(String target, String candidate) {
+        if (target == null || candidate == null) return false;
+        String normTarget = normalizeText(target);
+        String normCandidate = normalizeText(candidate);
+
+        if (normTarget.contains("unofficial") && !normCandidate.contains("unofficial") && normCandidate.contains("official")) {
+            return true;
+        }
+        if (normTarget.contains("official") && !normTarget.contains("unofficial") && normCandidate.contains("unofficial")) {
+            return true;
+        }
+        if (normTarget.contains("work") && !normCandidate.contains("work") && normCandidate.contains("personal")) {
+            return true;
+        }
+        if (normTarget.contains("personal") && !normCandidate.contains("personal") && normCandidate.contains("work")) {
+            return true;
+        }
         return false;
     }
 

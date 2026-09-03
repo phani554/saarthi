@@ -136,15 +136,9 @@ object VoiceManager : TextToSpeech.OnInitListener {
     private var currentTaskEngineLock: TaskTtsEngineLock = TaskTtsEngineLock.UNLOCKED
 
     fun lockTtsEngineForTask(): TaskTtsEngineLock {
-        val sarvamKey = KVUtils.getSarvamApiKey().trim()
-        val latency = pingTtsLatencyMs()
-        currentTaskEngineLock = if (sarvamKey.isNotEmpty() && latency < 600L) {
-            XLog.i(TAG, "Locked SARVAM_CLOUD TTS engine for task lifetime (ping=$latency ms)")
-            TaskTtsEngineLock.SARVAM_CLOUD
-        } else {
-            XLog.i(TAG, "Locked NATIVE_LOCAL TTS engine for task lifetime (ping=$latency ms)")
-            TaskTtsEngineLock.NATIVE_LOCAL
-        }
+        // Native-only fast TTS execution for active tasks
+        currentTaskEngineLock = TaskTtsEngineLock.NATIVE_LOCAL
+        XLog.i(TAG, "Locked NATIVE_LOCAL TTS engine for task lifetime (0ms network latency)")
         return currentTaskEngineLock
     }
 
@@ -161,7 +155,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
     }
 
     /**
-     * Speaks text using the locked TTS engine or latency-evaluated engine.
+     * Speaks text using the locked TTS engine or Native Android TTS.
      */
     fun speak(text: String, flush: Boolean = false) {
         if (!isVoiceOutputEnabled || text.isBlank()) return
@@ -173,14 +167,15 @@ object VoiceManager : TextToSpeech.OnInitListener {
         val lock = if (currentTaskEngineLock != TaskTtsEngineLock.UNLOCKED) {
             currentTaskEngineLock
         } else {
-            val sarvamKey = KVUtils.getSarvamApiKey().trim()
-            if (sarvamKey.isNotEmpty() && pingTtsLatencyMs() < 600L) TaskTtsEngineLock.SARVAM_CLOUD else TaskTtsEngineLock.NATIVE_LOCAL
+            TaskTtsEngineLock.NATIVE_LOCAL
         }
 
         if (lock == TaskTtsEngineLock.SARVAM_CLOUD) {
             val sarvamKey = KVUtils.getSarvamApiKey().trim()
-            val spokenSarvam = speakSarvamTts(cleanText, sarvamKey)
-            if (spokenSarvam) return
+            if (sarvamKey.isNotEmpty()) {
+                val spokenSarvam = speakSarvamTts(cleanText, sarvamKey)
+                if (spokenSarvam) return
+            }
         }
 
         if (isTtsInitialized) {
@@ -225,6 +220,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
             if (VoiceRecorder.isRecording()) {
                 VoiceRecorder.stopRecording()
             }
+            stopAudioPlayback()
             if (isTtsInitialized) {
                 isPlayingAudio = true
                 _engineState.value = VoiceEngineState.Speaking
@@ -344,6 +340,9 @@ object VoiceManager : TextToSpeech.OnInitListener {
             mediaPlayer?.release()
             mediaPlayer = null
         } catch (_: Exception) {}
+        try {
+            tts?.stop()
+        } catch (_: Exception) {}
         isPlayingAudio = false
         _engineState.value = VoiceEngineState.Idle
     }
@@ -362,22 +361,6 @@ object VoiceManager : TextToSpeech.OnInitListener {
             .replace(Regex("""[\u2600-\u26FF\u2700-\u27BF]"""), "") // Remove emojis
             .replace(Regex("""\s+"""), " ")
             .trim()
-    }
-
-    fun pingTtsLatencyMs(): Long {
-        val start = System.currentTimeMillis()
-        return try {
-            val request = Request.Builder()
-                .url("https://api.sarvam.ai/text-to-speech")
-                .head()
-                .build()
-            val response = httpClient.newCall(request).execute()
-            val elapsed = System.currentTimeMillis() - start
-            response.close()
-            elapsed
-        } catch (_: Exception) {
-            9999L
-        }
     }
 
     fun resolveGeminiApiKey(): String {

@@ -30,6 +30,7 @@ import dev.langchain4j.data.message.SystemMessage
 import dev.langchain4j.data.message.ToolExecutionResultMessage
 import dev.langchain4j.data.message.UserMessage
 import io.agents.pokeclaw.data.memory.HybridMemoryRepository
+import io.agents.pokeclaw.service.VoiceManager
 import java.io.File
 import java.util.LinkedList
 import java.util.concurrent.atomic.AtomicBoolean
@@ -725,7 +726,9 @@ class DefaultAgentService : AgentService {
                             emailComposeGuard.shouldBlockTextOnlyCompletion())
                 if (!suppressHallucinatedCompletion && !hasFinishCall) {
                     callback.onContent(iterations, llmResponse.text)
-                    io.agents.pokeclaw.service.VoiceManager.speakAsync(llmResponse.text)
+                    if (!llmResponse.hasToolExecutionRequests()) {
+                        VoiceManager.speakAsync(llmResponse.text)
+                    }
                 }
             }
 
@@ -809,7 +812,6 @@ class DefaultAgentService : AgentService {
                 }
 
                 callback.onToolCall(iterations, toolName, displayName, toolArgs)
-                io.agents.pokeclaw.service.VoiceManager.speakAsync("Executing $displayName")
                 directDeviceDataGuard.recordToolAttempt(toolName)
                 emailComposeGuard.recordToolAttempt(toolName)
 

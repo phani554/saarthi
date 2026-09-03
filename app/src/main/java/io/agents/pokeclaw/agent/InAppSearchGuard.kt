@@ -37,7 +37,7 @@ internal class InAppSearchGuard private constructor(
             Required execution steps before completion:
             1. Open the target app with open_app(app_name="${task.appName}") if it is not already open.
             2. Find the app's search field or search icon.
-            3. Call input_text(text="${task.query}") to actually type the query.
+            3. Call input_text(text="${task.query}") to type the query, and minimize/dismiss the keyboard if open.
             4. Submit the search and inspect the visible results with get_screen_info.
             5. Only then call finish(summary="what is visible in the results").
             Never claim the search succeeded from memory alone. If you cannot type the query, explain the blocker instead of finishing.
