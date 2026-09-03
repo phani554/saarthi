@@ -34,6 +34,7 @@ object TaskParser {
         val lower = task.lowercase().trim()
 
         return matchMemoryStatement(lower, task)
+            ?: matchMessageToCart(lower, task)
             ?: matchWhatsAppCall(lower, task)
             ?: matchSendMessage(lower, task)
             ?: matchCall(lower, task)
@@ -48,6 +49,28 @@ object TaskParser {
     }
 
     // ==================== Pattern Matchers ====================
+
+    private val MESSAGE_TO_CART_PATTERN = Regex(
+        """(?:read\s+(.+?)['’]?s\s+message|read\s+.*message\s+from\s+(.+?))\s+(?:and\s+|to\s+)?(?:order|buy|add)\s+.*?(?:on|from|using)\s+(.+)""",
+        RegexOption.IGNORE_CASE
+    )
+
+    private fun matchMessageToCart(lower: String, original: String): ParseResult? {
+        val match = MESSAGE_TO_CART_PATTERN.find(original) ?: return null
+        val contact = match.groupValues[1].ifBlank { match.groupValues[2] }.trim().removeSuffix("'s")
+        val storeApp = match.groupValues[3].trim()
+
+        if (contact.isBlank() || storeApp.isBlank()) return null
+
+        XLog.i(TAG, "TaskParser matched MessageToCart: contact='$contact', store='$storeApp'")
+        return ParseResult(
+            action = "message_to_cart",
+            intent = null,
+            toolName = "message_to_cart",
+            toolParams = mapOf("contact" to contact, "store_app" to storeApp),
+            description = "Reading message from $contact and ordering items on $storeApp"
+        )
+    }
 
     private val MEMORY_STATEMENT_PATTERN = Regex(
         """(?:remember\s+that\s+|note\s+that\s+|my\s+(?:favorite|preferred|project|address)\s+is\s+|set\s+my\s+|update\s+my\s+)(.+)""",

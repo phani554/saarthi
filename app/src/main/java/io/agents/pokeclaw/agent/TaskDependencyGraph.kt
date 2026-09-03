@@ -62,6 +62,11 @@ object TaskDependencyGraph {
                 val contact = contactMatch?.groupValues?.get(1)?.trim() ?: "Mom"
                 "Send message to $contact: 'Milk has been ordered ($prereqSummary). You can start making kheer!'"
             }
+            lower.contains("order") || lower.contains("buy") || lower.contains("add") -> {
+                val storeMatch = Regex("""(?i)\b(?:on|from|using)\s+([a-zA-Z0-9\s]+)$""").find(originalPrompt)
+                val store = storeMatch?.groupValues?.get(1)?.trim() ?: "Flipkart Minutes"
+                "Order $prereqSummary on $store"
+            }
             else -> originalPrompt
         }
     }

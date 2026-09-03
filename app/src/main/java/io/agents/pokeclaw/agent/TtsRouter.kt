@@ -66,6 +66,7 @@ object TtsRouter {
     /**
      * Perform clean handoff from Executing -> Completed/Failed:
      * Synchronously stops native engine and awaits its completion before speaking the final wrap-up utterance via Sarvam.
+     * Replaces technical internal messages ("Task executed within time limit.") with natural user feedback ("Kaam poora ho gaya hai.").
      */
     fun speakFinalWrapUp(summaryText: String, onFinished: (() -> Unit)? = null) {
         routerScope.launch {
@@ -77,11 +78,16 @@ object TtsRouter {
                     return@launch
                 }
 
-                XLog.i(TAG, "Performing Executing -> Completed TTS handoff for summary: '$summaryText'")
+                val cleanSummary = when {
+                    summaryText.contains("within time limit") || summaryText == "Done." -> "Kaam poora ho gaya hai."
+                    else -> summaryText
+                }
+
+                XLog.i(TAG, "Performing Executing -> Completed TTS handoff for summary: '$cleanSummary' (raw: '$summaryText')")
                 stopNativeAndAwaitCompletion()
 
                 // Speak final wrap-up message via Sarvam TTS
-                VoiceManager.speak(summaryText, flush = true)
+                VoiceManager.speak(cleanSummary, flush = true)
                 onFinished?.invoke()
             }
         }

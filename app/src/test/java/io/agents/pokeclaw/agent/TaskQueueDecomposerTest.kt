@@ -11,11 +11,20 @@ class TaskQueueDecomposerTest {
 
     @Test
     fun testDecomposeCompoundTask() {
-        val prompt = "Order Amul Taaza 1L Milk on Blinkit and send a message to Mom saying I bought milk"
+        val prompt = "Order Amul Taaza 1L Milk on Blinkit, then send a message to Mom saying I bought milk"
         val parts = TaskQueueDecomposer.decompose(prompt)
         assertEquals(2, parts.size)
         assertEquals("Order Amul Taaza 1L Milk on Blinkit", parts[0])
         assertEquals("send a message to Mom saying I bought milk", parts[1])
+    }
+
+    @Test
+    fun testDecomposeMessageToCartWithThenCall() {
+        val prompt = "Read Kaamya's message and order all items on Flipkart Minutes, then make a video call to Kaamya"
+        val parts = TaskQueueDecomposer.decompose(prompt)
+        assertEquals(2, parts.size)
+        assertEquals("Read Kaamya's message and order all items on Flipkart Minutes", parts[0])
+        assertEquals("make a video call to Kaamya", parts[1])
     }
 
     @Test

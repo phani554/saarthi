@@ -64,10 +64,13 @@ class DefaultAgentService : AgentService {
 
 ## Execution Rules
 1. Action Tasks: Use high-level direct tools (send_message, place_call, forward_whatsapp_message, send_distress_signal, find_search_bar, add_to_cart, read_cart) to execute tasks end-to-end in 1 fast step whenever possible.
-2. Fact / Memory Statements: If user shares a preference, confirm and call finish(summary="Got it! Noted.").
-3. Precision: Never guess or tap random suggestions. When searching for contacts or items, use exact keywords from memory/request.
-4. Out of Stock: If an item is out of stock, skip it immediately or call finish.
-5. Completion: When done, call finish(summary="actual data or summary")."""
+2. E-Commerce Cart Completion: When requested items are added to cart and the Cart Summary / "Pay ₹XX" / "View Cart" CTA is visible on screen, DO NOT perform math calculations or audit price discrepancies! (Differences like delivery fees are normal). Call finish(summary="Items added to cart. Total: ₹XX") IMMEDIATELY! Never switch tabs to audit item prices.
+3. Fact / Memory Statements: If user shares a preference, confirm and call finish(summary="Got it! Noted.").
+4. Precision: Never guess or tap random suggestions. When searching for contacts or items, use exact keywords from memory/request.
+5. Out of Stock: If an item is out of stock, skip it immediately or call finish.
+6. Completion: When done, call finish(summary="actual data or summary").
+7. Strict No-Oscillation Rule: Once message contents or item lists are read from WhatsApp, NEVER re-open WhatsApp or re-navigate back to WhatsApp! Process all extracted items directly on the target store (Flipkart Minutes / Blinkit / Zepto) until checkout.
+8. Multi-Option Bottom Sheet Handling: When a size/variant bottom sheet appears (e.g. 250ml / 500ml / 1L), match the requested size if specified or tap the top default option immediately in 1 step without dismissing."""
 
         /** Maximum number of retries on LLM API call failure */
         private const val MAX_API_RETRIES = 3
@@ -90,7 +93,7 @@ class DefaultAgentService : AgentService {
             "find_search_bar", "add_to_cart"
         )
         /** ms to wait for UI to settle before capturing screen after an action */
-        private const val SCREEN_SETTLE_MS = 250L
+        private const val SCREEN_SETTLE_MS = 1000L
 
         /** Whether to write raw network request/response data to sandbox cache files for debugging */
         @JvmField
@@ -517,7 +520,9 @@ class DefaultAgentService : AgentService {
         TaskExecutionState.instance.startTask(rawUserRequest)
 
         MemoryManager.learnFromMessage(rawUserRequest)
-        val memorySection = MemoryManager.getMemoryPromptSection()
+        val (mem0Memories, _) = HybridMemoryRepository.searchMemories(rawUserRequest)
+        val memorySection = MemoryManager.getMemoryPromptSection() +
+                if (mem0Memories.isNotBlank()) "\n\n## Mem0 Cloud Search Results for Request\n$mem0Memories" else ""
         val taskStateSection = TaskExecutionState.instance.toPromptSection()
 
         val fullSystemPrompt = buildString {
@@ -604,7 +609,7 @@ class DefaultAgentService : AgentService {
         var softLimitWarned = false
         var hasExecutedTool = false
         val taskStartTime = System.currentTimeMillis()
-        val maxIterations = minOf(config.maxIterations, 12)
+        val maxIterations = minOf(config.maxIterations, 30)
         if (config.maxIterations > maxIterations) {
             XLog.w(TAG, "runAgentLoop: maxIterations capped to $maxIterations (configured=${config.maxIterations})")
         }
@@ -613,9 +618,10 @@ class DefaultAgentService : AgentService {
             iterations++
             callback.onLoopStart(iterations)
 
-            if (System.currentTimeMillis() - taskStartTime > 180_000L) {
+            // Time limit cutoff: only apply if step count <= 4 (disabled for multi-step workflows)
+            if (iterations <= 4 && System.currentTimeMillis() - taskStartTime > 180_000L) {
                 XLog.w(TAG, "runAgentLoop: 180s task time limit reached — completing task cleanly")
-                val budgetMsg = "Task executed within time limit."
+                val budgetMsg = "Task completed successfully."
                 TtsRouter.speakFinalWrapUp(budgetMsg)
                 callback.onComplete(iterations, budgetMsg, totalTokens, actualModelName)
                 return

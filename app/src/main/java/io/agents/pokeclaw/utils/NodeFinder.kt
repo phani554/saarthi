@@ -68,54 +68,51 @@ object NodeFinder {
 
     /**
      * Ensures Flipkart is switched into Minutes mode using top banner inspection.
-     * Top banner tab bounds: [348,126][612,282].
+     * Top banner tab bounds: [310,288 - 434,342] or top Y <= 450px.
      */
     fun ensureFlipkartMinutesMode(service: ClawAccessibilityService): Boolean {
         val root = service.rootInActiveWindow ?: return false
         val pkg = root.packageName?.toString().orEmpty()
         if (pkg != "com.flipkart.android") return false
 
-        // 1. Check if already on Minutes screen (top search bar says "Search in minutes")
-        val currentSearchHint = findNodeByKeywords(root, "Search in minutes")
-        if (currentSearchHint != null) {
+        // 1. Check if already on Minutes screen (search bar hint contains "minutes")
+        val currentSearchHint = findNodeByKeywords(root, "Search in minutes", "minutes")
+        if (currentSearchHint != null && currentSearchHint.text?.toString()?.lowercase()?.contains("minutes") == true) {
             XLog.i(TAG, "ensureFlipkartMinutesMode: already in Flipkart Minutes mode")
             return true
         }
 
-        // 2. Inspect Top Banner (Y <= 320px) for Minutes tab
+        // 2. Inspect Top Banner (Y <= 450px) for Minutes tab or Grocery 10m
         val topNodes = mutableListOf<AccessibilityNodeInfo>()
-        collectTopNodes(root, topNodes, 320)
+        collectTopNodes(root, topNodes, 450)
         for (node in topNodes) {
-            val desc = node.contentDescription?.toString().orEmpty()
-            val text = node.text?.toString().orEmpty()
+            val desc = node.contentDescription?.toString().orEmpty().lowercase()
+            val text = node.text?.toString().orEmpty().lowercase()
+            val resId = node.viewIdResourceName.orEmpty().lowercase()
             val bounds = Rect()
             node.getBoundsInScreen(bounds)
 
-            val isMinutesTarget = desc.equals("Minutes", ignoreCase = true) ||
-                    text.equals("Minutes", ignoreCase = true) ||
-                    (bounds.left in 300..400 && bounds.top in 100..300)
+            val isMinutesTarget = desc.contains("minutes") || text.contains("minutes") ||
+                    desc.contains("grocery") || text.contains("grocery") ||
+                    resId.contains("minutes") || (bounds.left in 280..480 && bounds.top in 120..380)
 
-            if (isMinutesTarget && bounds.height() > 30) {
+            if (isMinutesTarget && bounds.height() > 20) {
                 val clickable = findClickableAncestor(node) ?: node
                 XLog.i(TAG, "ensureFlipkartMinutesMode: found top banner Minutes tab at $bounds, tapping to switch mode")
-                service.clickNode(clickable)
-                try { Thread.sleep(800) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+                var clicked = service.clickNode(clickable)
+                if (!clicked) {
+                    clicked = service.performTap(bounds.centerX(), bounds.centerY())
+                }
+                try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
                 return true
             }
         }
 
-        // 3. Fallback: check bottom tab bar for Minutes tab
-        val minutesTab = findNodeByIdOrText(root, "Minutes", "content-desc=Minutes")
-            ?: findNodeByKeywords(root, "Minutes")
-
-        if (minutesTab != null) {
-            val target = findClickableAncestor(minutesTab) ?: minutesTab
-            XLog.i(TAG, "ensureFlipkartMinutesMode: tapping Minutes tab to switch mode")
-            service.clickNode(target)
-            try { Thread.sleep(800) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
-            return true
-        }
-        return false
+        // 3. Resilient Fallback: Perform top banner gesture tap at center coordinates (370, 300)
+        XLog.i(TAG, "ensureFlipkartMinutesMode: tapping top banner center coordinates (370, 300) to force switch to Minutes mode")
+        val fallbackClicked = service.performTap(370, 300)
+        try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+        return fallbackClicked
     }
 
     private fun collectTopNodes(node: AccessibilityNodeInfo?, results: MutableList<AccessibilityNodeInfo>, maxY: Int) {

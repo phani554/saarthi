@@ -1011,7 +1011,10 @@ public class ClawAccessibilityService extends AccessibilityService {
                 XLog.e(TAG, "Cannot resolve launch intent for " + packageName);
                 return false;
             }
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                    | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED
+                    | Intent.FLAG_ACTIVITY_CLEAR_TASK);
             startActivity(intent);
             return true;
         } catch (Exception e) {

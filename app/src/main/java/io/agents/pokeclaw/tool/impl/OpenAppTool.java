@@ -4,8 +4,9 @@
 package io.agents.pokeclaw.tool.impl;
 
 import android.accessibilityservice.AccessibilityService;
-import android.content.pm.ApplicationInfo;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.view.accessibility.AccessibilityNodeInfo;
 
 import io.agents.pokeclaw.ClawApplication;
@@ -27,15 +28,6 @@ public class OpenAppTool extends BaseTool {
 
     private static final String TAG = "OpenAppTool";
 
-    /**
-     * Common "Allow" button labels on chain-launch intercept dialogs (covering major manufacturers).
-     * These are the on-screen button text strings matched against the device UI — do not translate.
-     * Xiaomi/MIUI: "允许" (Allow)
-     * Huawei/EMUI/HarmonyOS: "允许" / "允许打开" (Allow / Allow to open)
-     * OPPO/ColorOS: "允许" / "打开" (Allow / Open)
-     * vivo/OriginOS: "允许" (Allow)
-     * Samsung OneUI: "允许" (Allow)
-     */
     private static final List<String> ALLOW_KEYWORDS = Arrays.asList(
             "允许", "允许打开", "打开", "Allow", "ALLOW"
     );
@@ -59,12 +51,12 @@ public class OpenAppTool extends BaseTool {
 
     @Override
     public String getDescriptionEN() {
-        return "Open an application by its package name (e.g. 'com.android.settings').";
+        return "Open an application by its package name (e.g. 'com.android.settings'). Always resets app to clean Home page.";
     }
 
     @Override
     public String getDescriptionCN() {
-        return "Open an app by package name (e.g. 'com.android.settings').";
+        return "Open an app by package name (e.g. 'com.android.settings'). Always resets app to clean Home page.";
     }
 
     @Override
@@ -84,9 +76,8 @@ public class OpenAppTool extends BaseTool {
                 ? requireString(params, "package_name")
                 : requireString(params, "app_name");
 
-        // If LLM sends app name instead of package name, resolve it
         if (!packageName.contains(".")) {
-            String resolved = resolveAppName(packageName);
+            String resolved = resolveAppNameStatic(packageName);
             if (resolved != null) {
                 XLog.i(TAG, "Resolved app name '" + packageName + "' → '" + resolved + "'");
                 packageName = resolved;
@@ -98,11 +89,30 @@ public class OpenAppTool extends BaseTool {
             return ToolResult.error("Failed to open app: " + packageName + ". Make sure the app is installed.");
         }
 
-        return ToolResult.success("Opened app: " + packageName);
+        return ToolResult.success("Opened app: " + packageName + " (reset to clean Home page)");
+    }
+
+    public static String resolveAppNameStatic(String appName) {
+        try {
+            PackageManager pm = ClawApplication.Companion.getInstance().getPackageManager();
+            Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
+            mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+            List<ResolveInfo> infos = pm.queryIntentActivities(mainIntent, 0);
+            if (infos != null) {
+                for (ResolveInfo info : infos) {
+                    String label = info.loadLabel(pm).toString();
+                    if (label.equalsIgnoreCase(appName) || label.toLowerCase().contains(appName.toLowerCase())) {
+                        return info.activityInfo.packageName;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return null;
     }
 
     /**
      * Shared launch path used by tools that need reliable cross-app transitions.
+     * Enforces activity task stack reset so apps always launch on their clean Home Page.
      */
     public static boolean openAppWithInterceptHandling(ClawAccessibilityService service, String packageName) {
         boolean success = service.openApp(packageName);
@@ -111,7 +121,7 @@ public class OpenAppTool extends BaseTool {
         }
         dismissChainLaunchDialog(service);
 
-        // Precaution: Ensure opened app is on its clean Home Screen (not inside an old sub-screen)
+        // Precaution: Ensure opened app is on its clean Home Screen (popping mounted sub-screens)
         ensureCleanAppHomeScreen(service, packageName);
 
         if ("com.flipkart.android".equals(packageName)) {
@@ -123,32 +133,47 @@ public class OpenAppTool extends BaseTool {
 
     private static void ensureCleanAppHomeScreen(ClawAccessibilityService service, String packageName) {
         try {
-            AccessibilityNodeInfo root = service.getRootInActiveWindow();
-            if (root == null) return;
+            for (int backCount = 0; backCount < 4; backCount++) {
+                AccessibilityNodeInfo root = service.getRootInActiveWindow();
+                if (root == null) break;
 
-            // Precaution for WhatsApp: return from open chatroom to Home Chats screen
-            if ("com.whatsapp".equals(packageName) && ContactListUiUtils.isOpenChatroom(root)) {
-                XLog.w(TAG, "ensureCleanAppHomeScreen: WhatsApp opened inside an active chatroom! Pressing Back to return to Home Chats screen.");
-                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+                boolean isSubScreen = false;
+
+                if ("com.whatsapp".equals(packageName) && ContactListUiUtils.isOpenChatroom(root)) {
+                    isSubScreen = true;
+                } else if ("com.flipkart.android".equals(packageName)) {
+                    AccessibilityNodeInfo prodDetail = NodeFinder.INSTANCE.findNodeByIdOrText(root,
+                        "com.flipkart.android:id/product_details", "com.flipkart.android:id/search_auto_complete"
+                    );
+                    if (prodDetail != null) isSubScreen = true;
+                } else if ("com.grofers.customerapp".equals(packageName)) {
+                    AccessibilityNodeInfo pDetail = NodeFinder.INSTANCE.findNodeByIdOrText(root,
+                        "com.grofers.customerapp:id/product_detail_container", "com.grofers.customerapp:id/et_search"
+                    );
+                    if (pDetail != null) isSubScreen = true;
+                }
+
+                if (isSubScreen) {
+                    XLog.w(TAG, "ensureCleanAppHomeScreen: " + packageName + " is on a mounted sub-screen! Pressing Back to return to clean Home page (back " + (backCount + 1) + "/4).");
+                    service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
+                    Thread.sleep(150L);
+                } else {
+                    break;
+                }
             }
         } catch (Exception e) {
             XLog.w(TAG, "ensureCleanAppHomeScreen exception: " + e.getMessage());
         }
     }
 
-    /**
-     * Some manufacturers (Xiaomi, Huawei, OPPO, vivo, etc.) show an intercept dialog
-     * ("Allow xxx to open yyy?") when launching an app from the background.
-     * This method waits for the dialog and auto-clicks the "Allow" button.
-     * Checks up to 3 times, 500ms apart; silently returns if no dialog appears.
-     */
     private static void dismissChainLaunchDialog(ClawAccessibilityService service) {
         for (int attempt = 0; attempt < 3; attempt++) {
-            try {
-                Thread.sleep(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
+            AccessibilityNodeInfo root = service.getRootInActiveWindow();
+            if (root != null && root.getPackageName() != null) {
+                String pkg = root.getPackageName().toString();
+                if (pkg.contains("whatsapp") || pkg.contains("flipkart") || pkg.contains("grofers") || pkg.contains("amazon") || pkg.contains("zepto")) {
+                    return;
+                }
             }
 
             if (tapPositiveDialogButton(service)) {
@@ -157,147 +182,26 @@ public class OpenAppTool extends BaseTool {
 
             for (String keyword : ALLOW_KEYWORDS) {
                 List<AccessibilityNodeInfo> nodes = service.findNodesByText(keyword);
-                try {
-                    for (AccessibilityNodeInfo node : nodes) {
-                        CharSequence text = node.getText();
-                        if (text != null && matchesAllowButton(text.toString())) {
-                            boolean clicked = service.clickNode(node);
-                            XLog.i(TAG, "Chain launch dialog: tapped \"" + text + "\" " + (clicked ? "success" : "failed"));
-                            if (clicked) {
-                                ClawAccessibilityService.recycleNodes(nodes);
-                                return;
-                            }
-                        }
+                for (AccessibilityNodeInfo node : nodes) {
+                    if (node.isVisibleToUser() && node.isClickable()) {
+                        service.clickNode(node);
+                        return;
                     }
-                } finally {
-                    ClawAccessibilityService.recycleNodes(nodes);
                 }
             }
+            try { Thread.sleep(80L); } catch (InterruptedException ignored) { break; }
         }
     }
 
     private static boolean tapPositiveDialogButton(ClawAccessibilityService service) {
-        for (String viewId : POSITIVE_BUTTON_IDS) {
-            List<AccessibilityNodeInfo> nodes = service.findNodesById(viewId);
-            try {
-                for (AccessibilityNodeInfo node : nodes) {
-                    if (!node.isVisibleToUser() || !node.isEnabled()) {
-                        continue;
-                    }
-                    boolean clicked = service.clickNode(node);
-                    XLog.i(TAG, "Chain launch dialog: tapped positive button id " + viewId + " " + (clicked ? "success" : "failed"));
-                    if (clicked) {
-                        return true;
-                    }
-                }
-            } finally {
-                ClawAccessibilityService.recycleNodes(nodes);
-            }
-        }
-        return false;
-    }
-
-    /**
-     * Resolve common app names to package names.
-     * Falls back to searching installed apps by label.
-     */
-    /** Public static version for other tools to reuse */
-    public static String resolveAppNameStatic(String appName) {
-        return new OpenAppTool().resolveAppName(appName);
-    }
-
-    private String resolveAppName(String appName) {
-        String lower = appName.toLowerCase().trim();
-        // Common app name → package name mapping
-        switch (lower) {
-            case "whatsapp": return "com.whatsapp";
-            case "telegram": return "org.telegram.messenger";
-            case "instagram": return "com.instagram.android";
-            case "youtube": return "com.google.android.youtube";
-            case "chrome": return "com.android.chrome";
-            case "camera": return "com.android.camera2";
-            case "settings": return "com.android.settings";
-            case "messages": return "com.google.android.apps.messaging";
-            case "gmail": return "com.google.android.gm";
-            case "maps": return "com.google.android.apps.maps";
-            case "phone": return "com.google.android.dialer";
-            case "contacts": return "com.google.android.contacts";
-            case "calendar": return "com.google.android.calendar";
-            case "clock": return "com.google.android.deskclock";
-            case "calculator": return "com.google.android.calculator";
-            case "files": return "com.google.android.documentsui";
-            case "photos": return "com.google.android.apps.photos";
-            case "spotify": return "com.spotify.music";
-            case "twitter": case "x": return "com.twitter.android";
-            case "facebook": return "com.facebook.katana";
-            case "tiktok": return "com.zhiliaoapp.musically";
-            case "snapchat": return "com.snapchat.android";
-            case "reddit": return "com.reddit.frontpage";
-            case "discord": return "com.discord";
-            case "slack": return "com.Slack";
-            case "wechat": return "com.tencent.mm";
-            case "line": return "jp.naver.line.android";
-            case "blinkit": case "grofers": return "com.grofers.customerapp";
-            case "zepto": return "com.zepto.customer";
-            case "swiggy": case "instamart": return "in.swiggy.android";
-            case "zomato": return "com.application.zomato";
-            case "amazon": return "com.amazon.mShop.android.shopping";
-            case "flipkart": return "com.flipkart.android";
-            default: break;
-        }
-        // Try to find by searching installed app labels AND package names
-        try {
-            PackageManager pm = ClawApplication.Companion.getInstance().getPackageManager();
-            String bestMatch = null;
-            int bestScore = 0;
-
-            for (ApplicationInfo app : pm.getInstalledApplications(0)) {
-                // Skip system apps without launcher intent
-                if (pm.getLaunchIntentForPackage(app.packageName) == null) continue;
-
-                CharSequence label = pm.getApplicationLabel(app);
-                String labelStr = label != null ? label.toString().toLowerCase() : "";
-                String pkgLower = app.packageName.toLowerCase();
-
-                // Exact label match = best
-                if (labelStr.equalsIgnoreCase(appName)) {
-                    return app.packageName;
-                }
-                // Label contains search term
-                if (labelStr.contains(lower) && lower.length() >= 3) {
-                    int score = 10 + lower.length();
-                    if (score > bestScore) { bestScore = score; bestMatch = app.packageName; }
-                }
-                // Package name contains search term (e.g. "taobao" in "com.taobao.taobao")
-                // Also try without spaces (user: "genshin impact" → pkg: "genshinimpact")
-                String lowerNoSpace = lower.replace(" ", "");
-                if ((pkgLower.contains(lower) || pkgLower.contains(lowerNoSpace)) && lower.length() >= 3) {
-                    int score = 5 + lower.length();
-                    // Bonus: last segment matches exactly (com.taobao.taobao → "taobao" = last segment)
-                    String[] segments = pkgLower.split("\\.");
-                    if (segments.length > 0 && segments[segments.length - 1].equals(lower)) {
-                        score += 20;
-                    }
-                    if (score > bestScore) { bestScore = score; bestMatch = app.packageName; }
+        for (String id : POSITIVE_BUTTON_IDS) {
+            List<AccessibilityNodeInfo> nodes = service.findNodesById(id);
+            for (AccessibilityNodeInfo node : nodes) {
+                if (node.isVisibleToUser() && node.isClickable()) {
+                    service.clickNode(node);
+                    return true;
                 }
             }
-            if (bestMatch != null) {
-                XLog.i(TAG, "resolveAppName: fuzzy matched '" + appName + "' → '" + bestMatch + "' (score=" + bestScore + ")");
-                return bestMatch;
-            }
-        } catch (Exception e) {
-            XLog.w(TAG, "resolveAppName: failed to search installed apps", e);
-        }
-        return null;
-    }
-
-    /**
-     * Exact match for allow button labels, to avoid accidentally tapping other elements whose content contains the keyword
-     */
-    private static boolean matchesAllowButton(String text) {
-        String trimmed = text.trim();
-        for (String keyword : ALLOW_KEYWORDS) {
-            if (trimmed.equals(keyword)) return true;
         }
         return false;
     }

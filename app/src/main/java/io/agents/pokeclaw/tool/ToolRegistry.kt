@@ -84,6 +84,8 @@ object ToolRegistry {
         register(WhatsAppForwardTool())
         register(SendDistressSignalTool())
         register(EnqueueSubtaskTool())
+        register(MessageToCartTool())
+        register(ReadMessageItemsTool())
     }
 
     fun register(tool: BaseTool) {

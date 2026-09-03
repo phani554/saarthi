@@ -299,14 +299,22 @@ object KVUtils {
     fun setRouteViaOpenRouter(value: Boolean) = putBoolean(KEY_ROUTE_VIA_OPENROUTER, value)
 
     fun getMem0ApiKey(): String {
-        val saved = getString(KEY_MEM0_API_KEY, "")
-        return saved.ifBlank { BuildConfig.MEM0_API_KEY }
+        return try {
+            val saved = getString(KEY_MEM0_API_KEY, "")
+            saved.ifBlank { BuildConfig.MEM0_API_KEY }
+        } catch (_: Throwable) {
+            BuildConfig.MEM0_API_KEY
+        }
     }
     fun setMem0ApiKey(value: String) = putString(KEY_MEM0_API_KEY, value)
 
     fun getSarvamApiKey(): String {
-        val saved = getString(KEY_SARVAM_API_KEY, "")
-        return saved.ifBlank { BuildConfig.SARVAM_API_KEY }
+        return try {
+            val saved = getString(KEY_SARVAM_API_KEY, "")
+            saved.ifBlank { BuildConfig.SARVAM_API_KEY }
+        } catch (_: Throwable) {
+            BuildConfig.SARVAM_API_KEY
+        }
     }
     fun setSarvamApiKey(value: String) = putString(KEY_SARVAM_API_KEY, value)
     fun getSarvamLanguageCode(): String = getString(KEY_SARVAM_LANGUAGE, "hi-IN")

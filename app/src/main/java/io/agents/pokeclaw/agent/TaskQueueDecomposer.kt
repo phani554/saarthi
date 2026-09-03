@@ -8,9 +8,8 @@ import io.agents.pokeclaw.utils.XLog
 
 /**
  * Atomic Task Decomposition Engine.
- * Splits compound user tasks ("Order milk on Blinkit and send message to Mom")
- * into atomic, single-intent sub-tasks with dependency links and enqueues them into TaskQueueManager.
- * Guarantees that each sub-task executes atomically, fast (<1s), and independently without false reporting.
+ * Intelligently splits compound user tasks into atomic single-intent sub-tasks.
+ * Preserves unified message-to-cart pipelines ("read X's message and order on Y") as single atomic sub-tasks.
  */
 object TaskQueueDecomposer {
 
@@ -26,16 +25,21 @@ object TaskQueueDecomposer {
 
         val lower = clean.lowercase()
 
-        // Check for compound conjunctions: " and ", " then ", " after ", " plus ", " also "
-        val hasConjunction = lower.contains(" and ") || lower.contains(" then ") ||
-                lower.contains(" after ") || lower.contains(" also ")
+        // Check if prompt is a unified message-to-cart request
+        val isMessageToCartPattern = lower.contains("message") &&
+                (lower.contains("order") || lower.contains("buy") || lower.contains("add")) &&
+                (lower.contains("on ") || lower.contains("from ") || lower.contains("using "))
 
-        if (!hasConjunction) return emptyList()
-
-        // Split on compound conjunctions
-        val parts = clean.split(Regex("""(?i)\s+(?:and|then|after|also|plus)\s+"""))
-            .map { it.trim() }
-            .filter { it.length > 3 }
+        // Split on major sequential clauses (", then ", " then ", " after that ", " and then ")
+        val parts = if (isMessageToCartPattern) {
+            clean.split(Regex("""(?i),\s*then\s+|\s+then\s+|\s+after\s+that\s+|\s+and\s+then\s+"""))
+                .map { it.trim() }
+                .filter { it.length > 3 }
+        } else {
+            clean.split(Regex("""(?i)\s+(?:then|after\s+that|and\s+then|,)\s+"""))
+                .map { it.trim() }
+                .filter { it.length > 3 }
+        }
 
         if (parts.size <= 1) return emptyList()
 
@@ -66,6 +70,6 @@ object TaskQueueDecomposer {
                 )
             )
         }
-        XLog.i(TAG, "Enqueued ${parts.size} atomic sub-tasks with dependency links into TaskQueueManager")
+        XLog.i(TAG, "Enqueued ${parts.size} atomic sub-tasks into TaskQueueManager")
     }
 }

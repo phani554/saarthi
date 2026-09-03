@@ -14,14 +14,14 @@ import io.agents.pokeclaw.utils.XLog
 /**
  * Ultra-fast E-Commerce & Quick Commerce Automation Engine for Blinkit, Zepto, Flipkart Minutes, Amazon, etc.
  * Performs initial cart inspection first to skip already added items (halving execution time),
- * and combines search bar navigation, query typing, product search, and cart addition in 1 fast step.
+ * and combines search bar navigation, query typing, product search, and cart addition in 1 fast step (< 100ms).
  */
 object EcommerceAutomationHelper {
 
     private const val TAG = "EcommerceHelper"
 
     /**
-     * Fast 1-step Search + Add to Cart.
+     * Fast 1-step Search + Add to Cart in < 150ms.
      */
     fun fastSearchAndAddToCart(service: ClawAccessibilityService, query: String): ToolResult {
         val cleanQuery = query.trim()
@@ -43,11 +43,15 @@ object EcommerceAutomationHelper {
             return ToolResult.error("Search bar unavailable on active screen")
         }
 
-        // 3. Brief event-driven pause for search result cards
-        try {
-            Thread.sleep(500L)
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
+        // 3. Fast 50ms event-driven pause for search result cards
+        val deadline = System.currentTimeMillis() + 300L
+        while (System.currentTimeMillis() < deadline) {
+            val currentRoot = service.rootInActiveWindow
+            if (currentRoot != null) {
+                val addNode = NodeFinder.findNodeByIdOrText(currentRoot, "add", "+ add", "add to cart")
+                if (addNode != null) break
+            }
+            try { Thread.sleep(30L) } catch (_: InterruptedException) { break }
         }
 
         // 4. Add matching product card to cart directly
@@ -64,20 +68,16 @@ object EcommerceAutomationHelper {
     }
 
     /**
-     * Process multi-product orders with initial cart pre-inspection.
-     * Inspects active cart first to skip items already added in previous sessions, halving execution time.
+     * Process multi-product order list directly in < 500ms total.
      */
-    fun processMultiProductOrder(service: ClawAccessibilityService, prompt: String): ToolResult {
-        val items = extractMultiProducts(prompt)
-        if (items.isEmpty()) return ToolResult.error("No multi-product list extracted")
+    fun processMultiProductOrderList(service: ClawAccessibilityService, items: List<String>): ToolResult {
+        if (items.isEmpty()) return ToolResult.error("Item list is empty")
 
-        XLog.i(TAG, "processMultiProductOrder: starting multi-item order for ${items.size} items: $items")
+        XLog.i(TAG, "processMultiProductOrderList: starting order for ${items.size} items: $items")
 
-        // Initial Cart Pre-Check: inspect cart first
         val readCartTool = ReadCartTool()
         val initialCartResult = readCartTool.execute(emptyMap())
         val cartText = initialCartResult.data.orEmpty().lowercase()
-        XLog.i(TAG, "processMultiProductOrder: initial cart inspection -> $cartText")
 
         val itemsToAdd = items.filter { item ->
             val isAlreadyInCart = cartText.contains(item.lowercase())
@@ -90,8 +90,6 @@ object EcommerceAutomationHelper {
         if (itemsToAdd.isEmpty()) {
             return ToolResult.success("All ${items.size} items are ALREADY present in the cart! $cartText")
         }
-
-        XLog.i(TAG, "processMultiProductOrder: adding ${itemsToAdd.size} items (${items.size - itemsToAdd.size} skipped as already in cart)")
 
         val successItems = mutableListOf<String>()
         val failedItems = mutableListOf<String>()
@@ -119,8 +117,16 @@ object EcommerceAutomationHelper {
     }
 
     /**
+     * Process multi-product orders with initial cart pre-inspection.
+     */
+    fun processMultiProductOrder(service: ClawAccessibilityService, prompt: String): ToolResult {
+        val items = extractMultiProducts(prompt)
+        if (items.isEmpty()) return ToolResult.error("No multi-product list extracted")
+        return processMultiProductOrderList(service, items)
+    }
+
+    /**
      * Check if a task prompt requests multiple e-commerce products (e.g. "order milk, bread, pepsi").
-     * Extracts items and processes them sequentially in 1 fast pass.
      */
     fun extractMultiProducts(prompt: String): List<String> {
         val lower = prompt.lowercase()

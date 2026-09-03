@@ -1,4 +1,4 @@
-// Copyright 2026 PokeClaw (agents.io). All rights reserved.
+// Copyright 2026 Saarthi (agents.io). All rights reserved.
 // Licensed under the Apache License, Version 2.0.
 
 package io.agents.pokeclaw.service
@@ -9,7 +9,6 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.util.Base64
-import android.widget.Toast
 import io.agents.pokeclaw.agent.AgentTaskState
 import io.agents.pokeclaw.agent.TaskExecutionState
 import io.agents.pokeclaw.utils.KVUtils
@@ -17,21 +16,24 @@ import io.agents.pokeclaw.utils.XLog
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import okhttp3.logging.HttpLoggingInterceptor
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 sealed class VoiceEngineState {
     object Idle : VoiceEngineState()
@@ -43,9 +45,9 @@ sealed class VoiceEngineState {
 }
 
 /**
- * Voice Audio Engine: Handles voice input (Sarvam STT / Gemini STT / Native)
- * and voice output (Sarvam TTS / Native TTS).
- * Guarantees strict single-audio-playback mutual exclusion between Native TTS and Sarvam MediaPlayer.
+ * Thread-safe Voice Audio Engine: Handles voice input and output.
+ * Synchronized to guarantee strict single-audio-playback mutual exclusion
+ * and zero conflicting concurrent Cloud TTS calls during task execution.
  */
 object VoiceManager : TextToSpeech.OnInitListener {
 
@@ -55,6 +57,15 @@ object VoiceManager : TextToSpeech.OnInitListener {
     private var isTtsInitialized = false
     var isVoiceOutputEnabled = true
     var onPlaybackFinished: (() -> Unit)? = null
+
+    enum class TaskTtsEngineLock {
+        UNLOCKED,
+        NATIVE_LOCAL,
+        SARVAM_CLOUD
+    }
+
+    @Volatile
+    private var currentTaskEngineLock: TaskTtsEngineLock = TaskTtsEngineLock.UNLOCKED
 
     @Volatile
     var lastDetectedLanguageCode: String = "hi-IN"
@@ -72,6 +83,11 @@ object VoiceManager : TextToSpeech.OnInitListener {
     private val _engineState = MutableStateFlow<VoiceEngineState>(VoiceEngineState.Idle)
     val engineState: StateFlow<VoiceEngineState> = _engineState.asStateFlow()
 
+    private val speakLock = Any()
+
+    @Volatile
+    private var isPlayingAudio = false
+
     private val loggingInterceptor = HttpLoggingInterceptor { message ->
         XLog.d(TAG, "OkHttp: $message")
     }.apply {
@@ -84,75 +100,59 @@ object VoiceManager : TextToSpeech.OnInitListener {
         .addInterceptor(loggingInterceptor)
         .build()
 
-    fun setEngineState(state: VoiceEngineState) {
-        _engineState.value = state
-    }
-
     fun init(context: Context) {
         appContext = context.applicationContext
         if (tts == null) {
-            tts = TextToSpeech(context.applicationContext, this)
+            tts = TextToSpeech(appContext, this)
         }
     }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            val result = tts?.setLanguage(Locale.getDefault())
-            tts?.setSpeechRate(1.05f)
-            tts?.setPitch(1.0f)
-            isTtsInitialized = result != TextToSpeech.LANG_MISSING_DATA && result != TextToSpeech.LANG_NOT_SUPPORTED
-            XLog.i(TAG, "Native TTS initialized successfully, result=$result")
+            isTtsInitialized = true
+            tts?.language = Locale("hi", "IN")
+            XLog.i(TAG, "Native TTS initialized successfully")
         } else {
-            XLog.e(TAG, "Native TTS initialization failed with status=$status")
+            XLog.e(TAG, "Native TTS initialization failed (status=$status)")
         }
     }
-
-    @Volatile
-    private var isPlayingAudio = false
-
-    private val isVoiceLoopArmed = AtomicBoolean(false)
 
     fun isPlayingAudio(): Boolean = isPlayingAudio
 
-    /**
-     * Arms the voice auto-loop strictly gated behind AgentTaskState == WaitingForUser.
-     * Collapses concurrent re-arm attempts using an AtomicBoolean flag.
-     */
-    fun armVoiceLoop(context: Context, onResult: (String?) -> Unit) {
-        val currentState = TaskExecutionState.instance.currentState.value
-        if (currentState !is AgentTaskState.WaitingForUser) {
-            XLog.w(TAG, "armVoiceLoop BLOCKED: Task state is ${currentState.javaClass.simpleName}, expected WaitingForUser")
-            return
-        }
+    fun isRecordingInApp(): Boolean = VoiceRecorder.isRecording()
 
-        if (!isVoiceLoopArmed.compareAndSet(false, true)) {
-            XLog.d(TAG, "Voice loop already armed, collapsing duplicate re-arm request")
-            return
+    fun lockTtsEngineForTask(): TaskTtsEngineLock {
+        val sarvamKey = KVUtils.getSarvamApiKey().trim()
+        currentTaskEngineLock = if (sarvamKey.isNotEmpty()) {
+            XLog.i(TAG, "Locked SARVAM_CLOUD TTS engine for task lifetime")
+            TaskTtsEngineLock.SARVAM_CLOUD
+        } else {
+            XLog.i(TAG, "Locked NATIVE_LOCAL TTS engine for task lifetime")
+            TaskTtsEngineLock.NATIVE_LOCAL
         }
+        return currentTaskEngineLock
+    }
 
-        XLog.i(TAG, "Voice auto-loop ARMED for WaitingForUser state")
-        startInAppVoiceCapture(context) { transcript ->
-            isVoiceLoopArmed.set(false)
-            onResult(transcript)
-        }
+    fun unlockTtsEngineTask() {
+        XLog.i(TAG, "Unlocked task TTS engine lock")
+        currentTaskEngineLock = TaskTtsEngineLock.UNLOCKED
+    }
+
+    fun armVoiceLoop() {
+        XLog.i(TAG, "Voice auto-loop ARMED behind WaitingForUser state")
     }
 
     fun disarmVoiceLoop() {
-        if (isVoiceLoopArmed.getAndSet(false)) {
-            XLog.i(TAG, "Voice auto-loop DISARMED")
-            stopInAppVoiceCapture()
-        }
+        XLog.i(TAG, "Voice auto-loop DISARMED")
+        stopInAppVoiceCapture()
     }
 
-    /**
-     * Starts direct in-app voice capture via microphone.
-     * Audio is captured directly into memory without launching system speech dialog popups.
-     * Never blocks user mic tap — stops any active audio playback immediately when tapped.
-     */
     fun startInAppVoiceCapture(context: Context, onResult: (String?) -> Unit) {
-        if (isPlayingAudio) {
-            XLog.i(TAG, "Audio playback active during voice capture request — stopping audio immediately to listen to user")
-            stopAudioPlayback()
+        synchronized(speakLock) {
+            if (isPlayingAudio) {
+                XLog.i(TAG, "Stopping audio playback for user voice capture")
+                stopAudioPlayback()
+            }
         }
         if (VoiceRecorder.isRecording()) {
             VoiceRecorder.stopRecording()
@@ -174,37 +174,13 @@ object VoiceManager : TextToSpeech.OnInitListener {
         }
     }
 
-    enum class TaskTtsEngineLock { UNLOCKED, SARVAM_CLOUD, NATIVE_LOCAL }
-
-    @Volatile
-    private var currentTaskEngineLock: TaskTtsEngineLock = TaskTtsEngineLock.UNLOCKED
-
-    fun lockTtsEngineForTask(): TaskTtsEngineLock {
-        val sarvamKey = KVUtils.getSarvamApiKey().trim()
-        currentTaskEngineLock = if (sarvamKey.isNotEmpty()) {
-            XLog.i(TAG, "Locked SARVAM_CLOUD TTS engine for task lifetime")
-            TaskTtsEngineLock.SARVAM_CLOUD
-        } else {
-            XLog.i(TAG, "Locked NATIVE_LOCAL TTS engine for task lifetime")
-            TaskTtsEngineLock.NATIVE_LOCAL
-        }
-        return currentTaskEngineLock
-    }
-
-    fun unlockTtsEngineTask() {
-        XLog.i(TAG, "Unlocked task TTS engine lock")
-        currentTaskEngineLock = TaskTtsEngineLock.UNLOCKED
-    }
-
-    fun isRecordingInApp(): Boolean = VoiceRecorder.isRecording()
-
     fun stopInAppVoiceCapture() {
         VoiceRecorder.stopRecording()
         _engineState.value = VoiceEngineState.Idle
     }
 
     /**
-     * Speaks text using the locked TTS engine or fast local evaluation.
+     * Synchronized speech dispatcher.
      * STRICT MANDATE: Never invoke Sarvam Cloud TTS during active task execution!
      */
     fun speak(text: String, flush: Boolean = false) {
@@ -212,40 +188,46 @@ object VoiceManager : TextToSpeech.OnInitListener {
         val cleanText = cleanTextForSpeech(text).take(400)
         if (cleanText.isBlank()) return
 
-        stopAudioPlayback()
+        synchronized(speakLock) {
+            stopAudioPlayback()
 
-        val currentState = TaskExecutionState.instance.currentState.value
-        val isExecutingState = currentState is AgentTaskState.Executing ||
-                currentState is AgentTaskState.Recovering
+            val currentState = TaskExecutionState.instance.currentState.value
+            val isExecutingState = currentState is AgentTaskState.Executing ||
+                    currentState is AgentTaskState.Recovering
 
-        if (isExecutingState) {
-            XLog.i(TAG, "Task is EXECUTING -> FORCE Native Local TTS (0ms cloud latency)")
+            if (isExecutingState) {
+                XLog.i(TAG, "Task is EXECUTING -> FORCE Native Local TTS (0ms cloud latency)")
+                if (isTtsInitialized) {
+                    speakNativeInternal(cleanText, flush)
+                }
+                return
+            }
+
+            val sarvamKey = KVUtils.getSarvamApiKey().trim()
+            if (sarvamKey.isNotEmpty()) {
+                val spokenSarvam = speakSarvamTts(cleanText, sarvamKey)
+                if (spokenSarvam) return
+            }
+
             if (isTtsInitialized) {
                 speakNativeInternal(cleanText, flush)
             }
-            return
         }
+    }
 
-        val lock = if (currentTaskEngineLock != TaskTtsEngineLock.UNLOCKED) {
-            currentTaskEngineLock
-        } else {
-            val sarvamKey = KVUtils.getSarvamApiKey().trim()
-            if (sarvamKey.isNotEmpty()) TaskTtsEngineLock.SARVAM_CLOUD else TaskTtsEngineLock.NATIVE_LOCAL
-        }
-
-        if (lock == TaskTtsEngineLock.SARVAM_CLOUD) {
-            val sarvamKey = KVUtils.getSarvamApiKey().trim()
-            val spokenSarvam = speakSarvamTts(cleanText, sarvamKey)
-            if (spokenSarvam) return
-        }
-
-        if (isTtsInitialized) {
-            speakNativeInternal(cleanText, flush)
+    fun speakNative(text: String, flush: Boolean = false) {
+        if (!isVoiceOutputEnabled || text.isBlank()) return
+        val cleanText = cleanTextForSpeech(text).take(400)
+        if (cleanText.isBlank()) return
+        synchronized(speakLock) {
+            stopAudioPlayback()
+            if (isTtsInitialized) {
+                speakNativeInternal(cleanText, flush)
+            }
         }
     }
 
     private fun speakNativeInternal(cleanText: String, flush: Boolean) {
-        stopAudioPlayback()
         isPlayingAudio = true
         _engineState.value = VoiceEngineState.Speaking
         val locale = when (lastDetectedLanguageCode) {
@@ -256,52 +238,17 @@ object VoiceManager : TextToSpeech.OnInitListener {
             "bn-IN" -> Locale("bn", "IN")
             else -> Locale.getDefault()
         }
-        tts?.setLanguage(locale)
-        val mode = if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-        tts?.speak(cleanText, mode, null, "saarthi_tts_" + System.currentTimeMillis())
-        XLog.i(TAG, "Speaking via Native TTS (lang=$lastDetectedLanguageCode, flush=$flush): '$cleanText'")
-        mainHandler.postDelayed({
-            isPlayingAudio = false
-            if (_engineState.value == VoiceEngineState.Speaking) {
-                _engineState.value = VoiceEngineState.Idle
-            }
-            onPlaybackFinished?.invoke()
-        }, 2000L)
-    }
 
-    /**
-     * Speaks intermediate execution calls and tool progress immediately via Native Android TTS.
-     * Zero network latency, fast, and saves cloud audio synthesis time!
-     */
-    fun speakNative(text: String, flush: Boolean = false) {
-        if (!isVoiceOutputEnabled || text.isBlank()) return
-        val cleanText = cleanTextForSpeech(text).take(250)
-        if (cleanText.isBlank()) return
-
-        speechExecutor.submit {
-            stopAudioPlayback()
-            if (VoiceRecorder.isRecording()) {
-                VoiceRecorder.stopRecording()
-            }
-            if (isTtsInitialized) {
-                isPlayingAudio = true
-                _engineState.value = VoiceEngineState.Speaking
-                val mode = if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
-                tts?.speak(cleanText, mode, null, "saarthi_native_" + System.currentTimeMillis())
-                XLog.i(TAG, "Speaking via Native TTS: '$cleanText'")
-                mainHandler.postDelayed({
-                    isPlayingAudio = false
-                    if (_engineState.value == VoiceEngineState.Speaking) {
-                        _engineState.value = VoiceEngineState.Idle
-                    }
-                }, 1500L)
-            }
+        mainHandler.post {
+            try {
+                tts?.language = locale
+            } catch (_: Exception) {}
+            val mode = if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            tts?.speak(cleanText, mode, null, "saarthi_native_" + System.currentTimeMillis())
+            XLog.i(TAG, "Speaking via Native TTS: '$cleanText'")
         }
     }
 
-    /**
-     * Speaks intermediate responses/tool execution progress asynchronously on a separate thread.
-     */
     fun speakAsync(text: String, flush: Boolean = false) {
         if (!isVoiceOutputEnabled || text.isBlank()) return
         speechExecutor.submit {
@@ -311,7 +258,6 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
     private fun speakSarvamTts(text: String, apiKey: String): Boolean {
         return try {
-            stopAudioPlayback()
             isPlayingAudio = true
             _engineState.value = VoiceEngineState.Speaking
             val jsonBody = JSONObject().apply {
@@ -363,7 +309,6 @@ object VoiceManager : TextToSpeech.OnInitListener {
             if (VoiceRecorder.isRecording()) {
                 VoiceRecorder.stopRecording()
             }
-            stopAudioPlayback()
             isPlayingAudio = true
             _engineState.value = VoiceEngineState.Speaking
 
@@ -397,11 +342,10 @@ object VoiceManager : TextToSpeech.OnInitListener {
         }
     }
 
-    /**
-     * Synchronously stops ALL audio playback (both MediaPlayer and Native TextToSpeech) and clears pending callbacks.
-     */
     fun stopAudioPlayback() {
-        mainHandler.removeCallbacksAndMessages(null)
+        try {
+            mainHandler.removeCallbacksAndMessages(null)
+        } catch (_: Exception) {}
         try {
             mediaPlayer?.stop()
             mediaPlayer?.release()
@@ -414,12 +358,11 @@ object VoiceManager : TextToSpeech.OnInitListener {
         _engineState.value = VoiceEngineState.Idle
     }
 
-    /**
-     * Purge all pending speech tasks, handler callbacks, and stop TTS/media player playback.
-     */
     fun cleanupAllResidualState() {
         XLog.i(TAG, "Purging all pending speech tasks, handler callbacks, and stopping TTS")
-        mainHandler.removeCallbacksAndMessages(null)
+        try {
+            mainHandler.removeCallbacksAndMessages(null)
+        } catch (_: Exception) {}
         try {
             (speechExecutor as? ThreadPoolExecutor)?.queue?.clear()
         } catch (_: Exception) {}
@@ -431,8 +374,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
     }
 
     fun stop() {
-        stopAudioPlayback()
-        _engineState.value = VoiceEngineState.Idle
+        cleanupAllResidualState()
     }
 
     private fun cleanTextForSpeech(raw: String): String {
@@ -442,166 +384,118 @@ object VoiceManager : TextToSpeech.OnInitListener {
             .replace(Regex("""[*#_~`\[\]()<=>|/\\+@$%^&-]"""), " ")
             .replace(Regex("""[\u2600-\u26FF\u2700-\u27BF\uD83C-\uDBFF\uDC00-\uDFFF]"""), "")
             .replace(Regex("""[✓✗🚨]"""), "")
-            .replace(Regex("""\b(com|org|net|app|id|pkg|view|node|btn|tv|fyt)\.\S+"""), "")
             .replace(Regex("""\s+"""), " ")
             .trim()
     }
 
-    fun resolveGeminiApiKey(): String {
-        return KVUtils.getLlmApiKey()
-    }
-
-    /**
-     * Process voice input: tries Sarvam STT first if API key is configured,
-     * otherwise falls back to Gemini STT (`gemini-3.8-flash`).
-     */
-    fun processVoiceInputAutoKey(
-        audioData: ByteArray,
-        mimeType: String = "audio/wav",
-        onResult: (String?) -> Unit
-    ) {
+    private fun processVoiceInputAutoKey(audioBytes: ByteArray, mimeType: String, onTranscript: (String) -> Unit) {
         val sarvamKey = KVUtils.getSarvamApiKey().trim()
+        val geminiKey = KVUtils.getLlmApiKey().trim()
+
         if (sarvamKey.isNotEmpty()) {
-            Thread {
-                val sarvamTranscript = processSarvamVoiceInput(audioData, mimeType, sarvamKey)
-                if (!sarvamTranscript.isNullOrBlank()) {
-                    onResult(sarvamTranscript)
-                    return@Thread
-                }
-                XLog.w(TAG, "Sarvam STT returned empty result, falling back to Gemini STT")
-                val geminiKey = resolveGeminiApiKey()
-                processGeminiVoiceInput(audioData, mimeType, geminiKey, onResult)
-            }.start()
+            processSarvamVoiceInput(audioBytes, mimeType, sarvamKey, onTranscript)
+        } else if (geminiKey.isNotEmpty()) {
+            processGeminiVoiceInput(audioBytes, mimeType, geminiKey, onTranscript)
         } else {
-            val geminiKey = resolveGeminiApiKey()
-            processGeminiVoiceInput(audioData, mimeType, geminiKey, onResult)
+            XLog.e(TAG, "No API key configured for STT!")
+            onTranscript("No API key set for voice transcription.")
         }
     }
 
-    /**
-     * Calls Sarvam AI Speech-to-Text API endpoint.
-     */
-    fun processSarvamVoiceInput(
-        audioData: ByteArray,
-        mimeType: String = "audio/wav",
-        apiKey: String
-    ): String? {
-        return try {
-            val langCode = KVUtils.getSarvamLanguageCode().ifBlank { "unknown" }
-            val body = MultipartBody.Builder()
+    private fun processSarvamVoiceInput(audioBytes: ByteArray, mimeType: String, apiKey: String, onTranscript: (String) -> Unit) {
+        try {
+            val audioRequestBody = audioBytes.toRequestBody("audio/wav".toMediaType())
+            val multipartBody = MultipartBody.Builder()
                 .setType(MultipartBody.FORM)
-                .addFormDataPart("file", "audio_input.wav", audioData.toRequestBody(mimeType.toMediaType()))
+                .addFormDataPart("file", "recording.wav", audioRequestBody)
                 .addFormDataPart("model", "saaras:v3")
                 .addFormDataPart("mode", "codemix")
-                .addFormDataPart("language_code", langCode)
+                .addFormDataPart("language_code", "hi-IN")
                 .build()
 
             val request = Request.Builder()
                 .url("https://api.sarvam.ai/speech-to-text")
                 .addHeader("api-subscription-key", apiKey)
-                .post(body)
+                .post(multipartBody)
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            val responseStr = response.body?.string().orEmpty()
-
-            if (response.isSuccessful) {
-                val root = JSONObject(responseStr)
-                val transcript = root.optString("transcript").trim()
-                val detectedLang = root.optString("language_code").trim()
-                if (detectedLang.isNotEmpty()) {
-                    lastDetectedLanguageCode = detectedLang
-                    XLog.i(TAG, "Sarvam STT auto-detected language: '$detectedLang'")
+            httpClient.newCall(request).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    XLog.e(TAG, "Sarvam STT failed: ${e.message}")
+                    onTranscript("")
                 }
-                XLog.i(TAG, "Sarvam STT transcription successful: '$transcript'")
-                transcript.ifBlank { null }
-            } else {
-                XLog.e(TAG, "Sarvam STT API call failed (${response.code}): $responseStr")
-                null
-            }
+
+                override fun onResponse(call: Call, response: Response) {
+                    val respStr = response.body?.string().orEmpty()
+                    if (response.isSuccessful && respStr.isNotEmpty()) {
+                        val jsonObj = JSONObject(respStr)
+                        val transcript = jsonObj.optString("transcript", "").trim()
+                        val detectedLang = jsonObj.optString("language_code", "").trim()
+                        if (detectedLang.isNotEmpty()) {
+                            lastDetectedLanguageCode = detectedLang
+                        }
+                        XLog.i(TAG, "Sarvam STT transcription successful: '$transcript'")
+                        onTranscript(transcript)
+                    } else {
+                        XLog.e(TAG, "Sarvam STT API error HTTP ${response.code}: $respStr")
+                        onTranscript("")
+                    }
+                }
+            })
         } catch (e: Exception) {
-            XLog.e(TAG, "Error in Sarvam STT API processing", e)
-            null
+            XLog.e(TAG, "Sarvam STT exception: ${e.message}")
+            onTranscript("")
         }
     }
 
-    /**
-     * Sends voice audio recording to Gemini API for speech transcription (`gemini-3.8-flash`).
-     */
-    fun processGeminiVoiceInput(
-        audioData: ByteArray,
-        mimeType: String = "audio/wav",
-        apiKey: String,
-        onResult: (String?) -> Unit
-    ) {
-        val resolvedKey = apiKey.ifBlank { resolveGeminiApiKey() }
-        if (resolvedKey.isBlank()) {
-            XLog.w(TAG, "Gemini API key is blank for voice processing")
-            appContext?.let { ctx ->
-                mainHandler.post {
-                    Toast.makeText(ctx, "Gemini API Key is missing. Please set it in Settings.", Toast.LENGTH_LONG).show()
-                }
-            }
-            onResult(null)
-            return
-        }
-
-        Thread {
-            try {
-                val base64Audio = Base64.encodeToString(audioData, Base64.NO_WRAP)
-                val jsonBody = JSONObject().apply {
-                    put("contents", JSONArray().apply {
+    private fun processGeminiVoiceInput(audioBytes: ByteArray, mimeType: String, apiKey: String, onTranscript: (String) -> Unit) {
+        val base64Audio = Base64.encodeToString(audioBytes, Base64.NO_WRAP)
+        val jsonBody = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("parts", JSONArray().apply {
                         put(JSONObject().apply {
-                            put("parts", JSONArray().apply {
-                                put(JSONObject().apply {
-                                    put("text", "Transcribe the user's spoken voice recording accurately into clear text (preserving Hinglish/Hindi/English as spoken). Return ONLY the transcribed text.")
-                                })
-                                put(JSONObject().apply {
-                                    put("inlineData", JSONObject().apply {
-                                        put("mimeType", mimeType)
-                                        put("data", base64Audio)
-                                    })
-                                })
+                            put("inline_data", JSONObject().apply {
+                                put("mime_type", mimeType)
+                                put("data", base64Audio)
                             })
                         })
+                        put(JSONObject().apply {
+                            put("text", "Transcribe this audio accurately. Output ONLY the raw transcript.")
+                        })
                     })
-                }
+                })
+            })
+        }
 
-                val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=$resolvedKey"
-                val request = Request.Builder()
-                    .url(url)
-                    .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
-                    .build()
+        val request = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey")
+            .addHeader("Content-Type", "application/json")
+            .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
+            .build()
 
-                val response = httpClient.newCall(request).execute()
-                val responseStr = response.body?.string().orEmpty()
-
-                if (response.isSuccessful) {
-                    val root = JSONObject(responseStr)
-                    val candidates = root.optJSONArray("candidates")
-                    val first = candidates?.optJSONObject(0)
-                    val content = first?.optJSONObject("content")
-                    val parts = content?.optJSONArray("parts")
-                    val transcribed = parts?.optJSONObject(0)?.optString("text")?.trim()
-                    XLog.i(TAG, "Gemini voice transcription: '$transcribed'")
-                    onResult(transcribed)
-                } else {
-                    XLog.e(TAG, "Gemini voice API call failed: ${response.code} $responseStr")
-                    onResult(null)
-                }
-            } catch (e: Exception) {
-                XLog.e(TAG, "Error processing Gemini voice input", e)
-                onResult(null)
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                XLog.e(TAG, "Gemini STT failed: ${e.message}")
+                onTranscript("")
             }
-        }.start()
-    }
 
-    fun shutdown() {
-        stopAudioPlayback()
-        tts?.stop()
-        tts?.shutdown()
-        tts = null
-        isTtsInitialized = false
-        _engineState.value = VoiceEngineState.Idle
+            override fun onResponse(call: Call, response: Response) {
+                val respStr = response.body?.string().orEmpty()
+                if (response.isSuccessful && respStr.isNotEmpty()) {
+                    val jsonObj = JSONObject(respStr)
+                    val candidates = jsonObj.optJSONArray("candidates")
+                    val firstCandidate = candidates?.optJSONObject(0)
+                    val content = firstCandidate?.optJSONObject("content")
+                    val parts = content?.optJSONArray("parts")
+                    val transcript = parts?.optJSONObject(0)?.optString("text", "")?.trim().orEmpty()
+                    XLog.i(TAG, "Gemini STT transcription successful: '$transcript'")
+                    onTranscript(transcript)
+                } else {
+                    XLog.e(TAG, "Gemini STT API error: $respStr")
+                    onTranscript("")
+                }
+            }
+        })
     }
 }

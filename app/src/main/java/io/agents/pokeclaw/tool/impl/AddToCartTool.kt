@@ -4,6 +4,7 @@
 package io.agents.pokeclaw.tool.impl
 
 import android.view.accessibility.AccessibilityNodeInfo
+import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.tool.BaseTool
 import io.agents.pokeclaw.tool.ToolParameter
 import io.agents.pokeclaw.tool.ToolResult
@@ -78,6 +79,12 @@ class AddToCartTool : BaseTool() {
         val root = service.rootInActiveWindow
             ?: return ToolResult.error("Screen unavailable")
 
+        // 0. Pre-check for Multi-Option Variant Selection Bottom Sheet
+        val variantClicked = handleVariantBottomSheet(service, root, productName)
+        if (variantClicked) {
+            return ToolResult.success("Selected variant option and added product to cart")
+        }
+
         // Check if item is out of stock on active screen
         if (isOutOfStock(root)) {
             XLog.i(TAG, "execute: product is out of stock")
@@ -99,7 +106,7 @@ class AddToCartTool : BaseTool() {
                     val clicked = service.clickNode(target)
                     XLog.i(TAG, "execute: clicked ID match $viewId, result=$clicked")
                     if (clicked) {
-                        try { Thread.sleep(400L) } catch (_: InterruptedException) {}
+                        try { Thread.sleep(300L) } catch (_: InterruptedException) {}
                         val newRoot = service.rootInActiveWindow
                         if (newRoot != null && (isAlreadyInCart(newRoot) || isOutOfStock(newRoot))) {
                             return ToolResult.success("Added product to cart (verified on UI)")
@@ -116,7 +123,7 @@ class AddToCartTool : BaseTool() {
             val clicked = service.clickNode(target)
             XLog.i(TAG, "execute: clicked structural text match '${targetNode.text ?: targetNode.contentDescription}', result=$clicked")
             if (clicked) {
-                try { Thread.sleep(400L) } catch (_: InterruptedException) {}
+                try { Thread.sleep(300L) } catch (_: InterruptedException) {}
                 val newRoot = service.rootInActiveWindow
                 if (newRoot != null && (isAlreadyInCart(newRoot) || isOutOfStock(newRoot))) {
                     return ToolResult.success("Added product to cart (verified on UI)")
@@ -125,6 +132,43 @@ class AddToCartTool : BaseTool() {
         }
 
         return ToolResult.error("Add to cart button not found or click did not update cart on screen")
+    }
+
+    private fun handleVariantBottomSheet(service: ClawAccessibilityService, root: AccessibilityNodeInfo, productName: String): Boolean {
+        val variantNode = NodeFinder.findNodeByIdOrText(root,
+            "com.flipkart.android:id/variant_sheet",
+            "com.flipkart.android:id/bottom_sheet",
+            "com.grofers.customerapp:id/variant_bottom_sheet",
+            "select variant", "select pack", "choose size", "available options"
+        )
+        if (variantNode != null) {
+            XLog.i(TAG, "Multi-option variant bottom sheet detected for '$productName'")
+
+            val sizeMatch = if (productName.contains("1l") || productName.contains("500g") || productName.contains("250ml")) {
+                val sizeKey = when {
+                    productName.contains("1l") -> "1l"
+                    productName.contains("500g") -> "500g"
+                    productName.contains("250ml") -> "250ml"
+                    else -> ""
+                }
+                NodeFinder.findNodeByIdOrText(root, sizeKey)
+            } else null
+
+            val targetCta = sizeMatch ?: NodeFinder.findNodeByIdOrText(root,
+                "com.flipkart.android:id/add_cta",
+                "com.grofers.customerapp:id/add_button",
+                "com.zeptoconsumerapp:id/button_add",
+                "add", "+ add", "add to cart"
+            )
+
+            if (targetCta != null) {
+                val target = findClickableTarget(targetCta)
+                val clicked = service.clickNode(target)
+                XLog.i(TAG, "Multi-option bottom sheet auto-clicked CTA: $clicked")
+                return clicked
+            }
+        }
+        return false
     }
 
     private fun isNegativeMatch(node: AccessibilityNodeInfo): Boolean {
