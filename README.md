@@ -1,384 +1,688 @@
+# 🤖 Saathi — Autonomous Android Lifestyle & Quick-Commerce Agent
 
-<p align="center">
-  <img src="banna.png" width="600" />
-</p>
-<p align="center">
-  <img src="option.png" width="600" />
-</p>
+![Saathi](https://img.shields.io/badge/Saathi-On--Device_Mobile_Agent-3DDC84?style=for-the-badge&labelColor=0d1117)
+![Android](https://img.shields.io/badge/Platform-Android-3DDC84?style=for-the-badge&logo=android&logoColor=white)
+![Kotlin](https://img.shields.io/badge/Kotlin-7F52FF?style=for-the-badge&logo=kotlin&logoColor=white)
+![Java](https://img.shields.io/badge/Java-ED8B00?style=for-the-badge&logo=openjdk&logoColor=white)
+![Jetpack Compose](https://img.shields.io/badge/UI-Jetpack%20Compose-4285F4?style=for-the-badge&logo=jetpackcompose&logoColor=white)
+![LiteRT](https://img.shields.io/badge/On--Device_AI-LiteRT%20%2F%20Gemma-FF6F00?style=for-the-badge&logo=google&logoColor=white)
+![Sarvam AI](https://img.shields.io/badge/Voice-Sarvam%20AI-F59E0B?style=for-the-badge)
 
-<p align="center">
-  <a href="https://github.com/agents-io/PokeClaw/stargazers"><img src="https://img.shields.io/github/stars/agents-io/PokeClaw?style=social" alt="Stars" /></a>
-  <a href="https://github.com/agents-io/PokeClaw/network/members"><img src="https://img.shields.io/github/forks/agents-io/PokeClaw?style=social" alt="Forks" /></a>
-  <a href="https://github.com/agents-io/PokeClaw/issues?q=is%3Aissue+is%3Aclosed"><img src="https://img.shields.io/github/issues-closed/agents-io/PokeClaw?style=social" alt="Closed Issues" /></a>
-  <img src="https://img.shields.io/badge/Android-9%2B-3DDC84?logo=android&logoColor=white" alt="Android 9+" />
-  <a href="https://github.com/agents-io/PokeClaw/releases/latest"><img src="https://img.shields.io/github/v/release/agents-io/PokeClaw" alt="Latest Release" /></a>
-</p>
+### A hostless, accessibility-first neuro-symbolic Android agent for everyday tasks
 
-<p align="center">
-  🌐 <a href="https://agents-io.github.io/PokeClaw/">Landing Page</a> — available in English · हिन्दी · 日本語 · Deutsch · 繁中
-</p>
+**Saathi** (_companion_) aims to help senior citizens, non-native English speakers, and other users navigate messaging and quick-commerce apps with natural-language or vernacular voice commands.
 
-# PokeClaw (PocketClaw) — On-Device AI Phone Agent
+[Features](#-key-features) · [Architecture](#-system-architecture) · [AI design](#-ai-design-decisions) · [Quick start](#-quick-start) · [Configuration](#-api-configuration) · [Team](#-team-and-acknowledgments)
 
-**PokeClaw**, also known as **PocketClaw**, is an open-source Android app for AI phone automation.
+> **Project / repository name:** The product and architecture are called **Saathi**. The GitHub repository is named **`saarthi`** because the `saathi` repository namespace was already taken. The Android application package is `io.agents.pokeclaw`.
 
-It can run Gemma 4 on-device for local, private phone control, and it also supports optional cloud models when you want stronger reasoning for harder tasks.
+> **Terminology:** “Hostless” means the agent is designed to run on the Android device without a PC or a persistent ADB connection. It does **not** mean that every AI feature is offline: configured cloud models and voice services may still require an internet connection and API keys.
 
-The current public build is a local-first prototype for turning an Android phone into an AI-operated device.
+---
 
-In Local mode, model execution stays inside your device. No account or API key is required for Local mode.
+> **Technical focus:** Android agents · tool orchestration · accessibility-based UI grounding · context compression · structured task state · multilingual voice interaction · bounded recovery and human approval gates.
 
+## 📋 Table of contents
 
+1. [Overview](#-overview)
+2. [Live demo and execution timeline](#-live-demo-uninterrupted-end-to-end-execution)
+3. [Motivation and design philosophy](#-motivation-and-design-philosophy)
+4. [Key features](#-key-features)
+5. [AI and agent engineering highlights](#-ai-and-agent-engineering-highlights)
+6. [Visual system architecture](#-visual-system-architecture)
+7. [System architecture](#-system-architecture)
+8. [User journey](#-user-journey-whatsapp-to-cart)
+9. [AI design decisions](#-ai-design-decisions)
+10. [Core algorithms and safety](#-core-algorithms-and-safety)
+11. [Tool registry](#-tool-and-skill-registry)
+12. [Technology stack](#️-technology-stack)
+13. [Project structure](#-project-structure)
+14. [Quick start](#-quick-start)
+15. [API configuration](#-api-configuration)
+16. [Permissions and privacy](#-permissions-privacy-and-safety)
+17. [Performance notes](#-performance-notes)
+18. [Team and acknowledgments](#-team-and-acknowledgments)
+19. [Project status and limitations](#-project-status-and-limitations)
 
+---
+
+## 🎯 Overview
+
+**Saathi** is an Android lifestyle-automation project that connects conversational intent to actions across apps. Its primary workflow is to read a shopping list from a user-selected WhatsApp conversation, turn the message into structured shopping items, and help populate a cart in a supported commerce app.
+
+Rather than depending on screenshots and coordinate taps from an external computer, Saathi uses Android's native `AccessibilityService` interface to inspect the active UI hierarchy and perform supported UI actions. A task router selects between deterministic shortcuts, predefined playbooks, and an LLM-based agent loop depending on the command and current screen.
+
+### Design goals
+
+- **Accessibility first:** make multi-step app workflows easier for users who find complex interfaces difficult to navigate.
+- **Language flexibility:** accept voice or text commands, including supported vernacular and code-mixed input.
+- **Less brittle UI interaction:** prefer accessibility nodes, labels, and resource IDs over screenshot coordinates where possible.
+- **Stateful cross-app workflows:** preserve extracted items and task progress while switching between apps.
+- **Safety and transparency:** show task progress, support task cancellation, verify important targets, and stop before payment authorization.
+- **Tiered reasoning:** avoid unnecessary LLM calls for tasks that can be resolved deterministically.
+
+## 🧪 AI and agent engineering highlights
+
+For AI/agent engineering reviewers, Saathi brings together several practical systems ideas:
+
+- **Hybrid control and model routing:** handle predictable intents with deterministic shortcuts, reusable workflows with playbooks, and unfamiliar states with a model-backed agent path.
+- **Tool-oriented execution:** separate planning from Android actions through named tools, so UI operations can be checked and reported rather than expressed only as free-form model output.
+- **Context engineering:** prune and normalize the accessibility hierarchy before using it for target matching or model context, instead of sending a full screenshot for every interaction.
+- **Long-horizon task state:** preserve a structured `CartItem` manifest and explicit task states across app transitions.
+- **Reliability mechanisms:** verify recipients and UI targets, detect repeated states, limit recovery attempts, and keep payment authorization under user control.
+- **Multilingual interaction:** normalize voice or code-mixed requests into a task representation while keeping user-facing feedback separate.
+
+These are the project's stated design and implementation areas. The exact availability of individual tools and integrations depends on the checked-out branch and its configuration. Performance values later in this README are project-reported figures, not independently audited benchmarks.
+
+---
+
+## 🎥 Live demo: uninterrupted end-to-end execution
+
+**Watch the full raw recording:** the video preserves the execution sequence rather than presenting only a short edited highlight.
+
+[![Watch Saathi's uninterrupted end-to-end execution](https://img.youtube.com/vi/E9Pu8WykxIQ/hqdefault.jpg)](https://www.youtube.com/watch?v=E9Pu8WykxIQ)
+
+**[Open the full demo on YouTube](https://youtu.be/E9Pu8WykxIQ)**
+
+### Execution timeline
+
+The timestamps below refer to the linked recording and help reviewers jump directly to each stage.
+
+| Timestamp                                   | What happens                                                           |
+| ------------------------------------------- | ---------------------------------------------------------------------- |
+| [00:30](https://youtu.be/E9Pu8WykxIQ?t=30)  | Command execution begins.                                              |
+| [00:35](https://youtu.be/E9Pu8WykxIQ?t=35)  | The agent confirms its interpretation of the user's intent.            |
+| [00:56](https://youtu.be/E9Pu8WykxIQ?t=56)  | Task execution begins.                                                 |
+| [01:08](https://youtu.be/E9Pu8WykxIQ?t=68)  | The active app switches to Flipkart.                                   |
+| [01:25](https://youtu.be/E9Pu8WykxIQ?t=85)  | The agent selects the Flipkart Minutes tab from the header navigation. |
+| [01:34](https://youtu.be/E9Pu8WykxIQ?t=94)  | Product search and cart operations begin.                              |
+| [01:45](https://youtu.be/E9Pu8WykxIQ?t=105) | The Munch product is added to the cart.                                |
+| [02:00](https://youtu.be/E9Pu8WykxIQ?t=120) | The agent reads the visible cart status.                               |
+| [02:20](https://youtu.be/E9Pu8WykxIQ?t=140) | The task status summary reports Task 1 as complete.                    |
+| [03:00](https://youtu.be/E9Pu8WykxIQ?t=180) | The agent starts processing the second product.                        |
+| [04:00](https://youtu.be/E9Pu8WykxIQ?t=240) | The second product is added to the cart.                               |
+| [04:29](https://youtu.be/E9Pu8WykxIQ?t=269) | An incorrect tap occurs.                                               |
+| [04:44](https://youtu.be/E9Pu8WykxIQ?t=284) | The agent recovers from the incorrect tap.                             |
+| [05:30](https://youtu.be/E9Pu8WykxIQ?t=330) | Task 2 is reported as complete.                                        |
+| [05:36](https://youtu.be/E9Pu8WykxIQ?t=336) | The agent switches to WhatsApp for the next action.                    |
+| [05:44](https://youtu.be/E9Pu8WykxIQ?t=344) | The WhatsApp video call is successfully placed.                        |
+
+### What this run demonstrates
+
+- **Different workflows use different levels of determinism.** WhatsApp automation is deliberately playbook-heavy because its tested flows can be expressed as predictable steps. This reduces unnecessary model decisions and helps the agent execute those flows quickly.
+- **The Flipkart segment is agent-driven.** Product selection and cart interactions use the general agent rules and guardrails rather than relying on a dedicated deterministic playbook for every product interaction. This demonstrates a more flexible path, but it also adds model-inference and sequential API-round-trip latency.
+- **Recovery is visible, not edited out.** The recording includes an incorrect tap at 04:29 and recovery by 04:44. This is evidence of recovery in this run, not a claim that every UI error is recoverable.
+- **The runtime is end-to-end.** Elapsed time includes UI transitions and loading, model inference, network/API round trips between decisions, and action verification. It should not be interpreted as pure LLM inference time.
+
+The recording is a qualitative demonstration of one execution, not a statistically controlled benchmark. Results can vary with the device, app UI, network, model/provider latency, and target account or region.
+
+## 💛 Motivation and design philosophy
+
+Modern messaging and commerce apps can present accessibility and usability challenges:
+
+- **Interface complexity:** changing banners, nested categories, hidden search fields, and product variants can make navigation error-prone.
+- **Language barriers:** users may prefer regional Indic languages or code-mixed speech rather than English-only commands.
+- **Chat-to-cart friction:** moving a list from a conversation into a delivery app can require repeated copying, app switching, and product selection.
+- **Long-running tasks:** a workflow can fail if its progress or extracted data is lost during an app transition.
+
+Saathi is designed as a digital companion that interprets a user's intent, manages a structured plan, executes permitted UI actions, and communicates progress back to the user.
+
+## ✨ Key features
+
+### 🛒 Quick-commerce and e-commerce workflows
+
+- **WhatsApp-to-cart pipeline:** extract shopping items from a selected conversation and process them as a structured manifest rather than repeatedly revisiting the chat.
+- **Multi-item processing:** add requested items sequentially in the target commerce app.
+- **Variant handling:** resolve common quantity, size, or weight options such as `250ml`, `500ml`, or `1kg` when those options are available in the UI.
+- **Cart inspection:** read cart rows and compare them with the extracted manifest before presenting a summary.
+- **Serviceability checks:** detect UI messages indicating that a store or item is unavailable when those messages are exposed through the accessibility hierarchy.
+- **Commerce app drivers:** the project describes workflows for Blinkit, Zepto, Flipkart Minutes, and Amazon. Actual behavior depends on the installed app versions, account, location, and current UI structure.
+
+### 💬 WhatsApp and communication tools
+
+- Resolve configured contact aliases such as “Mom” or “Grandpa”.
+- Read message text after the chat UI has settled and filter common UI labels from the extracted content.
+- Verify the destination chat header before sending or forwarding a message.
+- Summarize actionable tasks from a conversation or group where supported.
+- Place phone or WhatsApp voice/video calls through the relevant UI workflow.
+- Enter a `CallInProgress` state to suppress narration and pause other automation while a call is active.
+- Support notification-based auto-replies for configured contacts when notification access and the relevant AI configuration are enabled.
+
+### 🗣️ Voice and multilingual interaction
+
+- Accept spoken commands through the configured speech-to-text path.
+- Rewrite code-mixed or vernacular requests into a normalized task representation for downstream planning.
+- Keep a natural-language response for spoken feedback where supported.
+- Use Sarvam AI speech services for supported transcription and text-to-speech workflows.
+
+### 📡 Live telemetry and user control
+
+- Floating status pill for task state and step progress.
+- Foreground notification for ongoing execution.
+- Spoken progress updates where enabled.
+- Emergency **KILL TASK** action to cancel active orchestration work.
+- Explicit task states for planning, execution, recovery, waiting for the user, completion, failure, and cancellation.
+
+### 🛡️ Safety-oriented behavior
+
+- Prefer semantic accessibility selectors over screen coordinates.
+- Detect repeated UI states and attempt bounded recovery.
+- Verify intended contacts and key UI targets before high-impact actions.
+- Keep checkout/payment authorization under user control; the intended workflow stops at the cart or confirmation gate instead of independently authorizing a payment.
+
+---
+
+## 📸 Visual system architecture
+
+The six diagrams below are referenced from the `images/` folder in the repository. Use the exact filenames shown in the image links; GitHub paths are case-sensitive.
+
+### 1. Conventional workstation-tethered visual agents
+
+![Conventional visual-agent paradigm](images/conventional_paradigm.png)
+
+A conventional visual agent may capture screenshots through ADB, transfer them to a host or cloud model, and send coordinate actions back to the device. Saathi is designed to avoid that persistent PC/ADB dependency for its main interaction loop.
+
+### 2. Saathi's hostless Android approach
+
+![Saathi hostless paradigm](images/saathi_paradigm.png)
+
+The Android accessibility service obtains the available window-node hierarchy through Android's accessibility APIs. A local pruning step creates a smaller representation for matching or model input.
+
+### 3. High-level architecture
+
+![High-level block diagram](images/high_level_block_diagram.png)
+
+### 4. End-to-end user flow
+
+![User flow](images/user_flow.png)
+
+### 5. Three-tier pipeline router
+
+![Three-tier pipeline router](images/task_router.png)
+
+### 6. Accessibility-tree pruning pipeline
+
+![Tree parser pipeline](images/tree_parser.png)
+
+---
+
+## 🏗️ System architecture
+
+Saathi separates the runtime into four cooperating layers.
+
+```mermaid
+flowchart TB
+    U[User voice or text command] --> T[Telemetry and voice layer]
+    T --> D[Task decomposition and dependency graph]
+    D --> R{Three-tier PipelineRouter}
+
+    R -->|Known intent| A[Tier 1: deterministic shortcuts]
+    R -->|Known workflow| B[Tier 2: Markdown playbooks]
+    R -->|Dynamic task or fallback| C[Tier 3: hybrid agent loop]
+
+    A --> S[Safety and state verification]
+    B --> S
+    C <--> M[Hybrid memory and task manifest]
+    C --> S
+
+    S --> X[Action tools]
+    X --> P[ClawAccessibilityService]
+    P --> N[Accessibility-node pruning: f_prune]
+    N --> C
+
+    X --> L[Progress events]
+    L --> T
 ```
-Everyone else:  Phone → Internet → Cloud API → Internet → Phone
-                       💳Credit card needed, API key required. Monthly bill attached.
 
-PokeClaw local: Phone → LLM → Phone
-                       Local-first when you want it. Optional cloud when you need it.
+### I. Telemetry and voice layer
+
+The user-facing layer provides the chat interface, floating status pill, foreground notification, and optional spoken progress. This layer is intended to make task execution visible and interruptible rather than silently operating in the background.
+
+### II. Hierarchical orchestration layer
+
+`TaskQueueDecomposer` breaks a compound instruction into smaller tasks. `TaskDependencyGraph` preserves task dependencies and orders execution. `PipelineRouter` chooses deterministic shortcuts, documented playbooks, or the model-driven loop.
+
+### III. Neuro-symbolic safety and verification layer
+
+Programmatic guards, task-state tracking, contact/header checks, subtree-hash loop detection, and the checkout safety gate constrain the actions that the agent can attempt.
+
+### IV. Native Android perception and actuation layer
+
+`ClawAccessibilityService` interacts with the currently available accessibility hierarchy. `NodeFinder` prunes and normalizes nodes, while domain tools perform tasks such as reading messages, searching a catalog, selecting variants, and inspecting a cart.
+
+### Component interaction
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant UI as Saathi UI / Voice
+    participant Orch as TaskOrchestrator
+    participant Router as PipelineRouter
+    participant Tool as Action Tool
+    participant A11y as Accessibility Service
+    participant App as Target Android App
+
+    User->>UI: Voice or text request
+    UI->>Orch: Normalized task intent
+    Orch->>Router: Select execution path
+    Router-->>Orch: Shortcut, playbook, or agent loop
+    Orch->>Tool: Execute next permitted step
+    Tool->>A11y: Find node / perform action
+    A11y->>App: Accessibility action
+    App-->>A11y: Updated node hierarchy
+    A11y-->>Tool: Updated UI state
+    Tool-->>Orch: Tool result and verification
+    Orch-->>UI: Progress, result, or request for confirmation
 ```
-**AI can control your phone, with local-first execution and optional cloud help.**
 
-The current public build is open-source and already handles real chat, task, and automation flows on Android.
+---
 
-Monitor a WhatsApp contact and auto-reply:
+## 🛒 User journey: WhatsApp to cart
 
+The typical multi-app workflow is designed around a single structured shopping manifest.
 
-Context-aware WhatsApp auto-reply:
+```mermaid
+flowchart LR
+    A[User gives voice or text command] --> B[Normalize intent]
+    B --> C[Open WhatsApp and resolve contact alias]
+    C --> D[Read the relevant message]
+    D --> E[Parse items, quantities, and units]
+    E --> F[Store structured CartItem manifest]
+    F --> G[Open selected commerce app]
+    G --> H[Check serviceability and app mode]
+    H --> I[Search each item and select a variant]
+    I --> J[Inspect and reconcile cart]
+    J --> K[Show summary and request user authorization]
+```
 
-https://github.com/user-attachments/assets/5a43d4d5-458a-4eea-a0a5-58d113255741
+### Workflow principles
 
-https://github.com/user-attachments/assets/5c2966c5-04e6-4b22-8d66-11915ae62096
+1. **Read once, execute from the manifest:** the agent extracts the shopping list into structured data before populating the cart.
+2. **Minimize app switching:** process items sequentially in the target commerce app after the list has been captured.
+3. **Verify actions:** where the accessibility hierarchy exposes enough information, confirm the selected item, variant, or cart row.
+4. **Keep payment decisions with the user:** the agent should not treat the appearance of a checkout button as authorization to pay.
 
-> **☝️ Auto-reply demo:** PokeClaw monitors messages from Mom, reads what she said, and replies based on context using the on-device LLM. [Watch in higher resolution on YouTube](https://youtube.com/shorts/Vxpf474chm0)
+---
 
-> **☝️ Context demo:** Mom asks "what did I tell you to bring?" — the AI opens the chat, reads the full conversation on screen, sees the earlier message about wine, and replies correctly. This is the difference between context-aware and context-free replies.
+## 🧠 AI design decisions
 
-https://github.com/user-attachments/assets/89999dd8-a1be-49ad-9419-60c2b38f6374
+### 1. Three-tier deliberation and routing
 
+Not every action requires a model call. `PipelineRouter` separates work into three paths:
 
-> **Why is the "hi" demo slow?** That clip was recorded on a CPU-only Android device with no usable GPU or NPU path. Running Gemma 4 E2B on pure CPU takes about 45 seconds to warm up. On stronger phones it is much faster:
-> - **Google Tensor G3/G4** (Pixel 8, Pixel 9)
-> - **Snapdragon 8 Gen 2/3** (Galaxy S24, OnePlus 12)
-> - **Dimensity 9200/9300** (recent MediaTek flagships)
-> - **Snapdragon 7+ Gen 2+** (mid-range with GPU)
->
-> On these devices, warmup drops to seconds. Same model, better hardware.
+| Tier                                | Component                        | Purpose                                                                                               |
+| ----------------------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **Tier 1 — deterministic shortcut** | `TaskShortcuts.kt`               | Recognize known intents and use direct Android intents or predefined actions when possible.           |
+| **Tier 2 — playbook**               | `PlaybookManager.kt`             | Execute constrained steps from domain-specific Markdown standard operating procedures.                |
+| **Tier 3 — agent loop**             | `MultiModelAgentOrchestrator.kt` | Handle dynamic screens and requests that need model-driven reasoning, with fallback and verification. |
 
+A playbook can describe steps for a quick-commerce order, opening/searching an app, or a WhatsApp call/forwarding workflow. If a constrained workflow fails, orchestration can hand control to a fallback path where configured.
 
+### 2. Prompt rewriting and language switching
 
+`PromptRewriter.kt` and the voice-routing components are intended to bridge the language used by the person and the normalized task representation used by tools.
 
+The prompt-rewriting path may produce two outputs:
 
+- `cleanedEnglishTask`: a normalized intent used by the task planner and UI tools.
+- `spokenResponse`: a user-facing response that can be spoken in the requested or detected language when the configured speech service supports it.
 
+This separation allows the internal task representation to remain consistent while keeping feedback understandable to the user.
 
+### 3. Long-horizon task planning with a DAG
 
-## The Story
+`TaskQueueDecomposer.kt` decomposes a high-level instruction into atomic subtasks. `TaskDependencyGraph.kt` maintains dependency order—for example:
 
-I'm building this solo. When Gemma 4 landed with native tool calling on LiteRT-LM, I wanted to know whether a phone could become a real on-device agent instead of just another chatbot. PokeClaw is the result.
+`WhatsApp read → item normalization → commerce app launch → sequential cart insertion → cart verification`
 
-The interesting part is not just chatting with a local model. The interesting part is getting a local model to read the screen, choose tools, operate apps, keep task state, and finish real phone workflows. That is exactly what this project is built for.
+A dependency graph helps the orchestrator preserve ordering, avoid unnecessary app switching, and recover from a failed step without discarding the entire task context.
 
-PokeClaw already supports fully on-device automation with Gemma 4 and optional cloud models for stronger task execution. The current focus is broader device support, more generic skills, more local model options, and a cleaner public release path.
+### 4. Reactive task state machine
 
-**If you hit something interesting, [open an issue](https://github.com/agents-io/PokeClaw/issues).** Real device reports are how this gets better fast.
+`AgentTaskState.kt` represents the task lifecycle as explicit states instead of relying on loosely coordinated booleans.
 
-## Product Direction
+```kotlin
+sealed interface AgentTaskState {
+    object Idle : AgentTaskState
+    data class Planning(
+        val task: String,
+        val isFastPath: Boolean = false
+    ) : AgentTaskState
+    data class Executing(
+        val task: String,
+        val stepIndex: Int = 1,
+        val plan: List<String> = emptyList()
+    ) : AgentTaskState
+    data class WaitingForUser(val prompt: String) : AgentTaskState
+    data class Recovering(val stepIndex: Int, val reason: String) : AgentTaskState
+    object CallInProgress : AgentTaskState
+    data class Completed(val result: String) : AgentTaskState
+    data class Failed(val error: String) : AgentTaskState
+    data class Aborted(val reason: String) : AgentTaskState
+}
+```
 
-PokeClaw is not just a chat app with a few phone-control tricks glued on top.
+The `CallInProgress` state is intended to pause background task execution and mute spoken narration while a phone or WhatsApp call is active.
 
-At its core, it is becoming a **mobile agent harness**:
+### 5. Context maintenance across apps
 
-- a generic tool layer for phone control
-- a task/runtime loop that lets a model choose and chain those tools
-- playbooks, rules, and guards that can be iterated against real device QA
-- a product shell on top so the same harness is usable by normal people, not just developers
+`MessageToCartPipeline.kt` separates message understanding from UI execution. The extracted list is converted into structured `CartItem` data, which is then consumed by the commerce workflow. This avoids needing to reread or reinterpret the original chat every time the target app changes.
 
-That distinction matters. The long-term goal is not to hardcode one-off app flows forever. The goal is to build the strongest practical harness for AI phone agents on Android, then ship product experiences on top of that foundation.
+The described `HybridMemoryRepository` combines local persistence (such as SQLite) with optional episodic memory. Memory should be limited to what the workflow needs, and any cloud memory provider should be configured intentionally.
 
-That is also why the project invests so heavily in:
+### 6. Speculative node pre-warming
 
-- generic tools before narrow workflows
-- repeated real-device QA instead of one-off demos
-- Cloud vs Local model comparisons on the same task families
-- playbooks and rules only when the model proves it needs extra structure
+`SpeculativeStepPredictor.kt` attempts to anticipate useful accessibility selectors from the task intent and prepare lookups while an app is opening. The implementation describes a thread-safe cache of candidate nodes. Cached accessibility nodes can become stale after UI changes, so action tools should still verify the current screen before acting.
 
-## See the UI
+---
 
-👉 **[Try the interactive demo on our landing page](https://agents-io.github.io/PokeClaw/)** — click through every screen without installing anything.
+## 🌳 Core algorithms and safety
 
-## What it does
+### 1. Accessibility-tree pruning: `f_prune`
 
-The model picks the right tool, fills in the parameters, and executes. You don't configure anything per-app. It just reads the screen and acts.
+Commerce and messaging apps may expose large accessibility trees. `NodeFinder.kt` filters and linearizes the hierarchy into a smaller structure for semantic matching and model context.
 
-## Proven Quick Tasks
+The project describes the following pruning rules:
 
-These are tasks we have already run end-to-end during on-device QA.
+1. Retain nodes that are clickable, editable, scrollable, or contain useful text/content descriptions.
+2. If a matched child is not clickable but its parent is clickable, consider targeting the clickable parent.
+3. Normalize text by trimming whitespace, folding case, and standardizing common formatting.
+4. Emit a compact, indented representation for the next planning or reasoning step.
 
-### Local mode
+A simplified form of the interactive projection is:
 
-- Summarize notifications
-- Explain clipboard contents
-- Analyze storage / apps and suggest cleanup targets
-- Check whether the battery needs charging
-- Report installed apps
-- Report phone temperature
-- Report Bluetooth state
-- Report battery, storage, and Android version
-- Run quick-task cards directly from the UI and return the result in chat
-- Route contact-specific send / call tasks correctly and fail cleanly when the contact does not exist on the device
+\[
+V_t^\* = \{v_i \in V_t \mid c_i = 1 \lor e_i = 1 \lor s_i = 1 \lor txt_i \neq \emptyset \lor desc_i \neq \emptyset\}
+\]
 
-### Cloud mode
+where `c`, `e`, and `s` indicate clickability, editability, and scrollability. This is a conceptual description of the pruning rule, not a guarantee that every app exposes an equally useful hierarchy.
 
-- Send a WhatsApp message and auto-return to the same PokeClaw conversation
-- Search inside YouTube in the real app
-- Check what is trending on Twitter / X and summarize it
-- Install or open Telegram from Play Store
-- Open Reddit and search for `pokeclaw`
-- Copy the latest email subject and Google it
-- Draft an email saying you will be late
-- Preserve task state and session history across cross-app execution and return
+### 2. Stuck detection and recovery
 
-## Benchmark & Real-Device QA
+`StuckDetector.kt` is described as comparing structural hashes of successive accessibility subtrees. If the relevant tree remains unchanged across a configured window of steps, the agent treats this as a possible stuck state.
 
-Every number below comes from repeated trials on a physical Pixel 8 Pro running release builds. No cherry-picked runs, no emulators. The full verified task list and tier breakdown is in [thoughts/verified-task-capabilities.md](thoughts/verified-task-capabilities.md).
+The intended bounded recovery sequence is:
 
-### Cloud (GPT-4.1) — 18/20 pass, real tasks on real phone
+| Condition              | Recovery action                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------- |
+| Initial repeated state | Try a safe back action or dismiss a blocking overlay.                           |
+| Repeated failure       | Restart the foreground app or reinitialize the current step, where appropriate. |
+| Further failure        | Abort the subtask, report the failure, and let the user decide what to do next. |
+
+The implementation should avoid retrying indefinitely. Recovery actions must be bounded and should not bypass confirmation gates.
+
+### 3. Checkout safety gate
+
+Cart population and payment authorization are separate steps. The workflow is designed to stop at the cart/checkout boundary and request explicit user confirmation before any payment-related action. Do not store payment credentials in README files, source code, or ordinary logs.
+
+### 4. Task ordering and app-switch minimization
+
+The dependency graph is intended to reduce repeated transitions between apps while retaining dependencies. Conceptually, the scheduler seeks an ordering that respects task prerequisites and reduces unnecessary changes in the active target app.
+
+---
+
+## 🔧 Tool and skill registry
+
+The source notes list the following tools and responsibilities. The actual availability of each tool depends on the checked-out branch and implementation state.
+
+| Tool                        | Implementation / component                  | Responsibility                                                              |
+| --------------------------- | ------------------------------------------- | --------------------------------------------------------------------------- |
+| `message_to_cart`           | `MessageToCartTool.kt`                      | Orchestrate WhatsApp list extraction and commerce cart population.          |
+| `read_message_items`        | `ReadMessageItemsTool.kt`                   | Read message text and filter common UI noise.                               |
+| `find_search_bar`           | `SearchBarService.kt`                       | Locate a commerce app's search field and enter a query.                     |
+| `add_to_cart`               | `AddToCartTool.kt`                          | Find a product card, resolve a variant, and attempt to add the item.        |
+| `read_cart`                 | `ReadCartTool.kt`                           | Inspect visible cart rows and reconcile them against the manifest.          |
+| `send_message`              | `SendMessageTool.java`                      | Send a message after destination checks.                                    |
+| `forward_whatsapp_message`  | `WhatsAppForwardTool.kt`                    | Forward a message with destination verification and bounded retry behavior. |
+| `place_call`                | `PlaceCallTool.kt`                          | Initiate a phone or WhatsApp call and enter call-lockdown state.            |
+| `auto_reply`                | `AutoReplyManager.java`                     | Handle configured notification-based replies.                               |
+| `open_app`                  | `OpenAppTool.java`                          | Launch an app and wait for the UI transition.                               |
+| `tap_node` / `find_and_tap` | `TapNodeTool.java` / find-and-tap utilities | Find and activate a semantic accessibility target.                          |
+| `scroll_to_find`            | `ScrollToFindTool.java`                     | Scroll to a target while detecting repeated UI states.                      |
+| `input_text`                | `InputTextTool.java`                        | Enter text through accessibility actions or supported input fallback.       |
+| `system_key`                | `SystemKeyTool.java`                        | Dispatch supported global navigation actions.                               |
+
+### Example shopping-item schema
+
+```kotlin
+data class CartItem(
+    val name: String,
+    val rawText: String,
+    val quantity: Int = 1,
+    val unit: String? = null,
+    val preferredBrand: String? = null,
+    val maxPriceThreshold: Double? = null,
+    var fulfillmentStatus: FulfillmentStatus = FulfillmentStatus.UNFULFILLED
+)
+```
+
+`rawText` preserves the original extracted wording; the other fields hold normalized item details for search and reconciliation.
+
+---
+
+## 🛠️ Technology stack
+
+| Category                 | Technology                                     | Role described in the project                                            |
+| ------------------------ | ---------------------------------------------- | ------------------------------------------------------------------------ |
+| Platform                 | Android SDK (API 26+)                          | Native Android runtime and accessibility APIs.                           |
+| Languages                | Kotlin and Java                                | Orchestration, service integration, UI actions, and state handling.      |
+| UI                       | Jetpack Compose, EasyFloat                     | Chat UI, task telemetry, and floating status display.                    |
+| Accessibility            | `AccessibilityService`                         | Inspect available accessibility nodes and dispatch supported UI actions. |
+| Notifications            | `NotificationListenerService`                  | Optional notification-driven workflows, including auto-replies.          |
+| On-device AI             | Google AI Edge LiteRT / configured Gemma model | Intended local inference for supported tasks.                            |
+| Cloud model routing      | OpenRouter and configured models               | Optional reasoning and dynamic-screen fallback.                          |
+| Voice                    | Sarvam AI STT and Bulbul TTS                   | Speech transcription and spoken progress.                                |
+| Local persistence        | SQLite / local task data                       | Keep task state and structured workflow data.                            |
+| Optional episodic memory | Mem0 API                                       | Optional longer-term memory when explicitly configured.                  |
+
+> Model names, API availability, and SDK integration details can change. Use the actual model identifiers and supported runtimes configured by the checked-out code; the names in planning notes are not a guarantee that a particular provider currently exposes them.
+
+---
+
+## 📁 Project structure
+
+The following is the package structure described in the project notes. Exact filenames may differ between branches.
+
+```text
+saarthi/
+├── app/src/main/java/io/agents/pokeclaw/
+│   ├── ClawApplication.kt
+│   ├── service/
+│   │   ├── ClawAccessibilityService.java
+│   │   ├── ClawNotificationListener.java
+│   │   ├── SearchBarService.kt
+│   │   ├── FloatingCircleManager.kt
+│   │   ├── ForegroundService.kt
+│   │   └── VoiceManager.kt
+│   ├── agent/
+│   │   ├── AgentTaskState.kt
+│   │   ├── MultiModelAgentOrchestrator.kt
+│   │   ├── TaskOrchestrator.kt
+│   │   ├── PipelineRouter.kt
+│   │   ├── TaskShortcuts.kt
+│   │   ├── TaskQueueDecomposer.kt
+│   │   ├── TaskDependencyGraph.kt
+│   │   ├── PlaybookManager.kt
+│   │   ├── SpeculativeStepPredictor.kt
+│   │   ├── AutoReplyManager.java
+│   │   ├── StuckDetector.kt
+│   │   ├── DirectDeviceDataGuard.kt
+│   │   ├── InAppSearchGuard.kt
+│   │   └── knowledge/
+│   │       └── ContactAliasResolver.kt
+│   ├── tool/impl/
+│   │   ├── MessageToCartPipeline.kt
+│   │   ├── MessageToCartTool.kt
+│   │   ├── EcommerceAutomationHelper.kt
+│   │   ├── AmazonAutomationDriver.kt
+│   │   ├── ReadMessageItemsTool.kt
+│   │   ├── ReadCartTool.kt
+│   │   ├── SendMessageTool.java
+│   │   ├── WhatsAppForwardTool.kt
+│   │   ├── PlaceCallTool.kt
+│   │   ├── TapNodeTool.java
+│   │   ├── ScrollToFindTool.java
+│   │   ├── InputTextTool.java
+│   │   ├── OpenAppTool.java
+│   │   └── SystemKeyTool.java
+│   ├── ui/
+│   │   └── ComposeChatActivity.kt
+│   └── utils/
+│       ├── NodeFinder.kt
+│       ├── ContactListUiUtils.kt
+│       ├── ContactMatchUtils.kt
+│       └── UiTextMatchUtils.java
+├── playbooks/
+│   ├── quick-commerce-order.md
+│   ├── whatsapp-call-and-forward.md
+│   └── open-and-search.md
+├── images/
+│   ├── conventional_paradigm.png
+│   ├── saathi_paradigm.png
+│   ├── high_level_block_diagram.png
+│   ├── user_flow.png
+│   ├── task_router.png
+│   └── tree_parser.png
+└── README.md
+```
+
+---
+
+## ⚡ Quick start
+
+### Prerequisites
+
+- A physical Android device running Android 8.0 (API 26) or later.
+- Android Studio and a compatible JDK. The source notes specify JDK 17; use the version required by the checked-out Gradle configuration.
+- WhatsApp and any commerce app you intend to test, installed and signed in on the device.
+- Internet connectivity and valid provider API keys for cloud model or voice features. Local-only features may have different requirements.
+
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/phani554/saarthi.git
+cd saarthi
+git checkout working_app
+```
+
+If `working_app` is not present in the current repository, list available branches with `git branch -a` and check out the branch that contains the Android implementation you intend to use.
 
-| Task | Result | Rounds | What happens |
-|---|---:|---:|---|
-| Search YouTube for lofi beats | ✅ | 9 | Opens YouTube, types query, hits search |
-| Open Chrome and search for weather | ✅ | 9 | Opens Chrome, types query, reads results |
-| Open Chrome and go to reddit.com | ✅ | 7 | URL navigation with node_id targeting |
-| Compose email to test@example.com | ✅ | 12 | Opens Gmail, fills To + Subject + Body |
-| Install Telegram from Play Store | ✅ | 14 | Search + tap Install + wait |
-| Turn on do not disturb | ✅ | 12 | Navigates Settings, toggles DND |
-| Open Settings, go to About Phone | ✅ | varies | Deep settings navigation |
-| Send hi to Mom on WhatsApp | ✅ | 5 | Opens WhatsApp, finds contact, types, sends |
-| Check my Instagram messages | ✅ | 5 | Handles typo ("instagarm"), opens correct app |
-| 部機仲有幾多storage | ✅ | 2 | Cantonese input, returns answer in 中文 |
-| 打開Instagram | ✅ | varies | Chinese command |
-| Draft an email saying I'll be late | ✅ **10/10** | 8 | Repeated trials: 100% pass rate |
-| Copy latest email subject and Google it | ✅ **8/10** | 15 | Gmail to Chrome cross-app flow, 80% pass rate |
+### 2. Configure local properties
 
-All tasks use zero hardcoded app logic. The model reads the screen, picks tools, and figures out the flow on its own. Multi-language works out of the box, including Cantonese, Mandarin, and misspelled English.
+If the repository provides a template, copy it:
 
-### Local (Gemma 4 E2B, fully on-device) — verified on CPU and GPU
+```bash
+cp local.properties.example local.properties
+```
 
-| Task family | Result | CPU avg (Pixel 8 Pro) | GPU avg (Pixel 8 Pro) | Notes |
-|---|---:|---:|---:|---|
-| Clipboard explain | ✅ | 2m 43s | 2m 11s | Real clipboard read |
-| Notifications summary | ✅ | 2m 49s | 2m 53s | Reads live notifications and summarizes |
-| Battery advice | ✅ | 2m 12s | 2m 53s | Returns level + charging state |
-| Storage + apps cleanup advice | ✅ | 2m 33s | 3m 06s | Harness used to mislabel this as blocked because the answer mentioned the Contacts app |
+Edit `local.properties` with the configuration expected by the Gradle project. The API key names below are examples taken from the project notes; confirm that the current source actually reads each property before relying on it.
 
-For the current `local-core` quick-task bundle on a Pixel 8 Pro, Gemma 4 E2B passed `4/4` on both CPU and GPU. Cold-start average time was `2m 34s` on CPU versus `2m 46s` on GPU, so GPU is now **verified and usable** on this device, but it is **not yet a cold-start speed win** for this short task bundle. The value of the recent hardening work is stability and real backend verification, not inflated benchmark theater.
+### 3. Build and install
 
+From the repository root, run:
 
+```bash
+./gradlew assembleDebug
+./gradlew installDebug
+```
 
-## How it works
+You can also open the project in Android Studio, allow Gradle sync to finish, select the app configuration, and run it on a connected Android device. A connected device is needed for installation, but the intended runtime does not require a PC/ADB connection to remain attached during normal phone use.
 
-PokeClaw gives a small on-device LLM a set of tools (tap, swipe, type, open app, send message, enable auto-reply, etc.) and lets it decide what to do. The LLM sees a text representation of the current screen, picks an action, sees the result, picks the next action, until the task is done.
+---
 
-Local execution runs via [LiteRT-LM](https://ai.google.dev/edge/litert/llm/overview) with native tool calling. In Local mode, the model runs on-device.
+## 🔑 API configuration
 
-## Tools
+The original project notes describe the following sample properties. Add only the keys required by your checked-out implementation and never commit real secrets.
 
-The LLM has access to these tools and picks them autonomously:
+```properties
+# Optional cloud-model routing
+OPENROUTER_API_KEY=replace_with_your_openrouter_key
 
-| Tool | What it does |
-|------|-------------|
-| `tap` / `swipe` / `long_press` | Touch the screen |
-| `input_text` | Type into any text field |
-| `open_app` | Launch any installed app |
-| `send_message` | Full messaging flow: open app, find contact, type, send |
-| `auto_reply` | Monitor a contact and reply automatically using LLM |
-| `get_screen_info` | Read current UI tree |
-| `take_screenshot` | Capture screen |
-| `finish` | Signal task completion |
+# Optional speech-to-text and text-to-speech integration
+SARVAM_API_KEY=replace_with_your_sarvam_key
 
-These tools are generic — they work with any app, any contact, any language. The LLM picks the right tool and fills in the parameters from your request.
+# Optional episodic memory integration
+MEM0_API_KEY=replace_with_your_mem0_key
 
-## Tools + Skills
+# Optional local model path; use a path supported by the actual runtime
+LOCAL_MODEL_PATH=/sdcard/Download/your-supported-model-file
+```
 
-Small on-device models get dramatically better when you give them a strong playbook. So we give PokeClaw reusable skills on top of generic tools.
+### Configuration notes
 
-The auto-reply feature is a good example. It doesn't work by magic — there's a predefined workflow behind it: open the chat → read all visible messages on screen → generate a context-aware reply → send it → go back to home. The model follows this recipe step by step. Every tool in that chain is generic: `open_app` works with any app, `read_screen` works on any screen, `send_message` works with any contact. The workflow just tells the model which tools to use and in what order.
+- Store real API keys in local, untracked configuration or a secure settings flow; do not hard-code them in Kotlin/Java files, screenshots, logs, or this README.
+- Keep `local.properties` out of version control. Verify that `.gitignore` excludes it before pushing.
+- The local model path is device-specific and must point to a file compatible with the inference runtime integrated into the app.
+- Configuring a key does not itself guarantee that a model name, endpoint, or account plan is supported. Check the provider's current documentation and the implementation's request format.
+- If the app has an in-app configuration screen, use that screen only after reviewing where and how the app stores the secrets.
 
-This is what we're calling **Skills** — reusable workflows built from generic tools. We're actively designing a skill system inspired by [Claude Code's skill architecture](https://docs.anthropic.com/en/docs/claude-code/skills). The idea: anyone can write a skill as a simple text file that describes the steps, and the LLM follows it.
+---
 
-Some examples of what skills can do:
+## 🔐 Permissions, privacy, and safety
 
-- **Auto-reply**: monitor notifications → open chat → read conversation → generate reply → send
-- **Morning briefing**: open weather app → read temperature → open calendar → read today's events → open email → count unread → summarize everything
-- **Smart forward**: catch a notification → open the message → read it → forward to another contact with a summary
-- **Auto-booking**: open a booking app → search for a time slot → fill in details → confirm
+Saathi's core behavior relies on Android permissions that can expose sensitive information or allow actions inside other apps. Grant them deliberately and only on a device/account you are authorized to use.
 
-Each skill is just a combination of the same generic tools (`open_app`, `tap`, `type`, `read_screen`, `send_message`, etc.) arranged in a specific order. The tools are the building blocks, the skills are the recipes.
+### Permissions described in the project
 
-Both are designed to be extensible. We're building the first 8-10 skills as built-in defaults. If the system works well, we'll open it up for the community to create and share their own tools and skills. You know your phone better than we do — you should be able to teach it new tricks.
+1. **Accessibility access:** enable Saathi under Android Settings → Accessibility. This enables access to the UI hierarchy and supported actions for the active app.
+2. **Display over other apps:** grant overlay permission if you use the floating status pill.
+3. **Notification access:** enable notification access only if you intend to use notification-driven workflows or auto-replies.
+4. **Microphone and related permissions:** grant these only if required by the installed voice implementation and Android version.
 
-As on-device models get smarter, more of this can become free-form. Right now, skills are how we get reliable automation out of a small local model while keeping the tool layer generic.
+Menu labels vary by Android manufacturer and OS release.
 
-## Download
+### Important operating principles
 
-[**Download APK**](https://github.com/agents-io/PokeClaw/releases/latest)
+- Use the application only with the account owner's consent and in accordance with the relevant app terms and applicable law.
+- Review the intended contact, message, product, quantity, variant, and cart before confirming consequential actions.
+- Keep payment authorization manual. Do not assume a cart summary is permission to purchase.
+- Notification and accessibility data can include private messages and other sensitive on-screen information. Collect and retain only what the workflow needs.
+- Understand what is sent to cloud providers when cloud models, speech services, or episodic memory are enabled.
+- Disable unnecessary accessibility, overlay, notification, microphone, or API integrations when they are not in use.
+- Provide a visible way to stop a task and avoid unbounded automatic retries.
 
-> Note: If you are updating from an older public debug build and Android says the package is incompatible, uninstall the old build once and then install the latest APK fresh. Older public debug builds still receive the in-app update prompt, but they need a one-time reinstall before joining the stable-signed `0.6.x` line.
+---
 
-### Requirements
+## ⏱️ Performance notes
 
-| | Minimum | Recommended |
-|---|---|---|
-| **Android** | 9+ | 12+ |
-| **Architecture** | arm64 | arm64 |
-| **RAM** | 8 GB | 12 GB+ |
-| **Storage** | 3 GB free (model download) | 5 GB+ |
-| **GPU** | Not required (CPU works) | Tensor G3/G4, Snapdragon 8 Gen 2+, Dimensity 9200+ |
-| **Root** | Not required | Not required |
+The original project notes report the following values for the intended implementation. Treat them as **project-reported figures**, not independently verified, device-independent benchmarks. Actual latency and behavior can vary with hardware, Android version, app version, network conditions, model provider, and accessibility-tree structure.
 
-> ⚠️ 8 GB gets you in the door. 12 GB+ is the sweet spot for the built-in Gemma 4 local models, especially if you want smoother multitasking and faster model bring-up.
+| Stage                       | Figure described in the project notes | Interpretation                                                                                                                                       |
+| --------------------------- | ------------------------------------: | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tier-1 intent shortcut      |                             `<100 ms` | Target for deterministic known-intent routing.                                                                                                       |
+| Accessibility-tree pruning  |                              `<20 ms` | Reported pruning time in the intended path.                                                                                                          |
+| Linearizing the pruned tree |                              `~10 ms` | Reported construction time for compact text representation.                                                                                          |
+| Compact model context       |                      `300–800 tokens` | Reported range for selected pruned UI contexts.                                                                                                      |
+| Native accessibility action |                              `~20 ms` | Reported dispatch latency; app response/rendering adds further time.                                                                                 |
+| Commerce item addition      |                    `<150 ms per item` | Project-reported fast action-path figure; not the end-to-end time for searching, waiting for catalog results, reasoning, and verifying the addition. |
+| Linked raw execution demo   |        Final listed action at `05:44` | One recorded run containing Flipkart product/cart workflows and a WhatsApp video call; not a general performance benchmark.                          |
 
-## Quick start
+The raw demo takes at least 5 minutes and 44 seconds to reach its final listed action. This does not contradict the smaller component-level figures: those figures describe individual fast paths, while an end-to-end agent workflow includes multiple sequential decisions, UI waits, app transitions, and model/API response times. In this recording, the WhatsApp path is playbook-heavy while the Flipkart path is agent-driven, so the two segments should not be treated as identical workloads.
 
-1. Install the APK
-2. Grant Accessibility permission when prompted
-3. If you want background monitor flows, also grant Notification Access
-4. In Local mode, the model downloads on first local launch (~2.6 GB)
-5. Switch to Chat or Task mode and start using it
+For meaningful benchmarking, record the device, Android release, target-app versions, network state, model/provider configuration, test scenario, number of repetitions, and whether the measurement includes app loading or network round trips. Report component latency separately from full-task wall-clock time.
 
-Local mode needs no account and no API key. Cloud mode is optional.
+---
 
-## Roadmap
+## 👥 Team and acknowledgments
 
-This is the current direction for PokeClaw based on real device testing, open issues, and the most common feature requests.
+Built at **Vivekanand Education Society's Institute of Technology (VESIT), Mumbai**.
 
-### Near-term
+- **Venkat Phaneendra Nittala**
+- **Kamya Gupta**
+- **Prasanna Nadgauda**
+- **Aditi Jadhav**
 
-- **Stabler public releases and upgrades.** The release/signing path is being locked down so future public APKs upgrade cleanly instead of falling back to uninstall/reinstall behavior from the older debug-signed builds.
-- **Missed-call auto follow-up.** A high-priority use case is: someone calls, you miss it, and PokeClaw automatically sends a follow-up message to that caller and keeps the status visible in the same chatroom. The preferred first path is SMS/API-first. WhatsApp follow-up is only worth adding if there is a reliable non-UI route; otherwise it should stay an explicit fallback path, not the core design.
-- **Lower-RAM local model options.** Right now the built-in local model choices are still too heavy for a lot of mid-range phones. Smaller on-device models are high priority.
-- **More small local models for real device coverage.** 1B–1.5B class models for lower-end phones are on the roadmap so more devices can at least run a usable local agent instead of being locked out by RAM limits.
-- **More reliable local model downloads.** Resume/retry behavior, partial download cleanup, and corrupted-model detection are all being hardened so downloads survive weak connections and screen-off/resume cases better.
-- **Broader device compatibility.** Samsung, Xiaomi, Dimensity, and low-RAM device issues are being used as real-world test cases for GPU→CPU fallback, model loading, accessibility reconnects, and generic UI control.
-- **More generic phone-control skills.** We are continuing to replace brittle, app-specific assumptions with generic tools and reusable skills so tasks survive OEM UI changes better.
+---
 
-### In progress
+## 📌 Project status and limitations
 
-- **Import your own local `.litertlm` models.** User-accessible local model import is on the roadmap so you can bring your own LiteRT model instead of being locked to the built-in download list.
-- **Custom local model sources.** We want PokeClaw to go beyond a fixed built-in catalog and support user-defined model sources, including direct downloads from Hugging Face or other hosted URLs.
-- **Google AI Core / system local AI integration.** We are tracking Android's newer on-device AI stack so PokeClaw can eventually use official system-level local model APIs where they make sense, instead of relying on a single runtime path forever.
-- **More built-in workflows.** More quick-task / skill coverage is planned beyond the first WhatsApp-centric workflows.
-- **Remote control / remote conversation flows.** Controlling a phone from another device is a real request and is on the longer roadmap, but it is not the current top priority compared with local reliability and device coverage.
+Saathi is a native Android automation project whose behavior depends on the current code branch, Android permissions, provider configuration, and the UI exposed by third-party apps. Commerce and messaging interfaces can change without notice, so selectors, labels, layout assumptions, and workflows may need maintenance.
 
-### Known platform constraints
+The feature list and architecture in this README describe the design and implementation notes supplied for this project; they should not be interpreted as a guarantee that every feature works on every device, account, region, or version of a target app.
 
-- **Edge Gallery model detection is not fully under our control.** Android hides other apps' `Android/data/...` sandboxes from normal file-pickers, so PokeClaw cannot generically "see" Edge Gallery's downloaded models unless they are exported into a user-accessible location first.
-- **Sideload + accessibility apps may trigger OEM security warnings.** Samsung / Play Protect warnings are being addressed through a cleaner release/signing path, but sideload trust prompts are partly controlled by the platform and OEM policy.
+---
 
-### Where feature requests go
+**Saathi — a more approachable way to interact with everyday mobile apps.**
 
-If you want something added, please open an issue. The roadmap above is intentionally built from real requests like:
-
-- missed-call auto follow-up messages
-- smaller local models for lower-end phones
-- importing your own local models
-- custom local model sources / hosted downloads
-- Android AI Core / official on-device AI support
-- cleaner upgrade/install paths
-- remote control from another phone
-- broader distribution paths like F-Droid
-
-## Help Wanted
-
-PokeClaw is moving fast, and the roadmap is being shaped directly by real device reports, feature requests, and QA results. If you want to help push local phone agents forward:
-
-- ⭐ **[Star this repo](https://github.com/agents-io/PokeClaw)** if you think local AI phone control matters
-- 🐛 **[Open an issue](https://github.com/agents-io/PokeClaw/issues)** when you hit a bug or want a feature
-- 🍴 **[Fork it](https://github.com/agents-io/PokeClaw/fork)** and build on it
-
-Every star helps more people find the project. Every issue helps shape the next release.
-
-## Changelog
-
-### v0.6.0 (2026-04-11)
-- **Mainline release hardening.** Cloud and Local chat/task flows were tightened before release instead of shipping more speculative features on top.
-- **Cloud task routing is less fragile.** Ordinary chat prompts like `say hi` no longer misroute into send-message behavior, while Cloud task flows still retain their multi-step capability.
-- **Local chat continuity is materially better.** The on-device chat session now restores visible conversation history after session rebuilds and app relaunches, instead of silently losing the earlier turns.
-- **Cloud and Local relaunch continuity are now verified.** Same-conversation memory survives a full force-stop/relaunch on both Cloud and Local paths.
-- **Direct device-data tasks are more truthful.** Clipboard, notifications, battery, storage, and installed-app questions use the real device tools instead of generic chatbot refusals.
-- **Models and settings are more honest.** The Models page now separates `Active model`, `Default local model`, and `Default cloud model`, and linked built-in Gemma rows no longer pretend the model is missing when the file is already usable.
-- **Cloud model switching is cleaner.** Switching cloud models now emits one clear system line instead of duplicate switch messages.
-- **Task/process UI is less noisy.** Normal chat no longer shows the orange `Task running...` bar, while true long-running work still shows the correct active state.
-- **Local session ownership is hardened.** Chat-side local loading now stands down while a Local task owns the LiteRT session, preventing the old `session already exists` race.
-- **Cloud release QA now uses success rate, not single-run theater.** The headline compose task passed `10/10`, and the Gmail-subject-to-Google exploratory task passed `8/10`, which is the right standard for stochastic Cloud flows.
-
-### v0.5.1 (2026-04-10)
-- **Chat/task input is more robust across phones.** The bottom input bar now follows the keyboard and system inset directly instead of relying on outer layout resize, which is safer across Pixel/Samsung navigation modes.
-- **Public release signing is now pinned to a stable path.** GitHub releases now refuse to publish unless a stable signing key is configured, and the release workflow builds a signed `release` APK instead of accidentally shipping a debug artifact.
-- **Release artifacts now include checksums.** The release pipeline also uploads `SHA256SUMS.txt` alongside the APK for easier verification.
-
-### v0.5.0 (2026-04-10)
-- **Previously shipped task flows now actually work.** Fixed stale model config reuse after switching Local/Cloud, fixed task/chat tab drift, fixed accessibility reconnect races, and fixed local task cancellation/session cleanup so tasks return to the right conversation instead of leaving stale state behind.
-- **Previously broken task completions now execute the real app flow.** Explicit email-compose tasks now open a real mail composer instead of stopping with draft text in chat, and in-app search tasks can no longer fake-complete before the query is actually typed on screen.
-- **Quick-task QA expanded.** Local quick tasks were swept end-to-end on-device, Cloud quick tasks now have cleaner automated coverage, and the QA runner correctly distinguishes real failures from environment blockers like permission dialogs or missing contacts.
-- **Task budget default is now unlimited.** Fresh installs no longer inherit a fake default cap during development; users can still set a manual token/cost budget in Settings if they want one.
-- **Previously misleading status rows now tell the truth.** Local GPU→CPU fallback now shows the real backend, the Accessibility status row reflects the real system state, and the Task Budget row shows `Unlimited` when no manual budget is set.
-- **The updater now covers more real-world installs.** From v0.5.0 onward, accidental debug-build users also get the once-per-day GitHub release check, and the dialog warns when Android may require uninstalling an old debug build before installing the new APK.
-- **Verified release-upgrade behavior.** Older public `0.4.0` builds do show the `v0.5.0` in-app update prompt, but upgrading from the old public debug signing path to the new public APK is a one-time uninstall + reinstall instead of an in-place replace.
-
-<details>
-<summary>Older versions (v0.1.0 — v0.4.1)</summary>
-
-### v0.4.1 (2026-04-08)
-- **Experimental task badge.** Task tab now shows `Experimental — more workflows coming soon`.
-- **12 new complex task QA cases.** Added broader Cloud task coverage for YouTube search, contextual messaging, screen reading, settings toggles, app installs, web search, email compose, camera flows, typo tolerance, and ambiguous requests.
-
-### v0.3.2 (2026-04-07)
-- **Security fix.** Debug task receivers now disabled in release builds. External apps can no longer trigger tasks via broadcast.
-- **Security fix.** The LAN config server was binding to all network interfaces, exposing API keys to anyone on the same WiFi. Now binds to localhost only.
-
-### v0.3.0 (2026-04-07)
-- **Cloud LLM support.** Chat and task modes now work with OpenAI, Anthropic, Google, and any OpenAI-compatible API. Switch providers with one tap in the new tabbed LLM Config screen.
-- **Real-time token and cost display.** See your token count and running cost in the chat header as you talk. Color shifts from grey to blue to amber to red as usage climbs. No other mobile AI app shows you this.
-- **Per-provider API keys.** Store a different API key for each provider. Switching tabs loads the right key automatically.
-- **Mid-session model switch.** Start a conversation with GPT-4o, switch to Claude mid-chat, and keep your entire history. The new model picks up where the old one left off.
-- **3-tier pipeline router.** Simple commands (call, alarm, open app) now execute instantly with zero LLM calls. Skill-matched tasks run deterministic step sequences. Only complex tasks hit the full agent loop.
-- **8 built-in skills.** Search in App, Dismiss Popup, Scroll and Read, Send WhatsApp, Navigate to Tab, and more. Each skill saves 3-10 LLM rounds by running a hardcoded tool sequence instead of reasoning from scratch.
-- **Skills UI in Task tab.** Quick Actions section shows all available skills with category icons. Tap to prefill the input bar.
-- **Token budget system.** Set soft and hard limits on token usage per task. The floating pill shows live token count and cost, and you can tap to stop a runaway task.
-- **Stuck detection.** Five signals detect when the agent is going in circles: repeated actions, unchanged screens, rising token count. Three-level recovery escalates from hints to strategy switches to auto-kill.
-- **Enter and Tab key support.** Skills can now press Enter to submit search queries and Tab to move between form fields.
-
-### v0.2.4 (2026-04-06)
-- **Task tab redesigned with skill cards.** No more typing free-form commands that Gemma misunderstands. Two skill cards with fill-in-the-blank forms: "Monitor [name] on [WhatsApp]" and "Send [message] to [name] on [WhatsApp]".
-- **Java skill routing.** Monitor and send-message tasks bypass the LLM entirely. Instant activation, zero warmup.
-- **Progress bar on skill activation.** Card fills up and turns orange when active. You know exactly when monitoring starts.
-- **Custom tasks disabled for on-device models.** Gemma is not smart enough to route free-form tasks to the right skill. Switch to a cloud LLM in Settings to unlock the text input.
-- **Tasks stay in-app.** Starting a task no longer jumps to the home screen. You see progress in PokeClaw, then it goes to background when ready.
-
-### v0.2.0 (2026-04-06)
-- **Auto-reply now reads conversation context.** Before replying, the AI opens the chatroom and reads all visible messages on screen. It no longer forgets what was said 3 messages ago.
-- **In-app update checker.** The app checks GitHub Releases once per day and prompts you to download if a newer version exists. No more manually checking.
-
-### v0.1.0 (2026-04-06)
-- Initial release. On-device Gemma 4 E2B with tool calling, accessibility-based phone control, auto-reply, task mode.
-
-</details>
-
-## Acknowledgments
-
-PokeClaw exists because of [Gemma 4](https://blog.google/innovation-and-ai/technology/developers-tools/gemma-4/) by [Google DeepMind](https://github.com/google-deepmind). Thank you to [Clément Farabet](https://github.com/clementfarabet), [Olivier Lacombe](https://github.com/olivierlacombe), and the entire Gemma team for shipping an open model with native tool calling under Apache 2.0. You made it possible for a solo developer to build a working phone agent in two nights. The [LiteRT-LM](https://ai.google.dev/edge/litert/llm/overview) runtime is what makes on-device inference practical.
-
-Also inspired by the [OpenClaw](https://github.com/openclaw/openclaw) community 🦞 for proving that AI agents that actually do things are what people want.
-
-And thank you to [Claude Code](https://claude.ai/code) by Anthropic. I'm a CS dropout with zero Android development experience. Claude Code made it possible for me to go from nothing to a working app in two nights. The future is wild.
-
-## Trademark
-
-PokeClaw is a trademark of Nicole / agents.io. The name "PokeClaw" and the PokeClaw logo may not be used to endorse or promote products derived from this software without prior written permission. Forks must be renamed before distribution.
-
-## License
-
-Apache 2.0
-
-Contributors sign our [CLA](CLA.md) before their first PR is merged.
+[Back to top](#-saathi--autonomous-android-lifestyle--quick-commerce-agent)
