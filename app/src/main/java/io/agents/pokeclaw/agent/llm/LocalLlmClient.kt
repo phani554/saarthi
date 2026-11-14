@@ -382,7 +382,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
         /** Tools the on-device model may use (order = order shown to the model). */
         private val LOCAL_CORE_TOOLS = listOf(
             "get_screen_info", "open_app", "tap_node", "input_text", "system_key",
-            "scroll_to_find", "send_message", "place_call", "wait", "finish"
+            "scroll_to_find", "send_message", "place_call", "message_care_contact", "send_distress_signal", "wait", "finish"
         )
         private val ZERO_ARG_TOOLS = setOf("get_screen_info")
 

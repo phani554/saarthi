@@ -91,7 +91,7 @@ object TaskShortcuts {
         }
 
         // --- Emergency Distress Signal / SOS shortcut ---
-        if (t.contains("distress") || t.contains("sos") || t.contains("emergency alert") || t.contains("help caretaker")) {
+        if (t.contains("distress") || t.contains("help caretaker") || io.agents.pokeclaw.care.DistressEscalator.isDistressUtterance(t)) {
             val tool = ToolRegistry.getInstance().getTool("send_distress_signal")
             if (tool != null) {
                 val result = tool.execute(emptyMap())

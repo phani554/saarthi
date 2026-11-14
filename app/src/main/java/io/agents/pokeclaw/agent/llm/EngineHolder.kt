@@ -67,8 +67,13 @@ object EngineHolder {
             add("CPU")
         }
         var lastError: Exception? = null
-        for (label in order) {
+        // Gemma 4 files downloaded after 2026-05-05 carry an MTP "draft" model (speculative decoding,
+        // Google: up to 2.2x decode on mobile GPU). Try it on GPU/CPU first; if the file has no drafter
+        // or the runtime is too old, the same backend is retried without it.
+        val attempts = order.flatMap { label -> if (label == "NPU") listOf(label to false) else listOf(label to true, label to false) }
+        for ((label, mtp) in attempts) {
             val backend = backendFor(label, nativeDir) ?: continue
+            if (!setSpeculativeDecoding(mtp) && mtp) continue
             try {
                 val engineConfig = EngineConfig(
                     modelPath = modelPath,
@@ -87,14 +92,27 @@ object EngineHolder {
                 engine = newEngine
                 currentModelPath = modelPath
                 currentBackendLabel = label
-                XLog.i(TAG, "getOrCreate: engine ready for $modelPath with $label backend")
+                XLog.i(TAG, "getOrCreate: engine ready for $modelPath with $label backend (mtp=$mtp)")
                 return newEngine
             } catch (e: Exception) {
-                XLog.e(TAG, "getOrCreate: $label init failed for $modelPath, trying next backend", e)
+                XLog.e(TAG, "getOrCreate: $label (mtp=$mtp) init failed for $modelPath, trying next option", e)
                 lastError = e
             }
         }
         throw lastError ?: IllegalStateException("No LiteRT backend could load $modelPath")
+    }
+
+    /**
+     * ExperimentalFlags.enableSpeculativeDecoding (litertlm >= 0.11). Reflection keeps this compiling on
+     * older versions. Returns false when the flag does not exist.
+     */
+    private fun setSpeculativeDecoding(on: Boolean): Boolean = try {
+        val cls = Class.forName("com.google.ai.edge.litertlm.ExperimentalFlags")
+        val instance = cls.getField("INSTANCE").get(null)
+        cls.getMethod("setEnableSpeculativeDecoding", Boolean::class.javaPrimitiveType).invoke(instance, on)
+        true
+    } catch (_: Throwable) {
+        false
     }
 
     /** SM8635 (iQOO Neo 10R) NPU builds are AOT-compiled per chip, e.g. gemma-4-E2B-it_NPU_SM8635.litertlm. */

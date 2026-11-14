@@ -7,6 +7,13 @@
 - Backends tried in order: GPU, then CPU. Logcat: `EngineHolder ... engine ready ... with GPU backend`.
 - Expect slow rounds on CPU (tens of seconds). Keep tasks simple: "open WhatsApp", "call <name>".
 
+## Speed: MTP draft model (speculative decoding)
+- Gemma 4 `.litertlm` files downloaded after 2026-05-05 include an MTP drafter. The app now turns on
+  `ExperimentalFlags.enableSpeculativeDecoding` (GPU, then CPU) and falls back to plain decoding if the file has
+  no drafter. Google reports up to 2.2x decode on mobile GPUs; one PowerVR phone regressed (Adreno untested).
+- Needs litertlm >= 0.11; the project is now on 0.16.1 (0.17+ needs Kotlin 2.3). Re-download the model if yours
+  is older than May 2026. Logcat: `engine ready ... with GPU backend (mtp=true)`.
+
 ## Why it was broken before
 1. The download URL was `gemma-4-E2B-it_qualcomm_qcs8275.litertlm`; the real file is
    `gemma-4-E2B-it_Qualcomm_QCS8275.litertlm` (case), so it 404'd. That file is also an NPU build for the
@@ -25,7 +32,7 @@ No public SM8635 file exists; you compile it yourself.
    (input `gemma-4-E2B-it_NPU_Uncompiled.litertlm`, output `gemma-4-E2B-it_NPU_SM8635.litertlm`).
    Do NOT JIT-compile E2B on the phone (it ran out of memory).
 2. Gradle (app/build.gradle.kts / libs.versions.toml):
-   - `litertlm = "0.18.1"` (0.10.0 has no `Backend.NPU`; the app uses reflection so it still builds on 0.10.0).
+   - litertlm is now 0.16.1; Backend.NPU is created by reflection. If NPU init fails on 0.16.1, try 0.18.1 (needs Kotlin 2.3).
    - add `com.google.ai.edge.litert:litert-npu-runtime-qualcomm:2.3.2` (dispatch lib).
    - put the V73 QNN libs in `app/src/main/jniLibs/arm64-v8a/`: `libQnnHtp.so`, `libQnnSystem.so`,
      `libQnnHtpV73Stub.so`, `libQnnHtpV73Skel.so` (+ `libLiteRtDispatch_Qualcomm.so`). Same QAIRT version for all

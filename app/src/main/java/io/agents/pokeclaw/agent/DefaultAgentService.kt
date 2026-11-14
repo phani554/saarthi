@@ -841,7 +841,7 @@ class DefaultAgentService : AgentService {
                 }
 
                 // End-to-end direct completion tools: complete task immediately upon tool success (0 extra LLM rounds)
-                val directCompletionTools = setOf("place_call", "send_message", "forward_whatsapp_message", "send_distress_signal", "add_to_cart", "update_memory")
+                val directCompletionTools = setOf("place_call", "send_message", "forward_whatsapp_message", "send_distress_signal", "message_care_contact", "add_to_cart", "update_memory")
                 if (toolName in directCompletionTools && result.isSuccess) {
                     val completionMsg = result.data ?: "✓ $toolName executed successfully"
                     XLog.i(TAG, "Direct completion tool '$toolName' succeeded — completing task end-to-end immediately")

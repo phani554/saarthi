@@ -83,6 +83,7 @@ object ToolRegistry {
         register(PlaceCallTool())
         register(WhatsAppForwardTool())
         register(SendDistressSignalTool())
+        register(MessageCareContactTool())
         register(EnqueueSubtaskTool())
         register(MessageToCartTool())
         register(ReadMessageItemsTool())
