@@ -29,6 +29,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import io.agents.pokeclaw.care.*
+import io.agents.pokeclaw.ui.ElderScaled
+import io.agents.pokeclaw.ui.edgePadding
+import io.agents.pokeclaw.ui.widthFraction
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -40,7 +43,7 @@ import kotlinx.coroutines.withContext
 class CareProfileActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { CareProfileScreen(onBack = { finish() }) } }
+        setContent { ElderScaled { MaterialTheme { CareProfileScreen(onBack = { finish() }) } } }
     }
 }
 
@@ -82,7 +85,7 @@ private fun CareProfileScreen(onBack: () -> Unit) {
         TopAppBar(title = { Text("Care profile", fontSize = 22.sp) },
             navigationIcon = { TextButton(onClick = onBack) { Text("Back") } })
     }) { pad ->
-        LazyColumn(Modifier.padding(pad).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        LazyColumn(Modifier.padding(pad).padding(horizontal = edgePadding()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(
@@ -108,9 +111,45 @@ private fun CareProfileScreen(onBack: () -> Unit) {
                             }
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC62828)),
-                        modifier = Modifier.weight(1f).height(64.dp)
+                        modifier = Modifier.weight(1f).height(widthFraction(0.18f, 64.dp, 96.dp))
                     ) { Text("SOS", fontSize = 24.sp, fontWeight = FontWeight.Bold) }
-                    OutlinedButton(onClick = { DistressEscalator.cancel(context) }, modifier = Modifier.height(64.dp)) { Text("Stop SOS") }
+                    OutlinedButton(onClick = { DistressEscalator.cancel(context) }, modifier = Modifier.height(widthFraction(0.18f, 64.dp, 96.dp))) { Text("Stop SOS") }
+                }
+            }
+
+            // Contacts Saathi heard about in conversation. Never called or texted by SOS until confirmed.
+            val pendingContacts = profile.pendingContacts()
+            if (pendingContacts.isNotEmpty()) {
+                item { Section("New contacts to check") }
+                item {
+                    Text(
+                        "Saathi heard these in conversation. Confirm to save them, or remove them. SOS never calls a contact until you confirm.",
+                        fontSize = 14.sp,
+                    )
+                }
+                items(pendingContacts.size) { i ->
+                    val c = pendingContacts[i]
+                    Card(Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(c.label(), fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                listOf(CareRoles.displayName(c.role), c.phone.ifBlank { "no number yet" })
+                                    .joinToString(" · "),
+                                fontSize = 15.sp,
+                            )
+                            if (c.note.isNotBlank()) Text(c.note, fontSize = 14.sp)
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                                Button(
+                                    onClick = { CareProfileStore.confirmContact(c); refresh() },
+                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                ) { Text("Confirm", fontSize = 16.sp) }
+                                OutlinedButton(
+                                    onClick = { CareProfileStore.discardPendingContact(c); refresh() },
+                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                ) { Text("Remove", fontSize = 16.sp) }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -156,8 +195,10 @@ private fun CareProfileScreen(onBack: () -> Unit) {
                 }
             }
             item { Section("Emergency contacts (loved ones)") }
-            items(profile.byRole(CareRoles.LOVED_ONE).size) { i ->
-                val c = profile.byRole(CareRoles.LOVED_ONE)[i]
+            // Pending (unconfirmed) loved ones are listed in "New contacts to check" above.
+            val lovedOnes = profile.byRole(CareRoles.LOVED_ONE).filter { !it.pending }
+            items(lovedOnes.size) { i ->
+                val c = lovedOnes[i]
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("${c.label()}  ${c.phone}", fontSize = 17.sp, modifier = Modifier.weight(1f))
                     IconButton(onClick = {

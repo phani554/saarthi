@@ -16,13 +16,20 @@ object CareMemoryLearner {
 
     /** Returns a short description of what was saved, or null. */
     fun learnFast(text: String): String? {
+        val c = learnFastContact(text) ?: return null
+        return "${CareRoles.displayName(c.role)} number noted (please confirm it in Care profile)"
+    }
+
+    /** Same as [learnFast]; returns the pending contact that was saved (so "forget that" can undo it), or null. */
+    fun learnFastContact(text: String): CareContact? {
         val role = CareRoles.fromWords(text) ?: return null
         val phone = PHONE.find(text)?.value?.trim() ?: return null
         // Heard numbers are saved as pending: they never replace a saved contact and never join
         // the SOS chain until the user confirms them in Care profile.
-        if (!CareProfileStore.addLearnedContact(CareContact(role = role, phone = phone))) return null
+        val c = CareContact(role = role, phone = phone)
+        if (!CareProfileStore.addLearnedContact(c)) return null
         XLog.i(TAG, "Saved pending $role number from conversation")
-        return "${CareRoles.displayName(role)} number noted (please confirm it in Care profile)"
+        return c
     }
 
     /** Prompt section asking the model for structured care facts alongside the plain fact. */
@@ -30,8 +37,31 @@ object CareMemoryLearner {
 {"fact":"one concise English fact or NONE",
  "contacts":[{"role":"watchman|family_doctor|doctor|chemist|loved_one","name":"","phone":"","relation":""}],
  "conditions":["medical conditions, allergies or surgeries the user says they have"],
- "medicines":[{"name":"","dose":"","frequency":""}]}
+ "medicines":[{"name":"","dose":"","frequency":""}],
+ "memory":[{"key":"person:son|person:daughter|person:<relation>|profile:name|health:<condition>|pref:<item>|alias:<nickname>","value":""}]}
+"memory" = short facts about the user: family names (person:son = "Ravi"), their name, health conditions,
+usual brands or shops (pref:milk = "Amul 1 L"), nicknames for contacts or groups (alias:bhai = "Rahul").
+Never include PINs, OTPs, passwords, card, bank or Aadhaar numbers.
 Only include what the user actually said. Use empty lists when nothing applies."""
+
+    /** The "memory" array of the model's JSON as (key, value) pairs; empty when missing or malformed. */
+    fun parseMemoryFacts(raw: String): List<Pair<String, String>> {
+        val start = raw.indexOf('{'); val end = raw.lastIndexOf('}')
+        if (start < 0 || end <= start) return emptyList()
+        return try {
+            val arr = JSONObject(raw.substring(start, end + 1)).optJSONArray("memory") ?: return emptyList()
+            (0 until arr.length()).mapNotNull { i ->
+                val o = arr.optJSONObject(i) ?: return@mapNotNull null
+                val k = o.optString("key").trim()
+                val v = o.optString("value").trim()
+                // Placeholders copied from the schema ("person:<relation>", "a|b") are not facts.
+                if (k.isBlank() || v.isBlank() || k.contains('<') || k.contains('|') || !k.contains(':')) null else k to v
+            }
+        } catch (e: Exception) {
+            XLog.w(TAG, "Bad memory JSON from model: ${e.message}")
+            emptyList()
+        }
+    }
 
     /** Applies the model's JSON. Returns the plain fact (or null). */
     fun applyAiJson(raw: String): String? {

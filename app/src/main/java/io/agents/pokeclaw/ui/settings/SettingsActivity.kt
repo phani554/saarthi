@@ -99,6 +99,20 @@ class SettingsActivity : BaseActivity() {
         initMenuGroups()
         applyThemeToGroups(themeColors)
         observeViewModel()
+        // Large text (elder mode): this screen's text sizes are in dp, so scale the views directly.
+        if (io.agents.pokeclaw.ui.ElderScale.isEnabled()) {
+            contentFrame?.let { io.agents.pokeclaw.ui.ElderScale.scaleTextViews(it) }
+        }
+    }
+
+    /** Opens a screen by class name; the benchmark and memory screens live in their own packages. */
+    private fun openByClassName(className: String) {
+        try {
+            startActivity(Intent().setClassName(this, className))
+        } catch (e: ActivityNotFoundException) {
+            XLog.w("SettingsActivity", "Screen not available: $className", e)
+            Toast.makeText(this, "This screen is not available in this build yet.", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onResume() {
@@ -337,11 +351,28 @@ class SettingsActivity : BaseActivity() {
             onClick = {
                 startActivity(Intent(this, ThemeActivity::class.java))
             },
-            showDivider = false
+            showDivider = true
         ).apply {
             val themeId = KVUtils.getString("THEME_ID", "abyss_dark")
             val label = themeId.replace("_", " ").replaceFirstChar { it.uppercase() }
             setTrailingText(label)
+        }
+
+        // Large text (elder mode): on/off toggle (MenuItem has no switch widget, so the trailing text
+        // shows On/Off and a tap flips it). Chat and Care screens follow at once; this screen reopens.
+        var largeTextItem: MenuItem? = null
+        largeTextItem = appearanceGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_zoom,
+            title = "Large text (elder mode)",
+            onClick = {
+                val enabled = !io.agents.pokeclaw.ui.ElderScale.isEnabled()
+                io.agents.pokeclaw.ui.ElderScale.setEnabled(enabled)
+                largeTextItem?.setTrailingText(if (enabled) "On" else "Off")
+                recreate()
+            },
+            showDivider = false
+        ).apply {
+            setTrailingText(if (io.agents.pokeclaw.ui.ElderScale.isEnabled()) "On" else "Off")
         }
 
         // Tools
@@ -352,6 +383,20 @@ class SettingsActivity : BaseActivity() {
             leadingIcon = android.R.drawable.ic_menu_my_calendar,
             title = "Care profile & SOS",
             onClick = { startActivity(Intent(this, io.agents.pokeclaw.ui.care.CareProfileActivity::class.java)) },
+            showDivider = true
+        )
+
+        toolsGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_info_details,
+            title = "What Saathi remembers",
+            onClick = { openByClassName("io.agents.pokeclaw.ui.memory.MemoryActivity") },
+            showDivider = true
+        )
+
+        toolsGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_manage,
+            title = "Benchmark & phone check",
+            onClick = { openByClassName("io.agents.pokeclaw.ui.benchmark.BenchmarkActivity") },
             showDivider = true
         )
 

@@ -120,7 +120,8 @@ object ChatHistoryManager {
                     sb.appendLine(serializeTimestamp(msg.timestamp))
                     msg.toolSteps?.forEach { step ->
                         val icon = if (step.success) "✓" else "○"
-                        sb.appendLine("- $icon ${step.toolName} → ${step.summary}")
+                        if (step.summary.isBlank()) sb.appendLine("- $icon ${step.toolName}")
+                        else sb.appendLine("- $icon ${step.toolName} → ${step.summary}")
                     }
                     sb.appendLine()
                 }

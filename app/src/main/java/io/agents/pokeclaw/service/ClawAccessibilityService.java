@@ -587,7 +587,11 @@ public class ClawAccessibilityService extends AccessibilityService {
             nodeMetaMap.clear();
             nodeCounter.set(0);
             StringBuilder sb = new StringBuilder();
+            // Benchmark hook: one volatile read when benchmark mode is off.
+            final boolean bench = io.agents.pokeclaw.benchmark.BenchmarkRecorder.isRecording();
+            final long benchT0 = bench ? System.nanoTime() : 0L;
             buildNodeTree(root, sb, 0);
+            if (bench) recordBenchmarkCapture(root, sb.length(), nodeCounter.get(), System.nanoTime() - benchT0);
             return sb.toString();
         } catch (Exception e) {
             XLog.e(TAG, "getScreenTree error", e);
@@ -641,11 +645,42 @@ public class ClawAccessibilityService extends AccessibilityService {
                 return null;
             }
             StringBuilder sb = new StringBuilder();
+            final boolean bench = io.agents.pokeclaw.benchmark.BenchmarkRecorder.isRecording();
+            final long benchT0 = bench ? System.nanoTime() : 0L;
+            if (bench) benchFullNodeCount.set(0);
             buildNodeTreeFull(root, sb, 0);
+            if (bench) {
+                // Full mode sends the whole tree to the model: raw == sent, reduction 0%.
+                double ms = (System.nanoTime() - benchT0) / 1_000_000.0;
+                int nodes = benchFullNodeCount.get();
+                io.agents.pokeclaw.benchmark.BenchmarkRecorder.onScreenCapture(nodes, sb.length(), nodes, sb.length(), ms, ms, "full");
+            }
             return sb.toString();
         } catch (Exception e) {
             XLog.e(TAG, "getScreenTreeFull error", e);
             return null;
+        }
+    }
+
+    /** Benchmark only: nodes visited by buildNodeTreeFull (one dump line per node; text may hold newlines, so lines are not counted). */
+    private final AtomicInteger benchFullNodeCount = new AtomicInteger(0);
+
+    /**
+     * Benchmark only (called when BenchmarkRecorder.isRecording()): builds the full dump of the same root
+     * and records raw vs pruned size. Never throws.
+     */
+    private void recordBenchmarkCapture(AccessibilityNodeInfo root, int prunedChars, int prunedNodes, long prunedNanos) {
+        try {
+            long t0 = System.nanoTime();
+            StringBuilder full = new StringBuilder();
+            benchFullNodeCount.set(0);
+            buildNodeTreeFull(root, full, 0);
+            double fullMs = (System.nanoTime() - t0) / 1_000_000.0;
+            io.agents.pokeclaw.benchmark.BenchmarkRecorder.onScreenCapture(
+                    benchFullNodeCount.get(), full.length(), prunedNodes, prunedChars,
+                    prunedNanos / 1_000_000.0, fullMs, "pruned");
+        } catch (Throwable t) {
+            XLog.w(TAG, "benchmark capture failed: " + t.getMessage());
         }
     }
 
@@ -805,6 +840,7 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (node == null) {
             return;
         }
+        benchFullNodeCount.incrementAndGet();
 
         String indent = "  ".repeat(depth);
         sb.append(indent);

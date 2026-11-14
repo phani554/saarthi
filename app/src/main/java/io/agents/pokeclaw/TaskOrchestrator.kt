@@ -200,6 +200,9 @@ class TaskOrchestrator(
                     taskEventCallback?.invoke(TaskEvent.Failed("${route.description}: $err"))
                     ChannelManager.sendMessage(channel, "✗ ${route.description}: $err", messageID)
                 } else {
+                    if (route.toolName != "update_memory" && route.toolName != "forget_memory") {
+                        try { io.agents.pokeclaw.agent.knowledge.MemoryManager.rememberTaskOutcome(task, true, route.description) } catch (e: Exception) { XLog.w(TAG, "rememberTaskOutcome failed", e) }
+                    }
                     taskEventCallback?.invoke(TaskEvent.Completed(route.description))
                     ChannelManager.sendMessage(channel, "✓ ${route.description}", messageID)
                 }
@@ -397,6 +400,7 @@ class TaskOrchestrator(
                 var answer = finalAnswer.ifEmpty { "Done." }
                 answer = answer.removePrefix("Task completed:").removePrefix("Task completed").trim()
                 if (answer.isEmpty()) answer = "Done."
+                try { io.agents.pokeclaw.agent.knowledge.MemoryManager.rememberTaskOutcome(task, true, answer) } catch (e: Exception) { XLog.w(TAG, "rememberTaskOutcome failed", e) }
                 taskEventCallback?.invoke(TaskEvent.Completed(answer, modelName))
                 ForegroundService.resetToIdle(ClawApplication.instance)
                 flushRoundBuffer()

@@ -518,14 +518,15 @@ class TaskFlowController(
                     uiState.isTaskRunning.value = true
                     if (!event.toolName.contains("Finish", ignoreCase = true)) {
                         removeTypingIndicator()
-                        addSystem("${event.toolName}...")
+                        // Folded into one "Working: step N" row by the chat screen (ChatScreen.StepGroup).
+                        addStep(event.toolName, success = true)
                         // Not spoken: raw tool names ("Tap Node...") talked over the Sarvam reply.
                     }
                 }
                 is TaskEvent.ToolResult -> {
                     uiState.isAwaitingReply.value = false
                     uiState.isTaskRunning.value = true
-                    if (!event.success) addSystem("${event.toolName} failed")
+                    if (!event.success) addStep("${event.toolName} failed", success = false)
                 }
                 is TaskEvent.Response -> {
                     uiState.isAwaitingReply.value = false
@@ -534,7 +535,7 @@ class TaskFlowController(
                 is TaskEvent.Progress -> {
                     uiState.isAwaitingReply.value = false
                     uiState.isTaskRunning.value = true
-                    addSystem(event.description)
+                    addStep(event.description, success = true)
                     val description = event.description
                     narrationExecutor.execute { VoiceManager.speakNative(description) }
                 }
@@ -660,6 +661,22 @@ Explain what went wrong in 1-2 friendly, simple sentences in user's language/dia
 
     private fun addSystem(text: String) {
         uiState.messages.add(ChatMessage(ChatMessage.Role.SYSTEM, text))
+    }
+
+    /**
+     * One agent step ("Tap Node", "Wait", "Open App", progress text). Stored as TOOL_GROUP so the chat
+     * folds a run of them into a single collapsible status row. Content carries the same line so a
+     * conversation reloaded from disk (which keeps only text) still shows the steps.
+     */
+    private fun addStep(text: String, success: Boolean) {
+        val icon = if (success) "✓" else "○"
+        uiState.messages.add(
+            ChatMessage(
+                role = ChatMessage.Role.TOOL_GROUP,
+                content = "- $icon $text",
+                toolSteps = listOf(ToolStep(toolName = text, summary = "", success = success)),
+            )
+        )
     }
 
     private fun openSettings() {

@@ -34,6 +34,13 @@ object ContactAliasResolver {
             }
         }
 
+        // Local memory facts (< 1ms): "beta" / "my son" -> person:son, "project group" -> alias:project_group.
+        // Only confirmed facts: a guessed (pending) name must never decide who gets called.
+        fromMemoryFacts(clean)?.let {
+            XLog.i(TAG, "ContactAliasResolver memory fact match for '$clean'")
+            return it
+        }
+
         // Fast path (< 1ms): standard contact names & phone numbers return directly
         if (isPlainNameOrNumber(clean)) {
             XLog.d(TAG, "ContactAliasResolver fast path: '$clean'")
@@ -59,6 +66,16 @@ object ContactAliasResolver {
             clean
         }
     }
+
+    /** Confirmed person:/alias: fact for [phrase], or null. */
+    private fun fromMemoryFacts(phrase: String): String? = try {
+        val core = phrase.lowercase().replace(FILLER_WORDS, " ").replace(Regex("\\s+"), " ").trim()
+        if (core.isEmpty()) null else {
+            val rel = FactExtractor.relationOf(core)
+            val byRelation = rel?.let { MemoryFactStore.get("person:$it") }?.takeIf { !it.pending }?.value
+            byRelation ?: MemoryFactStore.get("alias:" + core.replace(' ', '_'))?.takeIf { !it.pending }?.value
+        }
+    } catch (_: Exception) { null }
 
     private val FILLER_WORDS = Regex("""(?i)\b(my|our|the|ka|ki|ke|apna|apni|apne|hamara|hamari|hamare|mera|meri|mere)\b""")
     private val ROLE_ONLY = Regex(
@@ -111,7 +128,8 @@ object ContactAliasResolver {
         val lower = name.lowercase()
         val isAliasTrigger = lower.contains("my ") || lower.contains("sister") || lower.contains("bhai") ||
                 lower.contains("caretaker") || lower.contains("wife") || lower.contains("husband") ||
-                lower.contains("brother") || lower.contains("friend") || lower.contains("group")
+                lower.contains("brother") || lower.contains("friend") || lower.contains("group") ||
+                lower.split(Regex("\\s+")).any { FactExtractor.relationOf(it) != null }
         return !isAliasTrigger
     }
 }

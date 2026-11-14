@@ -100,7 +100,7 @@ class ComposeChatActivity : ComponentActivity() {
 
         if (VoiceManager.isRecordingInApp()) {
             VoiceManager.stopInAppVoiceCapture()
-            Toast.makeText(this, "Mic stopped", Toast.LENGTH_SHORT).show()
+            // No toast: the status area above the input shows the voice state (toasts covered the input).
             return
         }
 
@@ -108,7 +108,7 @@ class ComposeChatActivity : ComponentActivity() {
         val hasGeminiKey = KVUtils.getLlmApiKey().trim().isNotEmpty()
 
         if (hasSarvamKey || hasGeminiKey) {
-            Toast.makeText(this, "🎙️ Listening... Speak now", Toast.LENGTH_SHORT).show()
+            // "Listening" is shown in the chat's status area (VoiceEngineState.Recording), not a toast.
             VoiceManager.startInAppVoiceCapture(this) { transcribedText ->
                 runOnUiThread {
                     if (!transcribedText.isNullOrBlank()) {
@@ -210,6 +210,8 @@ class ComposeChatActivity : ComponentActivity() {
         val composeColors = with(ThemeManager) { themeColors.toComposeColors() }
 
         setContent {
+          // Large text (elder mode): bigger text and touch targets when the Settings switch is ON.
+          io.agents.pokeclaw.ui.ElderScaled {
             val activeTasks by activeTaskShellController.activeTasks.collectAsState()
 
             ChatScreen(
@@ -279,6 +281,7 @@ class ComposeChatActivity : ComponentActivity() {
                 onModelSwitch = { modelId, displayName -> switchModel(modelId, displayName) },
                 colors = composeColors,
             )
+          }
         }
 
         refreshSidebarHistory()

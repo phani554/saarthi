@@ -33,7 +33,7 @@ object TaskParser {
     fun parse(task: String, installedPackages: List<String> = emptyList()): ParseResult? {
         val lower = task.lowercase().trim()
 
-        return matchMemoryStatement(lower, task)
+        return matchForgetStatement(task) ?: matchMemoryStatement(lower, task)
             ?: matchMessageToCart(lower, task)
             ?: matchWhatsAppCall(lower, task)
             ?: matchSendMessage(lower, task)
@@ -331,6 +331,17 @@ object TaskParser {
             toolName = "open_app",
             toolParams = mapOf("app_name" to appName),
             description = "Opening $appName"
+        )
+    }
+
+    private fun matchForgetStatement(original: String): ParseResult? {
+        if (!io.agents.pokeclaw.agent.knowledge.FactExtractor.isForgetCommand(original)) return null
+        return ParseResult(
+            action = "forget_memory",
+            intent = null,
+            toolName = "forget_memory",
+            toolParams = emptyMap(),
+            description = "Okay, I forgot that"
         )
     }
 }

@@ -36,11 +36,14 @@ class InspectMemoryTool : BaseTool() {
         val query = optionalString(params, "query", "all").trim()
 
         return try {
-            val (mem0Results, source) = runBlocking {
+            val (searchResults, source) = runBlocking {
                 HybridMemoryRepository.searchMemories(query)
             }
+            // Local facts are listed below; only show the search result when it came from Mem0 Cloud.
+            val mem0Results = if (source == io.agents.pokeclaw.data.memory.MemorySource.MEM0_CLOUD) searchResults else ""
 
-            val localSection = MemoryManager.getMemoryPromptSection()
+            val local = MemoryManager.describeFacts(query)
+            val localSection = if (local.isBlank()) "" else "## Saved on this phone\n$local\n"
 
             val combined = buildString {
                 append("Active Memory Source: ").append(source.name).append("\n\n")

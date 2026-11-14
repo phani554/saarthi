@@ -3,18 +3,13 @@
 
 package io.agents.pokeclaw.tool.impl
 
-import io.agents.pokeclaw.agent.knowledge.KBManager
+import io.agents.pokeclaw.agent.knowledge.FactExtractor
 import io.agents.pokeclaw.agent.knowledge.MemoryManager
 import io.agents.pokeclaw.data.memory.HybridMemoryRepository
 import io.agents.pokeclaw.tool.BaseTool
 import io.agents.pokeclaw.tool.ToolParameter
 import io.agents.pokeclaw.tool.ToolResult
 import io.agents.pokeclaw.utils.XLog
-import kotlinx.coroutines.runBlocking
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.regex.Pattern
 
 /**
  * Memory Update & Correction Tool (`update_memory`).
@@ -22,10 +17,6 @@ import java.util.regex.Pattern
  * (e.g. correcting 'finaly year project 1' -> 'Final Year Project').
  */
 class UpdateMemoryTool : BaseTool() {
-
-    companion object {
-        private const val MEMORY_FILE_PATH = "user_preferences.md"
-    }
 
     override fun getName(): String = "update_memory"
 
@@ -50,40 +41,31 @@ class UpdateMemoryTool : BaseTool() {
             return ToolResult.error("Both old_fact and new_fact are required")
         }
 
+        if (MemoryManager.isSensitive(newFact)) {
+            // Spoken back to the user, so plain words. Nothing is stored or sent anywhere.
+            return ToolResult.success("I don't save PINs, OTPs, passwords or card numbers. Please keep them private.")
+        }
+
         return try {
-            val existing = KBManager.read(MEMORY_FILE_PATH).getOrNull().orEmpty()
-            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
-
-            // Replacement text is escaped ("$" in a fact used to throw), "[^\]]" is safe under ICU,
-            // and no word-boundary requirement, so facts with punctuation at the edges still match.
-            val lineRegex = Regex("""(?i)- \[[^\]]+\] [^\n]*?""" + Pattern.quote(oldFact) + """[^\n]*""")
-            val replacement = Regex.escapeReplacement("- [$timestamp] $newFact")
-            val replaced = lineRegex.containsMatchIn(existing)
-            val updatedContent = if (replaced) {
-                existing.replace(lineRegex, replacement)
-            } else {
-                existing + "\n- [$timestamp] $newFact\n"
+            // Tier 1 "remember that X" passes the same text twice: that is a new fact, not a correction.
+            if (oldFact.equals(newFact, ignoreCase = true)) {
+                val saved = MemoryManager.recordFactLocal(newFact, syncCloud = true)
+                XLog.i("UpdateMemoryTool", "Remembered ${saved.size} fact(s)")
+                return ToolResult.success(
+                    if (saved.isEmpty()) "I already know that: $newFact"
+                    else "Got it, I will remember: " + saved.joinToString("; ") { FactExtractor.render(it.copy(pending = false)) }
+                )
             }
 
-            val fm = mapOf(
-                "type" to "user_memory",
-                "updated" to SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
-            )
-            KBManager.write(MEMORY_FILE_PATH, fm, updatedContent)
-
-            // Sync correction to Mem0 Cloud
-            runBlocking {
-                HybridMemoryRepository.recordFact(newFact)
-            }
-
-            // Invalidate in-memory prompt cache
-            MemoryManager.recordFact(newFact)
-
-            XLog.i("UpdateMemoryTool", "Successfully updated memory: '$oldFact' -> '$newFact'")
-            if (replaced) {
-                ToolResult.success("Successfully updated memory from '$oldFact' to '$newFact'")
+            val updated = MemoryManager.correctFact(oldFact, newFact)
+            if (updated != null) {
+                XLog.i("UpdateMemoryTool", "Corrected memory fact ${updated.key}")
+                ToolResult.success("Successfully updated memory from '$oldFact' to '${FactExtractor.render(updated)}'")
             } else {
-                ToolResult.success("'$oldFact' was not found as a saved memory line, so nothing was replaced; '$newFact' was added as a new memory.")
+                MemoryManager.recordFactLocal(newFact, syncCloud = false)
+                // Keep the old behaviour of telling Mem0 Cloud (if configured) about corrections.
+                HybridMemoryRepository.recordTurnAsync("user_preference_fact", newFact)
+                ToolResult.success("'$oldFact' was not found as a saved memory, so nothing was replaced; '$newFact' was added as a new memory.")
             }
         } catch (e: Exception) {
             XLog.e("UpdateMemoryTool", "Failed to update memory", e)

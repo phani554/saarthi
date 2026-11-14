@@ -17,6 +17,7 @@ import io.agents.pokeclaw.agent.llm.LlmClient
 import io.agents.pokeclaw.agent.llm.LlmClientFactory
 import io.agents.pokeclaw.agent.llm.LlmResponse
 import io.agents.pokeclaw.agent.llm.StreamingListener
+import io.agents.pokeclaw.benchmark.BenchmarkRecorder
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.service.ForegroundService
 import io.agents.pokeclaw.tool.ToolRegistry
@@ -192,14 +193,17 @@ class DefaultAgentService : AgentService {
             override fun onTokenUpdate(status: TokenMonitor.Status) = callback.onTokenUpdate(status)
 
             override fun onComplete(round: Int, finalAnswer: String, totalTokens: Int, modelName: String?) {
+                BenchmarkRecorder.setOutcome("success", finalAnswer, round, modelName)
                 terminalCallback = { callback.onComplete(round, finalAnswer, totalTokens, modelName) }
             }
 
             override fun onError(round: Int, error: Exception, totalTokens: Int) {
+                BenchmarkRecorder.setOutcome("fail", error.message, round)
                 terminalCallback = { callback.onError(round, error, totalTokens) }
             }
 
             override fun onSystemDialogBlocked(round: Int, totalTokens: Int) {
+                BenchmarkRecorder.setOutcome("fail", "system dialog blocked", round)
                 terminalCallback = { callback.onSystemDialogBlocked(round, totalTokens) }
             }
         }
@@ -208,6 +212,10 @@ class DefaultAgentService : AgentService {
         val taskClient: LlmClient? = if (::llmClient.isInitialized) llmClient else null
         val job = serviceScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             val myJob = coroutineContext[Job]
+            // Benchmark: 0 when benchmark mode is off (all later hooks then return at once).
+            val benchRunId = if (::config.isInitialized) {
+                BenchmarkRecorder.startTask(userPrompt, config.provider == LlmProvider.LOCAL, config.modelName, config.baseUrl)
+            } else 0L
             try {
                 // Give Compose one frame to render the running/stop controls.
                 yield()
@@ -230,10 +238,13 @@ class DefaultAgentService : AgentService {
                         }
                     } else {
                         XLog.e(TAG, "Agent execution error", e)
+                        BenchmarkRecorder.setOutcome("fail", e.message, 0)
                         terminalCallback = { callback.onError(0, e, 0) }
                     }
                 }
             } finally {
+                // Benchmark: write the run (no-op when off, or when a newer task already started a run).
+                BenchmarkRecorder.finishTask(benchRunId, cancelled.get())
                 // If a newer task has already replaced this job (cancel() then a new executeTask),
                 // this stale job must not close the new task's engine, clear its job/running state,
                 // or fire a stale "Task cancelled" callback into the new task's UI.
@@ -316,8 +327,9 @@ class DefaultAgentService : AgentService {
         for (attempt in 0 until MAX_API_RETRIES) {
             currentCoroutineContext().ensureActive()
             if (cancelled.get()) throw RuntimeException(ClawApplication.instance.getString(R.string.agent_task_cancelled))
+            val benchStart = if (BenchmarkRecorder.isRecording()) System.currentTimeMillis() else 0L
             try {
-                return if (config.streaming) {
+                val response = if (config.streaming) {
                     val textBuilder = StringBuilder()
                     runInterruptible(Dispatchers.Default) {
                         llmClient.chatStreaming(messages, toolSpecs, object : StreamingListener {
@@ -334,7 +346,17 @@ class DefaultAgentService : AgentService {
                         llmClient.chat(messages, toolSpecs)
                     }
                 }
+                if (benchStart != 0L) {
+                    BenchmarkRecorder.onLlmCall(
+                        System.currentTimeMillis() - benchStart,
+                        response.tokenUsage?.inputTokenCount(),
+                        response.tokenUsage?.outputTokenCount(),
+                        true
+                    )
+                }
+                return response
             } catch (e: Exception) {
+                if (benchStart != 0L) BenchmarkRecorder.onLlmCall(System.currentTimeMillis() - benchStart, null, null, false)
                 lastException = e
                 val msg = e.message ?: ""
                 // Do not retry on auth failure or balance error
@@ -509,6 +531,7 @@ class DefaultAgentService : AgentService {
 
         val parsedPrompt = TaskPromptEnvelope.parse(userPrompt)
         val rawUserRequest = parsedPrompt.currentRequest
+        BenchmarkRecorder.setTaskText(rawUserRequest)
         val optimizedUserRequest = PromptRewriter.optimize(rawUserRequest)
 
         // Build System Prompt — use optimized prompt for local LLM
@@ -536,7 +559,7 @@ class DefaultAgentService : AgentService {
         MemoryManager.learnFromMessage(rawUserRequest)
         val (mem0Raw, mem0Source) = HybridMemoryRepository.searchMemories(rawUserRequest)
         val mem0Memories = if (mem0Source == io.agents.pokeclaw.data.memory.MemorySource.MEM0_CLOUD) mem0Raw else ""
-        val memorySection = MemoryManager.getMemoryPromptSection() +
+        val memorySection = MemoryManager.getMemoryPromptSection(rawUserRequest) +
                 if (mem0Memories.isNotBlank()) "\n\n## Mem0 Cloud Search Results for Request\n$mem0Memories" else ""
         val taskStateSection = TaskExecutionState.instance.toPromptSection()
 
@@ -650,6 +673,7 @@ class DefaultAgentService : AgentService {
         while (iterations < maxIterations && !cancelled.get()) {
             iterations++
             callback.onLoopStart(iterations)
+            BenchmarkRecorder.onStep(iterations)
 
             // Time limit cutoff: only apply if step count <= 4 (disabled for multi-step workflows)
             if (iterations <= 4 && System.currentTimeMillis() - taskStartTime > 180_000L) {
@@ -887,7 +911,11 @@ class DefaultAgentService : AgentService {
                 TaskExecutionState.instance.setActiveContext(activePkg, toolName)
                 TaskExecutionState.instance.incrementStep()
 
+                val benchToolStart = if (BenchmarkRecorder.isRecording()) System.currentTimeMillis() else 0L
                 val result = ToolRegistry.getInstance().executeTool(toolName, params)
+                if (benchToolStart != 0L) {
+                    BenchmarkRecorder.onToolCall(toolName, System.currentTimeMillis() - benchToolStart, result.isSuccess)
+                }
                 val paramsString = if (params.isEmpty()) "" else params.toString()
                 callback.onToolResult(iterations, toolName, displayName, paramsString, result)
                 if (result.isSuccess) {

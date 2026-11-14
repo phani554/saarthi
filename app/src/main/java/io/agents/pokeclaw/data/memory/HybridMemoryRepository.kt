@@ -104,7 +104,7 @@ object HybridMemoryRepository : MemoryRepository {
         if (!isApiKeyValid(apiKey)) {
             XLog.d(TAG, "Mem0 API key missing or unconfigured; using LOCAL_FALLBACK")
             _activeMemorySource.value = MemorySource.LOCAL_FALLBACK
-            return@withContext Pair(MemoryManager.localMemoryText(), MemorySource.LOCAL_FALLBACK)
+            return@withContext Pair(MemoryManager.relevantFactsText(query), MemorySource.LOCAL_FALLBACK)
         }
 
         try {
@@ -141,8 +141,8 @@ object HybridMemoryRepository : MemoryRepository {
             _activeMemorySource.value = MemorySource.LOCAL_FALLBACK
         }
 
-        // Fallback Strategy: Local Vault
-        val localContext = MemoryManager.localMemoryText()
+        // Fallback Strategy: local facts relevant to the query
+        val localContext = MemoryManager.relevantFactsText(query)
         Pair(localContext, MemorySource.LOCAL_FALLBACK)
     }
 
@@ -190,7 +190,8 @@ object HybridMemoryRepository : MemoryRepository {
         fact: String,
         userId: String
     ): MemorySource = withContext(Dispatchers.IO) {
-        MemoryManager.recordFact(fact)
+        // Local save without its own cloud sync: the recordTurn below is the one cloud write.
+        MemoryManager.recordFactLocal(fact, syncCloud = false)
         recordTurn(userQuery = fact, aiResponse = "Recorded personal fact: $fact", userId = userId)
     }
 

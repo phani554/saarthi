@@ -103,6 +103,49 @@ class ChannelConfigActivity : BaseActivity() {
             onSaveClicked(channelType)
         }
 
+        // Paired owner: the first account that messaged the bot owns it (see TelegramChannelHandler /
+        // DiscordGatewayClient). Reset clears it so the next account to message the bot becomes owner.
+        val tvOwner = findViewById<TextView>(R.id.tvPairingOwner)
+        val btnReset = findViewById<android.widget.Button>(R.id.btnResetPairing)
+        fun showOwner() {
+            tvOwner.text = when (channelType) {
+                ChannelType.TELEGRAM -> {
+                    val id = KVUtils.getTelegramOwnerUserId()
+                    if (id != 0L) "Paired with Telegram user $id" else "Not paired yet. The first person to message the bot becomes its owner."
+                }
+                ChannelType.DISCORD -> {
+                    val id = KVUtils.getDiscordOwnerUserId()
+                    if (id.isNotBlank()) "Paired with Discord user $id" else "Not paired yet. The first person to message the bot becomes its owner."
+                }
+            }
+            btnReset.isEnabled = when (channelType) {
+                ChannelType.TELEGRAM -> KVUtils.getTelegramOwnerUserId() != 0L || KVUtils.getTelegramOwnerChatId() != 0L
+                ChannelType.DISCORD -> KVUtils.getDiscordOwnerUserId().isNotBlank()
+            }
+        }
+        showOwner()
+        btnReset.setOnClickListener {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Reset pairing?")
+                .setMessage("The next person who messages the bot will control this phone. Do this only if you are about to message it yourself.")
+                .setPositiveButton("Reset") { _, _ ->
+                    when (channelType) {
+                        ChannelType.TELEGRAM -> {
+                            KVUtils.setTelegramOwnerUserId(0L)
+                            KVUtils.setTelegramOwnerChatId(0L)
+                        }
+                        ChannelType.DISCORD -> KVUtils.setDiscordOwnerUserId("")
+                    }
+                    showOwner()
+                    Toast.makeText(this, "Pairing reset", Toast.LENGTH_SHORT).show()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        if (io.agents.pokeclaw.ui.ElderScale.isEnabled()) {
+            findViewById<android.view.ViewGroup>(android.R.id.content)?.let { io.agents.pokeclaw.ui.ElderScale.scaleTextViews(it) }
+        }
+
         // LAN config hint
         val tvLanHint = findViewById<TextView>(R.id.tvLanConfigHint)
         val ivCopy = findViewById<ImageView>(R.id.ivCopyAddress)

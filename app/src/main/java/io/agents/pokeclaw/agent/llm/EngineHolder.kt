@@ -78,6 +78,7 @@ object EngineHolder {
             add("CPU")
         }
         var lastError: Throwable? = null
+        val benchInitStart = System.currentTimeMillis() // benchmark: total time incl. failed attempts
         // Gemma 4 files downloaded after 2026-05-05 carry an MTP "draft" model (speculative decoding,
         // Google: up to 2.2x decode on mobile GPU). Try it on GPU/CPU first; if the file has no drafter
         // or the runtime is too old, the same backend is retried without it.
@@ -89,6 +90,7 @@ object EngineHolder {
             if (!setSpeculativeDecoding(mtp) && mtp) continue
             val risky = label != "CPU" || mtp
             if (risky) LocalBackendHealth.markGpuInitStarted(modelPath)
+            val benchAttemptStart = System.currentTimeMillis()
             try {
                 val engineConfig = EngineConfig(
                     modelPath = modelPath,
@@ -110,6 +112,12 @@ object EngineHolder {
                 if (label != "CPU") LocalBackendHealth.noteGpuInitSuccess(modelPath)
                 else if (risky) LocalBackendHealth.markGpuInitFinished()
                 XLog.i(TAG, "getOrCreate: engine ready for $modelPath with $label backend (mtp=$mtp)")
+                try {
+                    val now = System.currentTimeMillis()
+                    io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteEngineLoaded(
+                        modelPath, label, mtp, now - benchAttemptStart, now - benchInitStart
+                    )
+                } catch (_: Throwable) {}
                 return newEngine
             } catch (e: VirtualMachineError) {
                 if (risky) LocalBackendHealth.markGpuInitFinished()

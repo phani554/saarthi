@@ -248,3 +248,5 @@
 -keepclassmembers class io.agents.pokeclaw.utils.ContactListUiUtils {
     static boolean dismissBlockingOverlay(io.agents.pokeclaw.service.ClawAccessibilityService, android.view.accessibility.AccessibilityNodeInfo, long);
 }
+
+-keep class io.agents.pokeclaw.benchmark.** { *; }

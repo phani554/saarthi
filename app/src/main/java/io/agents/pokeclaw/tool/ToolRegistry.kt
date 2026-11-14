@@ -53,6 +53,7 @@ object ToolRegistry {
         register(KbAddTodoTool())
         register(InspectMemoryTool())
         register(UpdateMemoryTool())
+        register(ForgetMemoryTool())
     }
 
     private fun registerTvTools() {

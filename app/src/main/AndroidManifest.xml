@@ -89,6 +89,10 @@
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
         <activity
+            android:name=".ui.memory.MemoryActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
             android:name=".ui.settings.ThemeActivity"
             android:exported="false" />
         <activity
@@ -104,6 +108,9 @@
             android:windowSoftInputMode="adjustResize" />
         <activity
             android:name=".ui.web.WebActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.benchmark.BenchmarkActivity"
             android:exported="false" />
         <activity
             android:name=".tool.impl.ClipboardReaderActivity"

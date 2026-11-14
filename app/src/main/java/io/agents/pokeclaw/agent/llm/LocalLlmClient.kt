@@ -110,6 +110,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             }
             activeBackendLabel = LocalModelRuntime.currentBackendLabel(modelPath) ?: "unknown"
             XLog.d(TAG, "ensureEngine: backend=$activeBackendLabel")
+            io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteLocalBackend(activeBackendLabel)
         } catch (e: Exception) {
             XLog.e(TAG, "ensureEngine: failed to get engine from shared runtime", e)
             throw e
@@ -319,6 +320,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
     private suspend fun send(text: String): Any? {
         val conv = conversation ?: throw RuntimeException("LiteRT-LM conversation not initialized — engine may have failed to load the model")
         XLog.i(TAG, "chat: roundSend backend=$activeBackendLabel sendCount=$sendCount chars=${text.length}")
+        val benchStart = System.currentTimeMillis()
         val response = withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
             convLock.lock()
@@ -338,6 +340,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             }
         }
         sendCount++
+        io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteLocalSend(System.currentTimeMillis() - benchStart, text.length)
         return response
     }
 

@@ -185,7 +185,7 @@ Return JSON object:"""
             HybridMemoryRepository.searchMemories(raw)
         }
         val mem0Results = if (mem0Source == io.agents.pokeclaw.data.memory.MemorySource.MEM0_CLOUD) mem0Raw else ""
-        val memorySection = MemoryManager.getMemoryPromptSection() + if (mem0Results.isNotBlank()) "\n\n## Mem0 Relevant Memory Search\n$mem0Results" else ""
+        val memorySection = MemoryManager.getMemoryPromptSection(raw) + if (mem0Results.isNotBlank()) "\n\n## Mem0 Relevant Memory Search\n$mem0Results" else ""
 
         return try {
             val systemPrompt = """You are an AI prompt & intent optimizer. Your job is to extract clear action intent, exact contact/group names from memory, and product constraints from user requests and translate them into a clean, unambiguous English instruction prompt for an Android task agent (GLM 5.3).
