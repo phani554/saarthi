@@ -28,9 +28,9 @@ class TaskDependencyGraphTest {
         )
 
         val adapted = TaskDependencyGraph.adaptDependentTask(dependentTask)
-        assertTrue(adapted.taskText.contains("Milk has been ordered"))
-        assertTrue(adapted.taskText.contains("Amul Taaza 1L Milk added to cart"))
-        assertTrue(adapted.taskText.contains("Mom"))
+        // Since d9907c3 ("honest results") the message reports what actually happened, not the user's guess.
+        assertTrue(adapted.taskText, adapted.taskText.startsWith("Send message to Mom:"))
+        assertTrue(adapted.taskText, adapted.taskText.contains("Done: Amul Taaza 1L Milk added to cart"))
     }
 
     @Test
@@ -47,7 +47,8 @@ class TaskDependencyGraphTest {
         )
 
         val adapted = TaskDependencyGraph.adaptDependentTask(dependentTask)
-        assertTrue(adapted.taskText.contains("Could not order milk"))
-        assertTrue(adapted.taskText.contains("Amul Taaza 1L Milk is out of stock on Blinkit"))
+        assertTrue(adapted.taskText, adapted.taskText.startsWith("Send message to Mom:"))
+        assertTrue(adapted.taskText, adapted.taskText.contains("Could not complete the earlier step"))
+        assertTrue(adapted.taskText, adapted.taskText.contains("Amul Taaza 1L Milk is out of stock on Blinkit"))
     }
 }

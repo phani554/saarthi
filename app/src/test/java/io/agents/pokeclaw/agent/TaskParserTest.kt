@@ -5,6 +5,7 @@ package io.agents.pokeclaw.agent
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class TaskParserTest {
@@ -20,11 +21,14 @@ class TaskParserTest {
 
     @Test
     fun testMatchSendMessageCompound() {
-        val result = TaskParser.parse("send hi to mom for dinner and ask her what I should bring for dinner")
+        // Compound/ambiguous requests have no explicit separator, so they go to the LLM (parser returns null).
+        assertNull(TaskParser.parse("send hi to mom for dinner and ask her what I should bring for dinner"))
+        // Explicit form ("send a message to <contact>: <text>") is still handled by the fast path.
+        val result = TaskParser.parse("send a message to mom: what should I bring for dinner")
         assertNotNull(result)
         assertEquals("send_message", result?.toolName)
         assertEquals("mom", result?.toolParams?.get("contact"))
-        assertEquals("dinner and ask her what I should bring for dinner", result?.toolParams?.get("message"))
+        assertEquals("what should I bring for dinner", result?.toolParams?.get("message"))
     }
 
     @Test
