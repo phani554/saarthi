@@ -71,6 +71,10 @@ public class SendMessageTool extends BaseTool {
         String rawContact = requireString(params, "contact");
         String contact = ContactAliasResolver.INSTANCE.resolve(rawContact);
         String message = requireString(params, "message");
+        String placeholder = io.agents.pokeclaw.agent.PlaceholderMessageGuard.INSTANCE.check(message);
+        if (placeholder != null) {
+            return ToolResult.error(placeholder);
+        }
         Object appParam = params.get("app");
         String app = appParam != null ? appParam.toString() : "WhatsApp";
 

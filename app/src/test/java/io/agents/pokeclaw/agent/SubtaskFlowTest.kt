@@ -36,3 +36,13 @@ class SubtaskFlowTest {
         assertTrue(ShoppingStoreRouter.promptSection("find the item on flipkart", ShoppingStoreRouter.Mode.UNKNOWN).contains("get_installed_apps"))
     }
 }
+
+class PlaceholderMessageGuardTest {
+    @Test fun labelWithoutAmountIsBlocked() {
+        assertTrue(PlaceholderMessageGuard.check("Flipkart minutes card total") != null)
+    }
+    @Test fun realTotalPasses() {
+        assertEquals(null, PlaceholderMessageGuard.check("Cart total is ₹133 for KitKat and milk"))
+        assertEquals(null, PlaceholderMessageGuard.check("I will call you in the evening"))
+    }
+}

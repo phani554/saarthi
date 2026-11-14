@@ -168,7 +168,7 @@ class TaskFlowController(
         }
 
         val generation = voiceGeneration.get()
-        executor.execute {
+        runOffMain {
             try {
                 when (currentVoiceState) {
                     VoiceInteractionState.IDLE, VoiceInteractionState.PRE_TASK_CONFIRMATION -> {
@@ -186,7 +186,7 @@ class TaskFlowController(
 
                         if (generation != voiceGeneration.get()) {
                             XLog.i(TAG, "Dropping stale voice turn result (SOS or reset happened meanwhile)")
-                            return@execute
+                            return@runOffMain
                         }
 
                         synchronized(preTaskHistoryBuilder) {
