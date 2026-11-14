@@ -387,7 +387,8 @@ class LlmConfigActivity : BaseActivity() {
             } else {
                 if (supportedOnDevice) {
                     val dlBtn = TextView(this).apply {
-                        text = "↓ Download"
+                        // A download started earlier (this screen was left and reopened) can be stopped here.
+                        text = if (LocalModelManager.isDownloading(model.id)) "Downloading · Stop" else "↓ Download"
                         textSize = 13f
                         setTextColor(getColor(R.color.colorInfoPrimary))
                         setPadding(dp(12), dp(6), dp(12), dp(6))
@@ -397,15 +398,21 @@ class LlmConfigActivity : BaseActivity() {
                                 return@setOnClickListener
                             }
                             isDownloading = true
-                            text = "Downloading..."
-                            isEnabled = false
+                            text = "Downloading · Stop"
 
                             executor.submit {
                                 LocalModelManager.downloadModel(this@LlmConfigActivity, model, object : LocalModelManager.DownloadCallback {
                                     override fun onProgress(bytesDownloaded: Long, totalBytes: Long, bytesPerSecond: Long) {
                                         val pct = if (totalBytes > 0) (bytesDownloaded * 100 / totalBytes).toInt() else 0
-                                        runOnUiThread { text = "$pct%" }
+                                        runOnUiThread { if (isEnabled) text = "$pct% · Stop" }
                                     }
+                            if (LocalModelManager.isDownloading(model.id)) {
+                                // Second tap stops it; the partial file is deleted.
+                                LocalModelManager.cancelDownload(this@LlmConfigActivity, model)
+                                text = "Stopping..."
+                                isEnabled = false
+                                return@setOnClickListener
+                            }
                                     override fun onComplete(modelPath: String) {
                                         runOnUiThread {
                                             ModelConfigRepository.saveLocalDefault(
@@ -444,6 +451,16 @@ class LlmConfigActivity : BaseActivity() {
                     })
                 }
             }
+                                    override fun onCancelled() {
+                                        downloadsInFlight.remove(model.id)
+                                        runOnUiThread {
+                                            isDownloading = false
+                                            if (isFinishing || isDestroyed) return@runOnUiThread
+                                            text = "↓ Download"
+                                            isEnabled = true
+                                            Toast.makeText(this@LlmConfigActivity, "Download stopped", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
 
             card.addView(row)
             modelList.addView(card)

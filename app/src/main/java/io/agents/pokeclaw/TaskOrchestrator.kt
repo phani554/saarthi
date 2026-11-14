@@ -30,10 +30,28 @@ class TaskOrchestrator(
     private val onTaskFinished: () -> Unit
 ) {
     /**
-     * Typed event callback for in-app Task mode UI.
+     * Typed event callbacks for in-app Task mode UI, keyed by the task's messageId, so a channel task
+     * (or a second screen) never receives or steals another task's events. Sub-tasks of a decomposed
+     * task ("<id>_sub_<n>") reach the listener of their parent id.
      * Called on the agent executor thread — UI must post to main thread.
      */
-    var taskEventCallback: ((TaskEvent) -> Unit)? = null
+    private val taskEventCallbacks = java.util.concurrent.ConcurrentHashMap<String, (TaskEvent) -> Unit>()
+
+    fun setTaskEventCallback(messageId: String, callback: ((TaskEvent) -> Unit)?) {
+        if (messageId.isEmpty()) return
+        if (callback == null) {
+            taskEventCallbacks.remove(messageId)
+        } else {
+            taskEventCallbacks[messageId] = callback
+        }
+    }
+
+    fun clearTaskEventCallbacks() {
+        taskEventCallbacks.clear()
+    }
+
+    private fun callbackFor(messageId: String): ((TaskEvent) -> Unit)? =
+        taskEventCallbacks[messageId] ?: taskEventCallbacks[messageId.substringBefore("_sub_")]
 
     companion object {
         private const val TAG = "TaskOrchestrator"
@@ -127,7 +145,7 @@ class TaskOrchestrator(
         if (!isTaskRunning()) {
             if (!tryAcquireTask(messageID, channel, task)) {
                 XLog.w(TAG, "Failed to acquire task lock for: $task")
-                taskEventCallback?.invoke(TaskEvent.Failed("Another task is running"))
+                callbackFor(messageID)?.invoke(TaskEvent.Failed("Another task is running"))
                 return
             }
         } else {
@@ -139,7 +157,7 @@ class TaskOrchestrator(
                     TAG,
                     "Rejecting new task while another task is still active: current=${current.messageId}/${current.channel} new=$messageID/$channel"
                 )
-                taskEventCallback?.invoke(TaskEvent.Failed("Another task is still running. Stop it first."))
+                callbackFor(messageID)?.invoke(TaskEvent.Failed("Another task is still running. Stop it first."))
                 ChannelManager.sendMessage(channel, "Another task is still running. Stop it first.", messageID)
                 return
             }
@@ -171,10 +189,10 @@ class TaskOrchestrator(
                     false
                 }
                 if (intentOk) {
-                    taskEventCallback?.invoke(TaskEvent.Completed(route.description))
+                    callbackFor(messageID)?.invoke(TaskEvent.Completed(route.description))
                     ChannelManager.sendMessage(channel, "✓ ${route.description}", messageID)
                 } else {
-                    taskEventCallback?.invoke(TaskEvent.Failed("Could not do: ${route.description}"))
+                    callbackFor(messageID)?.invoke(TaskEvent.Failed("Could not do: ${route.description}"))
                     ChannelManager.sendMessage(channel, "✗ ${route.description}: could not open it", messageID)
                 }
                 ChannelManager.flushMessages(channel)
@@ -198,18 +216,18 @@ class TaskOrchestrator(
                 if (askUser) {
                     // Message / call parked until the user says yes: the "result" is the question to her.
                     val question = io.agents.pokeclaw.agent.OutboundConfirmGate.pendingQuestion() ?: route.description
-                    taskEventCallback?.invoke(TaskEvent.Completed(question))
+                    callbackFor(messageID)?.invoke(TaskEvent.Completed(question))
                     ChannelManager.sendMessage(channel, question, messageID)
                 } else if (!toolOk) {
                     val err = result.error ?: result.data ?: "failed"
                     XLog.w(TAG, "Tier 1 tool failed: $err")
-                    taskEventCallback?.invoke(TaskEvent.Failed("${route.description}: $err"))
+                    callbackFor(messageID)?.invoke(TaskEvent.Failed("${route.description}: $err"))
                     ChannelManager.sendMessage(channel, "✗ ${route.description}: $err", messageID)
                 } else {
                     if (route.toolName != "update_memory" && route.toolName != "forget_memory") {
                         try { io.agents.pokeclaw.agent.knowledge.MemoryManager.rememberTaskOutcome(task, true, route.description) } catch (e: Exception) { XLog.w(TAG, "rememberTaskOutcome failed", e) }
                     }
-                    taskEventCallback?.invoke(TaskEvent.Completed(route.description))
+                    callbackFor(messageID)?.invoke(TaskEvent.Completed(route.description))
                     ChannelManager.sendMessage(channel, "✓ ${route.description}", messageID)
                 }
                 ChannelManager.flushMessages(channel)
@@ -231,7 +249,7 @@ class TaskOrchestrator(
                         Thread(skillRun@{
                             val skillResult = try {
                                 skillExecutor.execute(skill, route.params) { step, total, desc ->
-                                    taskEventCallback?.invoke(TaskEvent.Progress(step, "Step $step/$total: $desc"))
+                                    callbackFor(messageID)?.invoke(TaskEvent.Progress(step, "Step $step/$total: $desc"))
                                     ForegroundService.updateTaskStatus(ClawApplication.instance, desc)
                                 }
                             } catch (e: Exception) {
@@ -239,7 +257,7 @@ class TaskOrchestrator(
                                 XLog.e(TAG, "Skill ${skill.id} crashed", e)
                                 try {
                                     releaseTask()
-                                    taskEventCallback?.invoke(TaskEvent.Failed("Skill failed: ${e.message ?: "error"}"))
+                                    callbackFor(messageID)?.invoke(TaskEvent.Failed("Skill failed: ${e.message ?: "error"}"))
                                     ChannelManager.sendMessage(channel, "✗ ${route.description}: ${e.message ?: "error"}", messageID)
                                     ChannelManager.flushMessages(channel)
                                     ForegroundService.resetToIdle(ClawApplication.instance)
@@ -253,7 +271,7 @@ class TaskOrchestrator(
                             if (skillResult.success) {
                                 ChannelManager.sendMessage(channel, skillResult.message, messageID)
                                 ChannelManager.flushMessages(channel)
-                                taskEventCallback?.invoke(TaskEvent.Completed(skillResult.message))
+                                callbackFor(messageID)?.invoke(TaskEvent.Completed(skillResult.message))
                                 releaseTask()
                                 FloatingCircleManager.setSuccessState()
                                 ForegroundService.resetToIdle(ClawApplication.instance)
@@ -262,7 +280,7 @@ class TaskOrchestrator(
                                 val fallbackGoal = skill.fallbackGoal
                                     .let { g -> route.params.entries.fold(g) { acc, (k, v) -> acc.replace("{$k}", v) } }
                                 XLog.i(TAG, "Skill ${skill.id} failed, falling back to agent loop: $fallbackGoal")
-                                taskEventCallback?.invoke(TaskEvent.ToolAction("Retrying with AI agent"))
+                                callbackFor(messageID)?.invoke(TaskEvent.ToolAction("Retrying with AI agent"))
                                 startNewTask(channel, "$task\n\n(Hint: $fallbackGoal)", messageID, isFallback = true)
                             }
                         }, "skill-executor").start()
@@ -285,7 +303,7 @@ class TaskOrchestrator(
                 XLog.e(TAG, "Failed to initialize AgentService", e)
                 releaseTask()
                 ForegroundService.resetToIdle(ClawApplication.instance)
-                taskEventCallback?.invoke(TaskEvent.Failed("AI service not ready"))
+                callbackFor(messageID)?.invoke(TaskEvent.Failed("AI service not ready"))
                 ChannelManager.sendMessage(channel, ClawApplication.instance.getString(R.string.channel_msg_service_not_ready), messageID)
                 return
             }
@@ -310,7 +328,7 @@ class TaskOrchestrator(
                 if (round > 1) {
                     FloatingCircleManager.ensureShowing()
                     FloatingCircleManager.setRunningState(round, channel)
-                    taskEventCallback?.invoke(TaskEvent.LoopStart(round))
+                    callbackFor(messageID)?.invoke(TaskEvent.LoopStart(round))
                     if (ForegroundService.isRunning()) {
                         ForegroundService.updateTaskStatus(ClawApplication.instance, "Step $round")
                     }
@@ -324,7 +342,7 @@ class TaskOrchestrator(
                     formattedCost = status.formattedCost,
                     tokenState = status.state
                 )
-                taskEventCallback?.invoke(TaskEvent.TokenUpdate(
+                callbackFor(messageID)?.invoke(TaskEvent.TokenUpdate(
                     step = status.step,
                     formattedTokens = status.formattedTokens,
                     formattedCost = status.formattedCost,
@@ -335,7 +353,7 @@ class TaskOrchestrator(
             override fun onContent(round: Int, content: String) {
                 if (content.isNotEmpty()) {
                     roundBuffer.append(content)
-                    taskEventCallback?.invoke(TaskEvent.Thinking(content))
+                    callbackFor(messageID)?.invoke(TaskEvent.Thinking(content))
                 }
             }
 
@@ -351,7 +369,7 @@ class TaskOrchestrator(
                 }
                 if (toolName.isNotEmpty()) {
                     val displayName = io.agents.pokeclaw.tool.ToolRegistry.getInstance().getDisplayName(toolName)
-                    taskEventCallback?.invoke(TaskEvent.ToolAction(displayName))
+                    callbackFor(messageID)?.invoke(TaskEvent.ToolAction(displayName))
                     ForegroundService.updateTaskStatus(ClawApplication.instance, "$displayName...")
                 }
             }
@@ -364,7 +382,7 @@ class TaskOrchestrator(
                 if (!success) XLog.e(TAG, "Tool failed: $toolName $data")
 
                 val displayName = io.agents.pokeclaw.tool.ToolRegistry.getInstance().getDisplayName(toolName)
-                taskEventCallback?.invoke(TaskEvent.ToolResult(displayName, success, data ?: ""))
+                callbackFor(messageID)?.invoke(TaskEvent.ToolResult(displayName, success, data ?: ""))
 
                 if (toolId == "finish" && result.data?.isNotEmpty() == true) {
                     flushRoundBuffer()
@@ -385,7 +403,7 @@ class TaskOrchestrator(
                     ClawApplication.instance.getString(R.string.channel_msg_task_cancelled)
                 )
                 if (finalAnswer.trim() in cancelAnswers) {
-                    taskEventCallback?.invoke(TaskEvent.Cancelled)
+                    callbackFor(messageID)?.invoke(TaskEvent.Cancelled)
                     ForegroundService.resetToIdle(ClawApplication.instance)
                     flushRoundBuffer()
                     val cancelledSession = releaseTask()
@@ -407,7 +425,7 @@ class TaskOrchestrator(
                 answer = answer.removePrefix("Task completed:").removePrefix("Task completed").trim()
                 if (answer.isEmpty()) answer = "Done."
                 try { io.agents.pokeclaw.agent.knowledge.MemoryManager.rememberTaskOutcome(task, true, answer) } catch (e: Exception) { XLog.w(TAG, "rememberTaskOutcome failed", e) }
-                taskEventCallback?.invoke(TaskEvent.Completed(answer, modelName))
+                callbackFor(messageID)?.invoke(TaskEvent.Completed(answer, modelName))
                 ForegroundService.resetToIdle(ClawApplication.instance)
                 flushRoundBuffer()
                 val completedSession = releaseTask()
@@ -432,7 +450,7 @@ class TaskOrchestrator(
 
             override fun onError(round: Int, error: Exception, totalTokens: Int) {
                 XLog.e(TAG, "onError: ${error.message}, totalTokens=$totalTokens", error)
-                taskEventCallback?.invoke(TaskEvent.Failed(error.message ?: "Unknown error"))
+                callbackFor(messageID)?.invoke(TaskEvent.Failed(error.message ?: "Unknown error"))
                 ForegroundService.resetToIdle(ClawApplication.instance)
                 flushRoundBuffer()
                 val failedSession = releaseTask()
@@ -450,7 +468,7 @@ class TaskOrchestrator(
 
             override fun onSystemDialogBlocked(round: Int, totalTokens: Int) {
                 XLog.w(TAG, "onSystemDialogBlocked: round=$round, totalTokens=$totalTokens")
-                taskEventCallback?.invoke(TaskEvent.Blocked)
+                callbackFor(messageID)?.invoke(TaskEvent.Blocked)
                 flushRoundBuffer()
                 val blockedSession = releaseTask()
                 val blockedChannel = blockedSession.channel ?: channel

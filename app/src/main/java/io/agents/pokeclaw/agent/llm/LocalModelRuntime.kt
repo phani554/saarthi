@@ -23,6 +23,17 @@ data class LocalConversationLease(
     val backendLabel: String,
 )
 
+/**
+ * Who holds the one LiteRT-LM session the shared engine allows. On a "session already exists"
+ * conflict a lower-priority caller gives up at once (it must not wait behind a running task), and an
+ * equal or higher one waits for the holder to close its conversation (e.g. chat closing for a task).
+ */
+enum class LocalSessionOwner(val priority: Int) {
+    SINGLE_SHOT(0),
+    CHAT(1),
+    TASK(2),
+}
+
 data class LocalSingleShotResult(
     val text: String?,
     val backendLabel: String,
@@ -71,29 +82,64 @@ object LocalModelRuntime {
         return EngineHolder.getBackendLabel(modelPath)
     }
 
+    private class SessionHolder(val conversation: Conversation, val owner: LocalSessionOwner)
+
+    /** The conversation last opened through [openConversation] (the engine allows one at a time). */
+    @Volatile
+    private var sessionHolder: SessionHolder? = null
+
+    /** Owners call this when they close [conversation], so a stale holder never blocks others. */
+    fun releaseSession(conversation: Conversation?) {
+        if (conversation == null) return
+        synchronized(this) {
+            if (sessionHolder?.conversation === conversation) sessionHolder = null
+        }
+    }
+
+    /**
+     * Opens a conversation on the one shared engine (chat, tasks and single-shot calls all use the same
+     * Engine from [EngineHolder]; no second engine is ever loaded). The engine allows one session: when
+     * another conversation is still open, a caller of equal or higher [owner] priority retries up to
+     * [maxRetries] times (the holder is usually closing, e.g. chat releasing for a task), and a lower
+     * one fails at once.
+     */
     fun openConversation(
         context: Context,
         modelPath: String,
         conversationConfig: ConversationConfig,
         preferCpu: Boolean = false,
         maxRetries: Int = DEFAULT_RETRY_COUNT,
+        owner: LocalSessionOwner = LocalSessionOwner.CHAT,
     ): LocalConversationLease {
-        try {
-            val engineLease = acquireSharedEngine(context, modelPath, preferCpu = preferCpu)
-            val conversation = engineLease.engine.createConversation(conversationConfig)
-            return LocalConversationLease(
-                engine = engineLease.engine,
-                conversation = conversation,
-                backendLabel = engineLease.backendLabel,
-            )
-        } catch (e: Exception) {
-            XLog.w(TAG, "openConversation failed for $modelPath: ${e.message}")
-
-            if (isSessionConflict(e)) {
-                throw IllegalStateException("Local model session already in use", e)
+        val engineLease = acquireSharedEngine(context, modelPath, preferCpu = preferCpu)
+        var attempt = 0
+        while (true) {
+            attempt++
+            try {
+                val conversation = engineLease.engine.createConversation(conversationConfig)
+                synchronized(this) { sessionHolder = SessionHolder(conversation, owner) }
+                return LocalConversationLease(
+                    engine = engineLease.engine,
+                    conversation = conversation,
+                    backendLabel = engineLease.backendLabel,
+                )
+            } catch (e: Exception) {
+                XLog.w(TAG, "openConversation failed for $modelPath (owner=$owner, attempt $attempt): ${e.message}")
+                if (!isSessionConflict(e)) throw e
+                val holder = sessionHolder
+                val outranked = holder != null && holder.owner.priority > owner.priority
+                if (outranked || attempt >= maxRetries.coerceAtLeast(1)) {
+                    throw IllegalStateException(
+                        "Local model session already in use" + (holder?.let { " by ${it.owner}" } ?: ""), e
+                    )
+                }
+                try {
+                    Thread.sleep(DEFAULT_RETRY_SLEEP_MS)
+                } catch (ie: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw IllegalStateException("Local model session already in use", e)
+                }
             }
-
-            throw e
         }
     }
 
@@ -124,6 +170,8 @@ object LocalModelRuntime {
             modelPath = modelPath,
             conversationConfig = conversationConfig,
             preferCpu = preferCpu,
+            maxRetries = 1,
+            owner = LocalSessionOwner.SINGLE_SHOT,
         )
 
         return try {
@@ -138,6 +186,7 @@ object LocalModelRuntime {
             } catch (e: Exception) {
                 XLog.w(TAG, "runSingleShot: conversation close failed", e)
             }
+            releaseSession(lease.conversation)
         }
     }
 

@@ -4,6 +4,9 @@
 package io.agents.pokeclaw.service
 
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
 import android.media.MediaPlayer
 import android.os.Handler
 import android.os.Looper
@@ -87,6 +90,68 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
     private val speakLock = Any()
 
+    // ---- Audio focus (playback only) ----
+    /** Spoken replies are an assistant talking: other audio ducks under it. Used by TTS and MediaPlayer. */
+    private val speechAudioAttributes: AudioAttributes by lazy {
+        AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_ASSISTANT)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+    }
+    private val focusLock = Any()
+    private var focusRequest: AudioFocusRequest? = null
+    @Volatile
+    private var hasAudioFocus = false
+    /** Own handler: stopAudioPlayback() clears mainHandler's queue, which must not drop focus callbacks. */
+    private val focusHandler by lazy { Handler(Looper.getMainLooper()) }
+    private val focusChangeListener = AudioManager.OnAudioFocusChangeListener { change ->
+        when (change) {
+            // A call or another app took the audio for good / for a while: stop talking.
+            AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                XLog.i(TAG, "Audio focus lost ($change): stopping speech")
+                hasAudioFocus = false
+                stopAudioPlayback()
+            }
+            // LOSS_TRANSIENT_CAN_DUCK: the system lowers our volume itself (API 26+). Nothing to do.
+            else -> {}
+        }
+    }
+
+    private fun audioManager(): AudioManager? =
+        appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+
+    /** Asks for transient, duck-others focus before a reply plays. Speech still plays if refused. */
+    private fun requestSpeechFocus() {
+        synchronized(focusLock) {
+            if (hasAudioFocus) return
+            val am = audioManager() ?: return
+            try {
+                val req = focusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(speechAudioAttributes)
+                    .setOnAudioFocusChangeListener(focusChangeListener, focusHandler)
+                    .build()
+                    .also { focusRequest = it }
+                hasAudioFocus = am.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+            } catch (e: Exception) {
+                XLog.w(TAG, "Audio focus request failed", e)
+            }
+        }
+    }
+
+    /** Gives focus back (music returns to full volume) when a reply ends, is stopped or fails. */
+    private fun abandonSpeechFocus() {
+        synchronized(focusLock) {
+            if (!hasAudioFocus) return
+            hasAudioFocus = false
+            val req = focusRequest ?: return
+            try {
+                audioManager()?.abandonAudioFocusRequest(req)
+            } catch (e: Exception) {
+                XLog.w(TAG, "Audio focus abandon failed", e)
+            }
+        }
+    }
+
     @Volatile
     private var isPlayingAudio = false
 
@@ -127,6 +192,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
         if (status == TextToSpeech.SUCCESS) {
             isTtsInitialized = true
             tts?.language = Locale("hi", "IN")
+            try { tts?.setAudioAttributes(speechAudioAttributes) } catch (_: Exception) {}
             tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                 override fun onStart(utteranceId: String?) {}
                 override fun onDone(utteranceId: String?) {
@@ -139,6 +205,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
                             if (doneGeneration == speechGeneration && !isSarvamClipPlaying &&
                                 tts?.isSpeaking != true
                             ) {
+                                abandonSpeechFocus()
                                 onPlaybackFinished?.invoke()
                             }
                         }, 300L)
@@ -319,6 +386,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 }
             } catch (_: Exception) {}
             val mode = if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
+            requestSpeechFocus()
             tts?.speak(cleanText, mode, null, "saarthi_native_" + System.currentTimeMillis())
             XLog.i(TAG, "Speaking via Native TTS (${cleanText.length} chars)")
         }
@@ -404,6 +472,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
             isSarvamClipPlaying = true
             currentTempFile = file
             mediaPlayer = MediaPlayer().apply {
+                setAudioAttributes(speechAudioAttributes)
                 setDataSource(file.absolutePath)
                 prepare()
                 setOnCompletionListener {
@@ -411,6 +480,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
                     isSarvamClipPlaying = false
                     isPlayingAudio = false
                     _engineState.value = VoiceEngineState.Idle
+                    abandonSpeechFocus()
                     mainHandler.postDelayed({
                         onPlaybackFinished?.invoke()
                     }, 300L)
@@ -420,8 +490,10 @@ object VoiceManager : TextToSpeech.OnInitListener {
                     isSarvamClipPlaying = false
                     isPlayingAudio = false
                     _engineState.value = VoiceEngineState.Idle
+                    abandonSpeechFocus()
                     false
                 }
+                requestSpeechFocus()
                 start()
             }
         } catch (e: Exception) {
@@ -433,6 +505,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
             isSarvamClipPlaying = false
             isPlayingAudio = false
             _engineState.value = VoiceEngineState.Idle
+            abandonSpeechFocus()
         }
     }
 
@@ -457,6 +530,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
         } catch (_: Exception) {}
         isPlayingAudio = false
         _engineState.value = VoiceEngineState.Idle
+        abandonSpeechFocus()
       }
     }
 

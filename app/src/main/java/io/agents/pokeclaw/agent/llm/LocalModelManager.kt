@@ -216,6 +216,37 @@ object LocalModelManager {
         fun onProgress(bytesDownloaded: Long, totalBytes: Long, bytesPerSecond: Long)
         fun onComplete(modelPath: String)
         fun onError(error: String)
+        /** The user stopped the download ([cancelDownload]); the partial file is already deleted. */
+        fun onCancelled() { onError("Download stopped") }
+    }
+
+    /** One running download. [cancelled] is checked between reads; [call] is cancelled to unblock a read. */
+    private class DownloadHandle {
+        @Volatile var cancelled = false
+        @Volatile var call: okhttp3.Call? = null
+    }
+
+    /** In-flight downloads by model id, process-wide: a second screen can't start the same file twice. */
+    private val activeDownloads = java.util.concurrent.ConcurrentHashMap<String, DownloadHandle>()
+
+    fun isDownloading(modelId: String): Boolean = activeDownloads.containsKey(modelId)
+
+    /**
+     * Stops the running download of [model] and deletes its partial file (the download thread deletes it
+     * once the stream is closed). With no download running, just deletes a leftover partial file.
+     * A download that fails on its own (network drop) keeps its partial file so the next try resumes.
+     */
+    fun cancelDownload(context: Context, model: ModelInfo): Boolean {
+        val handle = activeDownloads[model.id]
+        if (handle == null) {
+            val temp = File(getModelDir(context), "${model.fileName}.downloading")
+            if (temp.exists()) temp.delete()
+            return false
+        }
+        handle.cancelled = true
+        try { handle.call?.cancel() } catch (_: Exception) {}
+        XLog.i(TAG, "Download cancel requested: ${model.id}")
+        return true
     }
 
     /**
@@ -291,6 +322,24 @@ object LocalModelManager {
         model: ModelInfo,
         callback: DownloadCallback
     ) {
+        val handle = DownloadHandle()
+        if (activeDownloads.putIfAbsent(model.id, handle) != null) {
+            callback.onError("${model.displayName} is already downloading")
+            return
+        }
+        try {
+            downloadModelInternal(context, model, callback, handle)
+        } finally {
+            activeDownloads.remove(model.id, handle)
+        }
+    }
+
+    private fun downloadModelInternal(
+        context: Context,
+        model: ModelInfo,
+        callback: DownloadCallback,
+        handle: DownloadHandle
+    ) {
         val modelDir = getModelDir(context)
         val targetFile = File(modelDir, model.fileName)
         val tempFile = File(modelDir, "${model.fileName}.downloading")
@@ -329,8 +378,11 @@ object LocalModelManager {
                 XLog.i(TAG, "Resuming download from byte $existingBytes")
             }
 
+            val call = client.newCall(requestBuilder.build())
+            handle.call = call
+            if (handle.cancelled) call.cancel()
             // use{}: the response (and its connection) was never closed on the error/early-return paths.
-            client.newCall(requestBuilder.build()).execute().use { response ->
+            call.execute().use { response ->
 
                 if (!response.isSuccessful && response.code != 206) {
                     callback.onError("Download failed: HTTP ${response.code}")
@@ -365,7 +417,7 @@ object LocalModelManager {
 
                 body.byteStream().use { input ->
                     outputStream.use { output ->
-                        while (true) {
+                        while (!handle.cancelled) {
                             val bytesRead = input.read(buffer)
                             if (bytesRead == -1) break
                             output.write(buffer, 0, bytesRead)
@@ -381,6 +433,13 @@ object LocalModelManager {
                             }
                         }
                     }
+                }
+
+                if (handle.cancelled) {
+                    tempFile.delete()
+                    XLog.i(TAG, "Download cancelled by user: ${model.id}; partial file deleted")
+                    callback.onCancelled()
+                    return
                 }
 
                 if (!isValidModelFile(tempFile, model)) {
@@ -401,6 +460,13 @@ object LocalModelManager {
             }
 
         } catch (e: Exception) {
+            if (handle.cancelled) {
+                // call.cancel() makes the blocked read throw; the stream is closed by now.
+                tempFile.delete()
+                XLog.i(TAG, "Download cancelled by user: ${model.id}; partial file deleted")
+                callback.onCancelled()
+                return
+            }
             XLog.e(TAG, "Download failed", e)
             callback.onError("Download failed: ${e.message}")
         }

@@ -44,15 +44,71 @@ object ChatHistoryManager {
         val file: File
     )
 
+    // Callers run these on a background thread (ConversationStore's single IO thread). @Synchronized keeps
+    // the caches below consistent if another thread ever calls in.
+    @Volatile private var chatDirCache: File? = null
+    /** Sidebar entries by absolute file path; filled by one directory scan, then kept current by save/rename/delete. */
+    private var summaryCache: MutableMap<String, ConversationSummary>? = null
+    /** Lock-free id -> file view of [summaryCache], republished after every change (read from the main thread). */
+    @Volatile private var idToFile: Map<String, File>? = null
+    /** One long-lived index helper instead of a new SQLiteOpenHelper per save. */
+    private var chatDb: ChatDatabase? = null
+
     private fun getChatDir(context: Context): File {
-        val dir = File(context.getExternalFilesDir(null), "chats")
+        chatDirCache?.let { if (it.exists()) return it }
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        val dir = File(base, "chats")
         if (!dir.exists()) dir.mkdirs()
+        chatDirCache = dir
         return dir
+    }
+
+    private fun db(context: Context): ChatDatabase =
+        chatDb ?: ChatDatabase(context.applicationContext).also { chatDb = it }
+
+    private fun summaries(context: Context): MutableMap<String, ConversationSummary> {
+        summaryCache?.let { return it }
+        val dir = getChatDir(context)
+        val map = LinkedHashMap<String, ConversationSummary>()
+        dir.listFiles()
+            ?.filter { it.extension == "md" && !it.name.endsWith(".memory.md") } // digests aren't chats
+            ?.forEach { file -> readSummary(file)?.let { map[file.absolutePath] = it } }
+        summaryCache = map
+        publish()
+        return map
+    }
+
+    private fun publish() {
+        idToFile = summaryCache?.values?.associate { it.id to it.file }
+    }
+
+    private fun readSummary(file: File): ConversationSummary? {
+        return try {
+            var title = file.nameWithoutExtension
+            var id = ""
+            file.useLines { lines ->
+                var inFm = false
+                for (line in lines) {
+                    if (line == "---") { if (!inFm) { inFm = true; continue } else break }
+                    if (inFm && line.startsWith("title: ")) title = line.removePrefix("title: ")
+                    if (inFm && line.startsWith("id: ")) id = line.removePrefix("id: ")
+                }
+            }
+            ConversationSummary(
+                id = id.ifEmpty { file.nameWithoutExtension },
+                title = title,
+                created = file.lastModified(),
+                file = file
+            )
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /**
      * Save a conversation to markdown file.
      */
+    @Synchronized
     fun save(context: Context, conversationId: String, messages: List<ChatMessage>, model: String) {
         if (messages.isEmpty()) return
 
@@ -66,9 +122,12 @@ object ChatHistoryManager {
         val fileName = "$dateStr-${title.ifBlank { "chat" }}-$safeId.md"
 
         val chatDir = getChatDir(context)
+        val cache = summaries(context)
         // Reuse this conversation's file even if its derived title changed (e.g. saved before the first user message).
-        val file = chatDir.listFiles()?.firstOrNull { it.name.endsWith("-$safeId.md") && !it.name.endsWith(".memory.md") }
-            ?: File(chatDir, fileName)
+        // Looked up in the in-memory index instead of re-listing the folder on every save.
+        val file = cache.values.firstOrNull {
+            it.file.name.endsWith("-$safeId.md") && !it.file.name.endsWith(".memory.md") && it.file.exists()
+        }?.file ?: File(chatDir, fileName)
         // Older builds named the file without the id; take it over (title included) if it is this conversation.
         val legacyFile = File(chatDir, "$dateStr-$title.md")
         val legacyIsThis = !file.exists() && legacyFile.exists() && readFrontmatterValue(legacyFile, "id") == conversationId
@@ -129,23 +188,43 @@ object ChatHistoryManager {
         }
 
         file.writeText(sb.toString())
-        if (legacyIsThis) legacyFile.delete()
+        if (legacyIsThis && legacyFile.delete()) cache.remove(legacyFile.absolutePath)
+        cache[file.absolutePath] = ConversationSummary(
+            id = conversationId,
+            title = indexTitle,
+            created = file.lastModified(),
+            file = file
+        )
+        publish()
 
-        // Index in SQLite for fast search
-        var db: ChatDatabase? = null
+        // Index in SQLite for fast search: one transaction for the conversation row and all its messages.
         try {
-            db = ChatDatabase(context)
-            db.indexConversation(
-                id = conversationId,
-                title = indexTitle,
-                created = messages.first().timestamp,
-                model = model,
-                filePath = file.absolutePath,
-                messages = messages
-            )
-        } catch (_: Exception) { /* index failure is non-fatal */ } finally {
-            try { db?.close() } catch (_: Exception) {}
-        }
+            val helper = db(context)
+            val sql = helper.writableDatabase
+            sql.beginTransaction()
+            try {
+                helper.indexConversation(
+                    id = conversationId,
+                    title = indexTitle,
+                    created = messages.first().timestamp,
+                    model = model,
+                    filePath = file.absolutePath,
+                    messages = messages
+                )
+                sql.setTransactionSuccessful()
+            } finally {
+                sql.endTransaction()
+            }
+        } catch (_: Exception) { /* index failure is non-fatal */ }
+    }
+
+    /**
+     * The chat file of [conversationId] from the in-memory index (no folder re-scan), or null.
+     * Lock-free once the index is built, so a main-thread caller never waits on a save in progress.
+     */
+    fun fileFor(context: Context, conversationId: String): File? {
+        val map = idToFile ?: synchronized(this) { summaries(context); idToFile } ?: return null
+        return map[conversationId]?.takeIf { it.exists() }
     }
 
     /** Reads `key: value` from a chat file's frontmatter, or null. */
@@ -168,6 +247,7 @@ object ChatHistoryManager {
     /**
      * Load a conversation from markdown file.
      */
+    @Synchronized
     fun load(file: File): List<ChatMessage> {
         if (!file.exists()) return emptyList()
 
@@ -283,54 +363,41 @@ object ChatHistoryManager {
     /**
      * Delete all saved chat files and clear SQLite index.
      */
+    @Synchronized
     fun clearAllHistory(context: Context) {
         try {
             val dir = getChatDir(context)
             dir.listFiles()?.forEach { it.delete() }
-            val db = ChatDatabase(context)
+            summaryCache = null
+            idToFile = null
+            val sql = db(context).writableDatabase
+            sql.beginTransaction()
             try {
-                db.writableDatabase.execSQL("DELETE FROM conversations")
+                sql.execSQL("DELETE FROM messages")
+                sql.execSQL("DELETE FROM conversations")
+                sql.setTransactionSuccessful()
             } finally {
-                db.close()
+                sql.endTransaction()
             }
         } catch (_: Exception) {}
     }
 
     /**
      * List all saved conversations, newest first.
+     * The folder is scanned once; later calls come from the in-memory index that save/rename/delete keep current.
      */
+    @Synchronized
     fun listConversations(context: Context): List<ConversationSummary> {
-        val dir = getChatDir(context)
-        if (!dir.exists()) return emptyList()
-
-        return dir.listFiles()
-            ?.filter { it.extension == "md" && !it.name.endsWith(".memory.md") } // digests aren't chats
-            ?.map { file ->
-                var title = file.nameWithoutExtension
-                var id = ""
-                // Parse frontmatter for title
-                file.useLines { lines ->
-                    var inFm = false
-                    for (line in lines) {
-                        if (line == "---") { if (!inFm) { inFm = true; continue } else break }
-                        if (inFm && line.startsWith("title: ")) title = line.removePrefix("title: ")
-                        if (inFm && line.startsWith("id: ")) id = line.removePrefix("id: ")
-                    }
-                }
-                ConversationSummary(
-                    id = id.ifEmpty { file.nameWithoutExtension },
-                    title = title,
-                    created = file.lastModified(),
-                    file = file
-                )
-            }
-            ?.sortedByDescending { it.created }
-            ?: emptyList()
+        val cache = summaries(context)
+        // Drop entries whose file vanished outside this class (e.g. cleared app storage).
+        if (cache.entries.removeAll { !it.value.file.exists() }) publish()
+        return cache.values.sortedByDescending { it.created }
     }
 
     /**
      * Rename a conversation by updating the title in the markdown frontmatter.
      */
+    @Synchronized
     fun rename(file: File, newTitle: String): Boolean {
         if (!file.exists()) return false
         try {
@@ -340,6 +407,9 @@ object ChatHistoryManager {
                 "title: $newTitle"
             )
             file.writeText(updated)
+            val summary = readSummary(file)
+            if (summary != null) summaryCache?.put(file.absolutePath, summary)
+            publish()
             return true
         } catch (e: Exception) {
             io.agents.pokeclaw.utils.XLog.e("ChatHistoryManager", "Failed to rename conversation", e)
@@ -348,7 +418,18 @@ object ChatHistoryManager {
     }
 
     /**
-     * Delete a conversation.
+     * Delete a conversation (its file, its compaction digest and its search-index rows).
      */
-    fun delete(file: File): Boolean = file.delete()
+    @Synchronized
+    fun delete(context: Context, conversation: ConversationSummary): Boolean {
+        val file = conversation.file
+        val deleted = file.delete() || !file.exists()
+        if (deleted) {
+            summaryCache?.remove(file.absolutePath)
+            publish()
+            try { File(file.parentFile, file.nameWithoutExtension + ".memory.md").delete() } catch (_: Exception) {}
+            try { db(context).deleteConversation(conversation.id) } catch (_: Exception) {}
+        }
+        return deleted
+    }
 }

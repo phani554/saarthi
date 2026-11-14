@@ -682,7 +682,7 @@ class TaskFlowController(
         if (!appViewModel.isTaskRunning()) return
         if (appViewModel.inProgressTaskChannel != io.agents.pokeclaw.channel.Channel.LOCAL) return
         uiState.isTaskRunning.value = true
-        appViewModel.taskOrchestrator.taskEventCallback = { event ->
+        appViewModel.attachTaskCallback(appViewModel.inProgressTaskMessageId) { event ->
             activity.runOnUiThread { handleTaskEvent(event) }
         }
         XLog.i(TAG, "reattachToRunningTask: task events now go to the recreated screen")

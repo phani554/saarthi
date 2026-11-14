@@ -98,23 +98,56 @@ $olderText"""
         }
     }
 
+    private fun chatDir(context: Context): File =
+        File(context.getExternalFilesDir(null) ?: context.filesDir, "chats")
+
+    /** Reads `key: value` from the leading frontmatter only (a few lines), or null. */
+    private fun frontmatterValue(file: File, key: String): String? {
+        return try {
+            var result: String? = null
+            file.useLines { lines ->
+                var inFm = false
+                for (line in lines) {
+                    if (line == "---") { if (!inFm) { inFm = true; continue } else break }
+                    if (inFm && line.startsWith("$key: ")) { result = line.removePrefix("$key: ").trim(); break }
+                }
+            }
+            result
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Finds the digest file by name (next to the chat file, or `<id>.memory.md`) instead of reading
+     * every chat file. Falls back to the frontmatter of the digest files only (older names).
+     */
+    private fun findDigestFile(context: Context, conversationId: String): File? {
+        val dir = chatDir(context)
+        if (!dir.exists()) return null
+        ChatHistoryManager.fileFor(context, conversationId)?.let { md ->
+            val byChat = File(dir, md.nameWithoutExtension + ".memory.md")
+            if (byChat.exists()) return byChat
+        }
+        val byId = File(dir, "$conversationId.memory.md")
+        if (byId.exists()) return byId
+        return dir.listFiles()?.firstOrNull { file ->
+            file.name.endsWith(".memory.md") && frontmatterValue(file, "conversation") == conversationId
+        }
+    }
+
     /**
      * Save digest to .memory.md file alongside the conversation .md file.
      */
     private fun saveDigest(context: Context, conversationId: String, digest: String, messages: List<ChatMessage>) {
-        val chatDir = File(context.getExternalFilesDir(null), "chats")
-        if (!chatDir.exists()) chatDir.mkdirs()
+        val dir = chatDir(context)
+        if (!dir.exists()) dir.mkdirs()
 
-        val mdFile = chatDir.listFiles()?.find { file ->
-            file.extension == "md" && !file.name.endsWith(".memory.md") &&
-            file.readText().contains("id: $conversationId")
-        }
-
-        val memoryFile = if (mdFile != null) {
-            File(chatDir, mdFile.nameWithoutExtension + ".memory.md")
-        } else {
-            File(chatDir, "$conversationId.memory.md")
-        }
+        val memoryFile = findDigestFile(context, conversationId)
+            ?: ChatHistoryManager.fileFor(context, conversationId)?.let { md ->
+                File(dir, md.nameWithoutExtension + ".memory.md")
+            }
+            ?: File(dir, "$conversationId.memory.md")
 
         val content = buildString {
             appendLine("---")
@@ -131,23 +164,18 @@ $olderText"""
 
     /**
      * Load digest for a conversation.
-     * Returns null if no digest exists.
+     * Returns null if no digest exists. Reads at most one digest file (plus digest headers for old names).
      */
     fun loadDigest(context: Context, conversationId: String): String? {
-        val chatDir = File(context.getExternalFilesDir(null), "chats")
-        if (!chatDir.exists()) return null
+        val memoryFile = findDigestFile(context, conversationId) ?: return null
 
-        val memoryFile = chatDir.listFiles()?.find { file ->
-            file.name.endsWith(".memory.md") && file.readText().contains("conversation: $conversationId")
-        } ?: return null
-
-        val lines = memoryFile.readLines()
+        val lines = try { memoryFile.readLines() } catch (_: Exception) { return null }
         var pastFrontmatter = false
         var frontmatterCount = 0
         val digest = StringBuilder()
 
         for (line in lines) {
-            if (line == "---") {
+            if (line == "---" && !pastFrontmatter) {
                 frontmatterCount++
                 if (frontmatterCount >= 2) { pastFrontmatter = true; continue }
                 continue

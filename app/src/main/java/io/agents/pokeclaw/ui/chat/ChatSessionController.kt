@@ -191,11 +191,20 @@ class ChatSessionController(
             return
         }
 
-        val restoredSystemPrompt = buildRestoredSystemPrompt(conversationId, visibleMessages)
         uiState.modelStatus.value = "Loading..."
         setButtonsEnabled(false)
         val generation = ++localUiGeneration
-        executor.submit { loadModel(modelPath, generation, restoredSystemPrompt) }
+        // Snapshot on main; the digest lookup (disk) runs on the executor with the load.
+        val messagesSnapshot = visibleMessages.toList()
+        executor.submit {
+            val restoredSystemPrompt = try {
+                buildRestoredSystemPrompt(conversationId, messagesSnapshot)
+            } catch (e: Exception) {
+                XLog.w(TAG, "loadModelIfReady: restored prompt failed, starting fresh", e)
+                null
+            }
+            loadModel(modelPath, generation, restoredSystemPrompt)
+        }
     }
 
     fun onResume(

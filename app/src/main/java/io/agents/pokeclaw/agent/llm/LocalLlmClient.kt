@@ -7,6 +7,7 @@ import io.agents.pokeclaw.ClawApplication
 import io.agents.pokeclaw.agent.AgentConfig
 import io.agents.pokeclaw.utils.XLog
 import com.google.ai.edge.litertlm.Message
+import com.google.ai.edge.litertlm.MessageCallback
 import com.google.ai.edge.litertlm.Contents
 import com.google.ai.edge.litertlm.ConversationConfig
 import com.google.ai.edge.litertlm.Engine
@@ -27,10 +28,13 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.util.LinkedHashMap
 import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.locks.ReentrantLock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.runBlocking
@@ -88,6 +92,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             } catch (e: Exception) {
                 XLog.w(TAG, "close conversation error", e)
             } finally {
+                LocalModelRuntime.releaseSession(conv)
                 convLock.unlock()
             }
         } else {
@@ -151,6 +156,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             modelPath = config.baseUrl,
             conversationConfig = convConfig,
             preferCpu = false,
+            owner = LocalSessionOwner.TASK,
         )
         engine = lease.engine
         conversation = lease.conversation
@@ -323,18 +329,20 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
         val benchStart = System.currentTimeMillis()
         val response = withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
+            val job = currentCoroutineContext()[Job]
             convLock.lock()
             try {
                 if (conversation !== conv || pendingClose.contains(conv)) {
                     throw CancellationException("LiteRT-LM conversation was closed")
                 }
                 inFlight = conv
-                conv.sendMessage(text)
+                sendCancellable(conv, text) { job?.isActive == false }
             } finally {
                 inFlight = null
                 // close() gave up waiting for this call: close the conversation now that native returned.
                 if (pendingClose.remove(conv)) {
                     try { conv.close() } catch (e: Exception) { XLog.w(TAG, "deferred close error", e) }
+                    LocalModelRuntime.releaseSession(conv)
                 }
                 convLock.unlock()
             }
@@ -342,6 +350,63 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
         sendCount++
         io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteLocalSend(System.currentTimeMillis() - benchStart, text.length)
         return response
+    }
+
+    /**
+     * Streams one reply with Conversation.sendMessageAsync(String, MessageCallback) (litertlm 0.16.1) and
+     * blocks this thread until the native side reports onDone/onError. While waiting it watches
+     * [isCancelled] (the caller's coroutine was cancelled, e.g. Stop) and thread interrupts, and then
+     * calls Conversation.cancelProcess() so the decode actually stops instead of running on.
+     * The caller holds convLock for the whole call, so close() can never free the conversation mid-decode.
+     */
+    private fun sendCancellable(
+        conv: com.google.ai.edge.litertlm.Conversation,
+        text: String,
+        isCancelled: () -> Boolean,
+    ): Message {
+        val done = CountDownLatch(1)
+        val reply = StringBuilder()
+        val failure = AtomicReference<Throwable?>(null)
+        conv.sendMessageAsync(text, object : MessageCallback {
+            override fun onMessage(message: Message) {
+                val chunk = message.contents.toString()
+                synchronized(reply) { reply.append(chunk) }
+            }
+
+            override fun onDone() {
+                done.countDown()
+            }
+
+            override fun onError(throwable: Throwable) {
+                failure.set(throwable)
+                done.countDown()
+            }
+        })
+        var cancelRequested = false
+        while (true) {
+            val finished = try {
+                done.await(STREAM_POLL_MS, TimeUnit.MILLISECONDS)
+            } catch (_: InterruptedException) {
+                // Keep waiting (native must return before the lock is released), but stop the decode.
+                Thread.currentThread().interrupt()
+                false
+            }
+            if (finished) break
+            if (!cancelRequested && (isCancelled() || Thread.currentThread().isInterrupted)) {
+                cancelRequested = true
+                XLog.i(TAG, "send: caller cancelled, stopping local generation (cancelProcess)")
+                try { conv.cancelProcess() } catch (e: Exception) { XLog.w(TAG, "cancelProcess error", e) }
+            }
+            if (Thread.currentThread().isInterrupted) {
+                // Clear the flag so await() blocks again instead of spinning; cancel was already sent.
+                Thread.interrupted()
+            }
+        }
+        if (cancelRequested) throw CancellationException("Local generation cancelled")
+        failure.get()?.let { err ->
+            throw (err as? Exception) ?: RuntimeException(err.message ?: "Local generation failed", err)
+        }
+        return Message.model(synchronized(reply) { reply.toString() })
     }
 
     override fun chatStreaming(
@@ -462,6 +527,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             options = setOf(RegexOption.IGNORE_CASE)
         )
 
+        private const val STREAM_POLL_MS = 100L // how often a running local reply checks for Stop
         private const val CLOSE_WAIT_MS = 1500L // close() may run on the main thread (Stop): keep it short
         private const val UNPARSEABLE_ACTION_TEXT = "I couldn't complete that step on the phone."
         private const val MAX_SENDS_PER_SESSION = 4 // keeps a session well inside the KV cache; recap carries state

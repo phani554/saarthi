@@ -57,8 +57,10 @@ class AppViewModel : ViewModel() {
     ) {
         onBeforeTask?.invoke()
         acquireTaskWakeLock(wakeScreen = false)
-        taskOrchestrator.taskEventCallback = onEvent
+        // Keyed by taskId: this task's events go to this caller only (not to a channel task or another screen).
+        taskOrchestrator.setTaskEventCallback(taskId, onEvent)
         if (!updateAgentConfig()) {
+            taskOrchestrator.setTaskEventCallback(taskId, null)
             onEvent(TaskEvent.Failed("AI service not ready"))
             return
         }
@@ -71,8 +73,15 @@ class AppViewModel : ViewModel() {
 
     fun isTaskRunning(): Boolean = taskSessionStore.isTaskRunning()
 
-    fun clearTaskCallback() {
-        taskOrchestrator.taskEventCallback = null
+    /** Routes the events of the task with [messageId] to [onEvent] (e.g. a recreated chat screen). */
+    fun attachTaskCallback(messageId: String, onEvent: (TaskEvent) -> Unit) {
+        taskOrchestrator.setTaskEventCallback(messageId, onEvent)
+    }
+
+    /** Drops the listener of [messageId], or every in-app listener when null. */
+    fun clearTaskCallback(messageId: String? = null) {
+        if (messageId == null) taskOrchestrator.clearTaskEventCallbacks()
+        else taskOrchestrator.setTaskEventCallback(messageId, null)
     }
 
     fun init() {

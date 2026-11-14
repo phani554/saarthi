@@ -63,6 +63,9 @@ class ComposeChatActivity : ComponentActivity() {
     private val _sessionTokens = mutableStateOf(0)
     private val _sessionCost = mutableStateOf(0.0)
     private var deferLocalChatBootstrapForAutoTask = false
+    // The last conversation is read on a background thread; until it is back, saves are skipped (so a
+    // half-empty list never overwrites the file) and the chat runtime waits for the restored context.
+    private var initialRestoreDone = false
 
     private val speechLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -249,19 +252,22 @@ class ComposeChatActivity : ComponentActivity() {
                 conversations = _conversations.toList(),
                 onSelectConversation = { loadConversation(it) },
                 onDeleteConversation = { conv ->
-                    val deleted = conversationStore.deleteConversation(conv)
-                    XLog.i(TAG, "Delete conversation: ${conv.file.absolutePath} deleted=$deleted")
-                    if (deleted && conv.id == conversationStore.currentConversationId) {
-                        // Clear first so newChat() doesn't save the deleted conversation back to disk.
-                        _messages.clear()
-                        newChat()
+                    val isCurrent = conv.id == conversationStore.currentConversationId
+                    // Clear first so no save (pause, new chat) writes the deleted conversation back to disk.
+                    val kept = if (isCurrent) _messages.toList().also { _messages.clear() } else emptyList()
+                    conversationStore.deleteConversation(conv) { deleted ->
+                        XLog.i(TAG, "Delete conversation: ${conv.file.absolutePath} deleted=$deleted")
+                        if (isCurrent) {
+                            if (deleted) newChat() else if (_messages.isEmpty()) _messages.addAll(kept)
+                        }
+                        refreshSidebarHistory()
                     }
-                    refreshSidebarHistory()
                 },
                 onRenameConversation = { conv, newName ->
-                    val renamed = conversationStore.renameConversation(conv, newName)
-                    XLog.i(TAG, "Rename conversation: '${conv.title}' → '$newName' renamed=$renamed")
-                    refreshSidebarHistory()
+                    conversationStore.renameConversation(conv, newName) { renamed ->
+                        XLog.i(TAG, "Rename conversation: '${conv.title}' → '$newName' renamed=$renamed")
+                        refreshSidebarHistory()
+                    }
                 },
                 activeTasks = activeTasks,
                 onStopTask = { contact ->
@@ -294,26 +300,28 @@ class ComposeChatActivity : ComponentActivity() {
 
         refreshSidebarHistory()
 
-        // Restore last conversation if Activity was recreated
-        if (_messages.isEmpty()) {
-            conversationStore.restoreLastConversation()?.let { restored ->
+        deferLocalChatBootstrapForAutoTask = shouldDeferLocalChatBootstrap(intent)
+        // Restore the last conversation off the main thread, then start the chat runtime with it.
+        conversationStore.restoreLastConversation { restored ->
+            if (isFinishing || isDestroyed) return@restoreLastConversation
+            if (restored != null && restored.conversationId == conversationStore.currentConversationId) {
                 syncSidebar(restored.conversations)
                 if (restored.messages.isNotEmpty()) {
-                    _messages.addAll(restored.messages)
+                    // Task events re-attached meanwhile may already be on screen: history goes before them.
+                    _messages.addAll(0, restored.messages)
                     XLog.i(
                         TAG,
                         "Restored ${restored.messages.size} messages from conversation ${restored.conversationId}"
                     )
                 }
             }
-        }
-
-        deferLocalChatBootstrapForAutoTask = shouldDeferLocalChatBootstrap(intent)
-        if (!deferLocalChatBootstrapForAutoTask) {
-            chatSessionController.loadModelIfReady(
-                conversationId = conversationStore.currentConversationId,
-                visibleMessages = _messages.toList(),
-            )
+            initialRestoreDone = true
+            if (!deferLocalChatBootstrapForAutoTask) {
+                chatSessionController.loadModelIfReady(
+                    conversationId = conversationStore.currentConversationId,
+                    visibleMessages = _messages.toList(),
+                )
+            }
         }
         _isLocalModelActive.value = ModelConfigRepository.isLocalActive()
 
@@ -343,7 +351,8 @@ class ComposeChatActivity : ComponentActivity() {
         permHandler.removeCallbacks(permPoller)
         permHandler.postDelayed(permPoller, 1000)
         activeTaskShellController.onResume()
-        if (!deferLocalChatBootstrapForAutoTask) {
+        // Before the first restore returns, its callback starts the runtime (with the restored context).
+        if (!deferLocalChatBootstrapForAutoTask && initialRestoreDone) {
             chatSessionController.onResume(
                 conversationId = conversationStore.currentConversationId,
                 visibleMessages = _messages.toList(),
@@ -433,8 +442,11 @@ class ComposeChatActivity : ComponentActivity() {
     }
 
     private fun newChat() {
-        val session = conversationStore.startNewConversation(_messages, currentConversationModelName())
-        syncSidebar(session.conversations)
+        // Snapshot on main, clear right away; the old chat is saved on the IO thread.
+        val snapshot = if (initialRestoreDone) _messages.toList() else emptyList()
+        conversationStore.startNewConversation(snapshot, currentConversationModelName()) { session ->
+            syncSidebar(session.conversations)
+        }
         _messages.clear()
         _sessionTokens.value = 0
         _sessionCost.value = 0.0
@@ -444,21 +456,32 @@ class ComposeChatActivity : ComponentActivity() {
     }
 
     private fun loadConversation(conv: ChatHistoryManager.ConversationSummary) {
-        val session = conversationStore.openConversation(conv, _messages, currentConversationModelName())
-        syncSidebar(session.conversations)
+        val snapshot = if (initialRestoreDone) _messages.toList() else emptyList()
+        // The id switches now and the list is emptied now, so a save while the file loads can't
+        // write the old chat's messages under the new id.
         _messages.clear()
-        _messages.addAll(session.messages)
         _isAwaitingReply.value = false
         _isTaskRunning.value = false
-        chatSessionController.restoreConversationRuntime(session.conversationId, session.messages)
+        conversationStore.openConversation(conv, snapshot, currentConversationModelName()) { session ->
+            if (isFinishing || isDestroyed) return@openConversation
+            if (session.conversationId != conversationStore.currentConversationId) return@openConversation // user moved on
+            syncSidebar(session.conversations)
+            _messages.clear()
+            _messages.addAll(session.messages)
+            chatSessionController.restoreConversationRuntime(session.conversationId, session.messages)
+        }
     }
 
     private fun saveChat() {
-        syncSidebar(conversationStore.saveCurrent(_messages, currentConversationModelName()))
+        if (!initialRestoreDone) return
+        // Snapshot on main; the markdown file and the search index are written on the IO thread.
+        conversationStore.saveCurrent(_messages.toList(), currentConversationModelName()) { convos ->
+            syncSidebar(convos)
+        }
     }
 
     private fun refreshSidebarHistory() {
-        syncSidebar(conversationStore.refreshSidebar())
+        conversationStore.refreshSidebar { convos -> syncSidebar(convos) }
     }
 
     private fun syncSidebar(convos: List<ChatHistoryManager.ConversationSummary>) {
