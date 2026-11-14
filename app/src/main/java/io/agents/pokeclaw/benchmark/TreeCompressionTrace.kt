@@ -28,13 +28,16 @@ object TreeCompressionTrace {
         val keptEx = mutableListOf<Pair<String, String>>()
     }
 
+    private const val OWN_PACKAGE = "io.agents.pokeclaw"
     private val lock = Any()
     @Volatile private var screen: Screen? = null
     private val sections = mutableListOf<String>()
     private var screensThisRun = 0
+    /** Saathi's own chat screen is traced only when the run never reaches another app (phone traces 2026-11-15). */
+    private var ownScreen: Triple<Screen, Int, Array<Any?>>? = null
 
     /** New run: drop the previous run's trace. */
-    fun startRun() = synchronized(lock) { sections.clear(); screensThisRun = 0; screen = null }
+    fun startRun() = synchronized(lock) { sections.clear(); screensThisRun = 0; screen = null; ownScreen = null }
 
     /** Arms tracing for the screen about to be built; false when this run already has enough screens. */
     @JvmStatic
@@ -77,6 +80,10 @@ object TreeCompressionTrace {
     @JvmStatic
     fun finishScreen(pkg: String?, rawNodes: Int, fullDump: String, prunedNodes: Int, pruned: String) {
         val s = synchronized(lock) { screen.also { screen = null } } ?: return
+        if (pkg == OWN_PACKAGE) {
+            synchronized(lock) { if (ownScreen == null) ownScreen = Triple(s, rawNodes, arrayOf(pkg, fullDump, prunedNodes, pruned)) }
+            return
+        }
         val text = render(++screensThisRun, pkg, s, rawNodes, fullDump, prunedNodes, pruned)
         synchronized(lock) { sections += text }
     }
@@ -101,6 +108,12 @@ object TreeCompressionTrace {
 
     /** The whole run's trace, or null when nothing was traced. */
     fun takeRunText(header: String): String? = synchronized(lock) {
+        if (sections.none { it.startsWith("## Screen") }) {
+            ownScreen?.let { (sc, raw, a) ->
+                sections.add(0, render(1, a[0] as String?, sc, raw, a[1] as String, a[2] as Int, a[3] as String))
+            }
+        }
+        ownScreen = null
         if (sections.isEmpty()) return null
         val out = "# Tree compression trace\n\n$header\n\n" + sections.joinToString("\n")
         sections.clear()
