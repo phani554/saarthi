@@ -348,7 +348,10 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             }
         }
         sendCount++
-        io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteLocalSend(System.currentTimeMillis() - benchStart, text.length)
+        io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteLocalSend(
+            System.currentTimeMillis() - benchStart, text.length,
+            ((response as? com.google.ai.edge.litertlm.Message)?.contents?.toString()?.length) ?: 0,
+        )
         return response
     }
 

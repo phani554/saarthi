@@ -105,6 +105,7 @@ private fun BenchmarkScreen(onBack: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var traceText by remember { mutableStateOf<String?>(null) }
     var askName by remember { mutableStateOf(false) }
+    var redact by remember { mutableStateOf(BenchmarkRecorder.isRedacting()) }
     var nameDraft by remember { mutableStateOf("") }
 
     fun reload() {
@@ -153,6 +154,24 @@ private fun BenchmarkScreen(onBack: () -> Unit) {
                             onCheckedChange = {
                                 enabled = it
                                 BenchmarkRecorder.setEnabled(it)
+                            },
+                        )
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Hide names and messages", fontSize = BODY, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                if (redact) "Reports leave out what you asked, names, messages and screen text."
+                                else "Reports include what you asked, names, messages and screen text.",
+                                fontSize = 16.sp,
+                            )
+                        }
+                        Switch(
+                            checked = redact,
+                            onCheckedChange = {
+                                redact = it
+                                BenchmarkRecorder.setRedacting(it)
                             },
                         )
                     }
@@ -324,7 +343,12 @@ private fun BenchmarkScreen(onBack: () -> Unit) {
                 }
             }
             items(runs) { r ->
-                RunRow(r, onShowTrace = {
+                RunRow(r, onVerdict = { v ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) { BenchmarkRecorder.setUserVerdict(context, r.timestampMs, v) }
+                        reload()
+                    }
+                }, onShowTrace = {
                     scope.launch {
                         traceText = withContext(Dispatchers.IO) { BenchmarkRecorder.readTrace(context, r.treeTraceFile) }
                             ?: "No trace for this run."
@@ -418,14 +442,16 @@ private fun InfoLine(label: String, value: String) {
 }
 
 @Composable
-private fun RunRow(r: RunSummary, onShowTrace: () -> Unit) {
+private fun RunRow(r: RunSummary, onVerdict: (String?) -> Unit, onShowTrace: () -> Unit) {
     val color = when (r.outcome) {
         "success" -> GREEN
+        "awaiting_yes" -> AMBER
         "cancelled" -> AMBER
         else -> RED
     }
     val outcomeText = when (r.outcome) {
         "success" -> "Done"
+        "awaiting_yes" -> "Asked yes/no"
         "cancelled" -> "Stopped"
         else -> "Failed"
     }
@@ -439,7 +465,19 @@ private fun RunRow(r: RunSummary, onShowTrace: () -> Unit) {
             r.treeReductionPct?.let { Text("tree −${it.toInt()}%", fontSize = BODY) }
             Text(outcomeText, fontSize = BODY, color = color, fontWeight = FontWeight.Bold)
         }
-        Text(r.timestamp, fontSize = 14.sp, color = Color.Gray)
+        Text(listOfNotNull(r.timestamp, r.taskId, r.failureReason).joinToString(" · "), fontSize = 14.sp, color = Color.Gray)
+        if (r.timestampMs != 0L) {
+            Spacer(Modifier.height(6.dp))
+            Text("Did it really work?", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                val worked = r.userVerdict == "worked"
+                val failed = r.userVerdict == "failed"
+                if (worked) Button(onClick = { onVerdict(null) }) { Text("Worked ✓", fontSize = BODY) }
+                else OutlinedButton(onClick = { onVerdict("worked") }) { Text("Worked", fontSize = BODY) }
+                if (failed) Button(onClick = { onVerdict(null) }) { Text("Didn't work ✓", fontSize = BODY) }
+                else OutlinedButton(onClick = { onVerdict("failed") }) { Text("Didn't work", fontSize = BODY) }
+            }
+        }
         if (r.treeTraceFile != null) {
             TextButton(onClick = onShowTrace) { Text("Show tree compression, step by step", fontSize = BODY) }
         }
@@ -460,7 +498,8 @@ private fun buildExportIntent(context: Context): Intent? {
         if (!runs.exists() || runs.length() == 0L) return null
         val dir = File(context.cacheDir, "benchmark_export").apply { mkdirs() }
         val jsonl = File(dir, "runs.jsonl")
-        runs.copyTo(jsonl, overwrite = true)
+        val redact = BenchmarkRecorder.isRedacting()
+        jsonl.writeText(BenchmarkRecorder.exportLines(context, redact).joinToString("\n", postfix = "\n"))
         val csv = File(dir, "summary.csv")
         BenchmarkRecorder.writeCsv(context, csv)
         val authority = context.packageName + ".fileprovider"
@@ -469,7 +508,8 @@ private fun buildExportIntent(context: Context): Intent? {
             FileProvider.getUriForFile(context, authority, csv),
         )
         // Spelled-out tree compression of each traced run (for the demo / report).
-        BenchmarkRecorder.tracesDir(context).listFiles()?.sortedBy { it.name }?.forEach { t ->
+        // Traces hold screen text (names, messages): left out while hiding is on.
+        if (!redact) BenchmarkRecorder.tracesDir(context).listFiles()?.sortedBy { it.name }?.forEach { t ->
             val copy = File(dir, t.name)
             t.copyTo(copy, overwrite = true)
             uris += FileProvider.getUriForFile(context, authority, copy)

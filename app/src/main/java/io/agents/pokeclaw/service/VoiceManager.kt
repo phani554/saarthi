@@ -248,8 +248,14 @@ object VoiceManager : TextToSpeech.OnInitListener {
             VoiceRecorder.startRecording(context, maxDurationMs = 7000L) { bytes ->
                 if (bytes.isNotEmpty()) {
                     _engineState.value = VoiceEngineState.Transcribing
+                    val sttStart = System.currentTimeMillis()
                     processVoiceInputAutoKey(bytes, "audio/wav") { transcript ->
                         _engineState.value = VoiceEngineState.Idle
+                        io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteStt(
+                            System.currentTimeMillis() - sttStart,
+                            if (KVUtils.getSarvamApiKey().isNotBlank()) "sarvam" else "gemini",
+                            transcript?.length ?: 0,
+                        )
                         onResult(transcript)
                     }
                 } else {
@@ -272,6 +278,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
     fun speak(text: String, flush: Boolean = false) {
         if (!isVoiceOutputEnabled || text.isBlank()) return
         val (cleanText, lang) = prepareForSpeech(text) ?: return
+        val ttsStart = System.currentTimeMillis()
 
         var myGeneration = 0L
         var sarvamKey = ""
@@ -313,9 +320,11 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 return
             }
             if (base64Audio != null) {
+                io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteTts(System.currentTimeMillis() - ttsStart, "sarvam")
                 playBase64Audio(base64Audio, myGeneration)
                 return
             }
+            io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteTts(System.currentTimeMillis() - ttsStart, "native_fallback")
             isPlayingAudio = false
             if (isTtsInitialized) {
                 speakNativeInternal(cleanText, flush, lang)

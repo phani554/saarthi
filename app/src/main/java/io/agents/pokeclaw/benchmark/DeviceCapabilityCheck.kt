@@ -146,6 +146,27 @@ object DeviceCapabilityCheck {
         )
     }
 
+    /** wifi / cellular / ethernet / vpn / none, at this moment. */
+    fun networkType(context: Context): String = try {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork)
+        when {
+            caps == null -> "none"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+            caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) -> "vpn"
+            else -> "other"
+        }
+    } catch (_: Throwable) { "unknown" }
+
+    /** Remaining battery charge in microamp-hours, or null when the phone does not report it. */
+    fun chargeCounterUah(context: Context): Long? = try {
+        val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
+        val v = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+        if (v == Int.MIN_VALUE || v <= 0) null else v.toLong()
+    } catch (_: Throwable) { null }
+
     private fun memInfo(context: Context): ActivityManager.MemoryInfo? = try {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }

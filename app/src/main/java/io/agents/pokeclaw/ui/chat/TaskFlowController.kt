@@ -423,6 +423,7 @@ class TaskFlowController(
         return when (OutboundConfirmGate.classify(text)) {
             OutboundConfirmGate.Reply.YES -> {
                 val approved = OutboundConfirmGate.approve() ?: return false
+                io.agents.pokeclaw.benchmark.BenchmarkRecorder.onConfirmReply("yes", approved.toolName)
                 VoiceManager.onPlaybackFinished = null
                 XLog.i(TAG, "User approved parked ${approved.toolName}")
                 io.agents.pokeclaw.agent.knowledge.ContactAliasResolver.onUserApproved(
@@ -432,6 +433,7 @@ class TaskFlowController(
             }
             OutboundConfirmGate.Reply.NO -> {
                 // Drop only the action she was asked about; a queued one behind it is asked next.
+                io.agents.pokeclaw.benchmark.BenchmarkRecorder.onConfirmReply("no", OutboundConfirmGate.peek()?.toolName)
                 val more = OutboundConfirmGate.decline()
                 // She said no to part of a split request: the steps after it are dropped, not run blind.
                 if (!more) io.agents.pokeclaw.agent.TaskQueueManager.clear()
@@ -453,6 +455,7 @@ class TaskFlowController(
                 OutboundConfirmGate.clear()
                 io.agents.pokeclaw.agent.TaskQueueManager.clear()
                 if (dropped != null) {
+                    io.agents.pokeclaw.benchmark.BenchmarkRecorder.onConfirmReply("other", dropped.toolName)
                     XLog.i(TAG, "Reply was neither yes nor no: dropped parked ${dropped.toolName} and the queued steps")
                     addSystem(SpokenStrings.notSentCancelled())
                 }
@@ -472,7 +475,14 @@ class TaskFlowController(
         replySeq.incrementAndGet()
         runOffMain {
             try {
+                val actionStart = System.currentTimeMillis()
                 val result = ToolRegistry.getInstance().executeTool(toolCall.toolName, toolCall.params)
+                if (!OutboundConfirmGate.isAskResult(result)) {
+                    io.agents.pokeclaw.benchmark.BenchmarkRecorder.onConfirmedActionResult(
+                        toolCall.toolName, System.currentTimeMillis() - actionStart, result.isSuccess,
+                        if (result.isSuccess) result.data else result.error,
+                    )
+                }
                 // The tool parked itself behind the confirm gate: show its question, not "Failed: CONFIRMATION NEEDED".
                 val askResult = OutboundConfirmGate.isAskResult(result)
                 val answer = if (askResult) {

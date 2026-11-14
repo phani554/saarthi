@@ -32,13 +32,14 @@ object BenchmarkUploader {
 
     fun collect(context: Context): List<Part> {
         val parts = mutableListOf<Part>()
-        val runs = BenchmarkRecorder.runsFile(context)
-        if (runs.exists() && runs.length() > 0) parts += Part("runs.jsonl", runs.readText())
+        val redact = BenchmarkRecorder.isRedacting()
+        val lines = BenchmarkRecorder.exportLines(context, redact)
+        if (lines.isNotEmpty()) parts += Part("runs.jsonl", lines.joinToString("\n", postfix = "\n"))
         val csv = File(context.cacheDir, "bench_upload_summary.csv")
         if (runCatching { BenchmarkRecorder.writeCsv(context, csv) }.isSuccess && csv.exists()) {
             parts += Part("summary.csv", csv.readText(), "text/csv")
         }
-        BenchmarkRecorder.tracesDir(context).listFiles()?.sortedBy { it.name }?.forEach {
+        if (!redact) BenchmarkRecorder.tracesDir(context).listFiles()?.sortedBy { it.name }?.forEach {
             parts += Part(it.name, it.readText())
         }
         return parts

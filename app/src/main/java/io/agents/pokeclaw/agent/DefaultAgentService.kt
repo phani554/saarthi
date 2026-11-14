@@ -978,7 +978,10 @@ class DefaultAgentService : AgentService {
                 val benchToolStart = if (BenchmarkRecorder.isRecording()) System.currentTimeMillis() else 0L
                 val result = ToolRegistry.getInstance().executeTool(toolName, params)
                 if (benchToolStart != 0L) {
-                    BenchmarkRecorder.onToolCall(toolName, System.currentTimeMillis() - benchToolStart, result.isSuccess)
+                    BenchmarkRecorder.onToolCall(
+                        toolName, System.currentTimeMillis() - benchToolStart, result.isSuccess,
+                        if (OutboundConfirmGate.isAskResult(result)) io.agents.pokeclaw.benchmark.BenchmarkTagging.STATUS_ASKED else null,
+                    )
                 }
                 val paramsString = if (params.isEmpty()) "" else params.toString()
                 callback.onToolResult(iterations, toolName, displayName, paramsString, result)
@@ -1138,6 +1141,7 @@ class DefaultAgentService : AgentService {
             val detection = stuckDetector.record(TaskExecutionState.instance.activePackageName, lastAction, lastScreenHash, screenDiffCount, lastToolError)
             if (detection != null) {
                 XLog.w(TAG, "StuckDetector ${detection.level} at iteration $iterations: ${detection.signal.description}")
+                BenchmarkRecorder.noteStuck(detection.level.name, detection.signal.description)
 
                 val service = ClawAccessibilityService.getConnectedInstance(1000L)
                 // Only press BACK / dismiss when the last 3 rounds were real actions: an unchanged hash

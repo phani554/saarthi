@@ -41,6 +41,14 @@ object BenchmarkRecorder {
     @Volatile private var enabledCache: Boolean? = null
     @Volatile private var current: RunBuilder? = null
 
+    /** The last run written in this process (yes/no, voice and the tester's mark are added to it later). */
+    @Volatile private var lastRunTs: Long? = null
+    @Volatile private var lastRunEndMs: Long = 0L
+    /** Speech-to-text that came just before a task (attached by [startTask] when recent). */
+    @Volatile private var lastStt: VoiceRec? = null
+    @Volatile private var lastSttAtMs: Long = 0L
+    private const val KEY_REDACT = "BENCHMARK_REDACT"
+
     /** Last engine load seen in this process (set by EngineHolder on every successful load). */
     @Volatile var lastEngine: EngineLoadInfo? = null
         private set
@@ -53,6 +61,10 @@ object BenchmarkRecorder {
         enabledCache = v
         return v
     }
+
+    /** Hide what was asked, names and screen text in exports and uploads (default on). */
+    fun isRedacting(): Boolean = try { KVUtils.getBoolean(KEY_REDACT, true) } catch (_: Throwable) { true }
+    fun setRedacting(on: Boolean) { try { KVUtils.putBoolean(KEY_REDACT, on) } catch (_: Throwable) {} }
 
     fun setEnabled(enabled: Boolean) {
         try { KVUtils.putBoolean(KEY_ENABLED, enabled) } catch (e: Throwable) { XLog.w(TAG, "setEnabled failed", e) }
@@ -97,6 +109,11 @@ object BenchmarkRecorder {
                 model = model,
                 device = DeviceCapabilityCheck.collectDeviceInfo(ctx),
             )
+            b.network = DeviceCapabilityCheck.networkType(ctx)
+            b.chargeStartUah = DeviceCapabilityCheck.chargeCounterUah(ctx)
+            b.language = try { io.agents.pokeclaw.lang.ReplyLanguageState.replyLanguage().code } catch (_: Throwable) { null }
+            if (System.currentTimeMillis() - lastSttAtMs < 60_000L) b.stt = lastStt
+            lastStt = null
             current = b
             TreeCompressionTrace.startRun()
             id
@@ -119,10 +136,84 @@ object BenchmarkRecorder {
         }
     }
 
-    fun onToolCall(name: String, ms: Long, success: Boolean) {
+    /** [status]: ok / fail / asked_user (a send or call parked until she says yes: not a failure). */
+    @JvmOverloads
+    fun onToolCall(name: String, ms: Long, success: Boolean, status: String? = null) {
         val b = current ?: return
+        val st = status ?: if (success) BenchmarkTagging.STATUS_OK else BenchmarkTagging.STATUS_FAIL
         synchronized(b) {
-            if (b.toolCalls.size < MAX_TOOL_CALLS) b.toolCalls += ToolCallRec(name, ms, success)
+            if (b.toolCalls.size < MAX_TOOL_CALLS) b.toolCalls += ToolCallRec(name, ms, success || st == BenchmarkTagging.STATUS_ASKED, st)
+        }
+    }
+
+    /** StuckDetector fired during the run. */
+    fun noteStuck(level: String, description: String) {
+        val b = current ?: return
+        synchronized(b) { b.stuckSignals++; b.lastStuck = "$level: ${description.take(80)}" }
+    }
+
+    /** Speech-to-text finished (before the task starts). */
+    fun noteStt(ms: Long, engine: String, chars: Int) {
+        if (!isEnabled()) return
+        lastStt = VoiceRec(sttMs = ms, sttEngine = engine, transcriptChars = chars)
+        lastSttAtMs = System.currentTimeMillis()
+    }
+
+    /** First spoken reply after the last run ended (fetch + start of playback). */
+    fun noteTts(ms: Long, engine: String) {
+        val ts = lastRunTs ?: return
+        if (current != null || System.currentTimeMillis() - lastRunEndMs > 90_000L) return
+        amendRun(ClawApplication.instance, ts) { r ->
+            if (r.voice?.ttsMs != null) null
+            else r.copy(voice = (r.voice ?: VoiceRec()).copy(ttsMs = ms, ttsEngine = engine))
+        }
+    }
+
+    /** Her answer to "shall I send it?" for the action the last run parked. */
+    fun onConfirmReply(reply: String, toolName: String?) {
+        val ts = lastRunTs ?: return
+        val wait = System.currentTimeMillis() - lastRunEndMs
+        amendRun(ClawApplication.instance, ts) { r ->
+            r.copy(confirm = ConfirmRec(reply = reply, tool = toolName, waitMs = wait))
+        }
+    }
+
+    /** Result of the action run after her yes. */
+    fun onConfirmedActionResult(toolName: String, ms: Long, success: Boolean, detail: String?) {
+        val ts = lastRunTs ?: return
+        amendRun(ClawApplication.instance, ts) { r ->
+            val c = r.confirm ?: ConfirmRec(reply = "yes", tool = toolName)
+            r.copy(confirm = c.copy(actionMs = ms, actionSuccess = success,
+                verifiedOnScreen = BenchmarkTagging.sendVerifiedOnScreen(detail),
+                actionDetail = detail?.replace('\n', ' ')?.take(160)))
+        }
+    }
+
+    /** The tester's own mark: did it really work? ("worked" / "failed"; null clears). */
+    fun setUserVerdict(context: Context, timestampMs: Long, verdict: String?) {
+        amendRun(context, timestampMs) { r -> r.copy(userVerdict = verdict, userVerdictAtMs = if (verdict == null) null else System.currentTimeMillis()) }
+    }
+
+    /** Rewrites the run with [timestampMs] in runs.jsonl; [fn] returns null to leave it alone. */
+    private fun amendRun(context: Context, timestampMs: Long, fn: (RunRecord) -> RunRecord?) {
+        try {
+            synchronized(writeLock) {
+                val f = runsFile(context)
+                if (!f.exists()) return
+                val lines = f.readLines()
+                var changed = false
+                val out = lines.map { line ->
+                    if (line.isBlank() || !line.contains(timestampMs.toString())) return@map line
+                    val r = try { gson.fromJson(line, RunRecord::class.java) } catch (_: Throwable) { null } ?: return@map line
+                    if (r.timestampMs != timestampMs) return@map line
+                    val n = fn(r) ?: return@map line
+                    changed = true
+                    gson.toJson(n)
+                }
+                if (changed) f.writeText(out.joinToString("\n", postfix = "\n"))
+            }
+        } catch (e: Throwable) {
+            XLog.w(TAG, "amendRun failed", e)
         }
     }
 
@@ -182,10 +273,10 @@ object BenchmarkRecorder {
     }
 
     /** LocalLlmClient: one native sendMessage (a chat() call can make 2 when the model's action JSON was broken). */
-    fun noteLocalSend(ms: Long, promptChars: Int) {
+    fun noteLocalSend(ms: Long, promptChars: Int, responseChars: Int = 0) {
         val b = current ?: return
         synchronized(b) {
-            if (b.localSends.size < MAX_LLM_CALLS) b.localSends += LocalSendRec(ms, promptChars)
+            if (b.localSends.size < MAX_LLM_CALLS) b.localSends += LocalSendRec(ms, promptChars, responseChars)
         }
     }
 
@@ -200,6 +291,8 @@ object BenchmarkRecorder {
         current = null
         try {
             val built = synchronized(b) { b.build(cancelled) }
+            lastRunTs = built.timestampMs
+            lastRunEndMs = System.currentTimeMillis()
             val traceName = writeTrace(ClawApplication.instance, built)
             val record = if (traceName != null) built.copy(treeTraceFile = traceName) else built
             append(ClawApplication.instance, record)
@@ -253,6 +346,30 @@ object BenchmarkRecorder {
         XLog.i(TAG, "benchmark run written (${line.length} chars)")
     }
 
+    /** runs.jsonl as exported / uploaded: what was asked, messages and names hidden when redacting. */
+    fun exportLines(context: Context, redact: Boolean = isRedacting()): List<String> {
+        val lines = synchronized(writeLock) {
+            val f = runsFile(context)
+            if (!f.exists()) emptyList() else f.readLines().filter { it.isNotBlank() }
+        }
+        if (!redact) return lines
+        return lines.map { line ->
+            val r = try { gson.fromJson(line, RunRecord::class.java) } catch (_: Throwable) { null } ?: return@map line
+            gson.toJson(redacted(r))
+        }
+    }
+
+    internal fun redacted(r: RunRecord): RunRecord = r.copy(
+        task = r.task?.copy(
+            text = if (r.task.text.isNullOrBlank()) r.task.text else BenchmarkTagging.HIDDEN,
+            outcomeMessage = if (r.task.outcomeMessage.isNullOrBlank()) r.task.outcomeMessage else BenchmarkTagging.HIDDEN,
+        ),
+        confirm = r.confirm?.copy(actionDetail = r.confirm.actionDetail?.let { BenchmarkTagging.HIDDEN }),
+        failure = r.failure?.copy(detail = r.failure.detail?.let { BenchmarkTagging.HIDDEN }),
+        treeTraceFile = null,
+        redacted = true,
+    )
+
     fun clear(context: Context) {
         synchronized(writeLock) {
             try { runsFile(context).delete() } catch (_: Throwable) {}
@@ -274,15 +391,12 @@ object BenchmarkRecorder {
     }
 
     /** Writes a CSV summary of every run to [out]. Returns the number of rows. */
-    fun writeCsv(context: Context, out: File): Int {
-        val lines = synchronized(writeLock) {
-            val f = runsFile(context)
-            if (!f.exists()) emptyList() else f.readLines()
-        }
+    fun writeCsv(context: Context, out: File, redact: Boolean = isRedacting()): Int {
+        val lines = exportLines(context, redact)
         var rows = 0
         out.parentFile?.mkdirs()
         out.bufferedWriter().use { w ->
-            w.write("timestamp,app_version,device,soc,ram_total_mb,mode,provider,model,backend,mtp,model_load_ms,task,total_ms,steps,llm_calls,avg_llm_ms,tool_calls,tree_captures,avg_raw_nodes,avg_pruned_nodes,avg_node_reduction_pct,avg_char_reduction_pct,avg_prune_ms,outcome,message\n")
+            w.write("timestamp,app_version,device,soc,ram_total_mb,mode,provider,model,backend,mtp,model_load_ms,task,total_ms,steps,llm_calls,avg_llm_ms,tool_calls,tree_captures,avg_raw_nodes,avg_pruned_nodes,avg_node_reduction_pct,avg_char_reduction_pct,avg_prune_ms,outcome,message,task_id,user_verdict,failure_reason,confirm_reply,wait_for_yes_ms,action_after_yes_ms,sent_verified_on_screen,stt_ms,tts_ms,language,network,battery_used_mah,est_local_input_tokens,est_local_output_tokens\n")
             for (line in lines) {
                 if (line.isBlank()) continue
                 val r = try { gson.fromJson(line, RunRecord::class.java) } catch (_: Throwable) { null } ?: continue
@@ -312,6 +426,20 @@ object BenchmarkRecorder {
                     r.averages?.avgPrunedBuildMs?.toString(),
                     r.task?.outcome,
                     r.task?.outcomeMessage,
+                    r.taskId,
+                    r.userVerdict,
+                    r.failure?.reason,
+                    r.confirm?.reply,
+                    r.confirm?.waitMs?.toString(),
+                    r.confirm?.actionMs?.toString(),
+                    r.confirm?.verifiedOnScreen?.toString(),
+                    r.voice?.sttMs?.toString(),
+                    r.voice?.ttsMs?.toString(),
+                    r.language,
+                    r.network,
+                    r.battery?.usedMah?.toString(),
+                    r.task?.estLocalInputTokens?.toString(),
+                    r.task?.estLocalOutputTokens?.toString(),
                 )
                 w.write(cols.joinToString(",") { csv(it) })
                 w.write("\n")
@@ -332,6 +460,10 @@ object BenchmarkRecorder {
             treeReductionPct = r.averages?.avgNodeReductionPct,
             outcome = r.task?.outcome ?: "?",
             treeTraceFile = r.treeTraceFile,
+            timestampMs = r.timestampMs ?: 0L,
+            taskId = r.taskId,
+            userVerdict = r.userVerdict,
+            failureReason = r.failure?.reason,
         )
     } catch (_: Throwable) {
         null
@@ -381,17 +513,39 @@ object BenchmarkRecorder {
         var actualModelName: String? = null
         var localBackend: String? = null
         var engineLoadedDuringTask: EngineLoadInfo? = null
+        var network: String? = null
+        var chargeStartUah: Long? = null
+        var language: String? = null
+        var stt: VoiceRec? = null
+        var stuckSignals = 0
+        var lastStuck: String? = null
 
         fun build(cancelled: Boolean): RunRecord {
             val end = System.currentTimeMillis()
             val ctx = ClawApplication.instance
             val engine = engineLoadedDuringTask
             val last = BenchmarkRecorder.lastEngine?.takeIf { isLocal && modelPath.endsWith(it.modelFile) }
+            val parked = toolCalls.lastOrNull()?.status == BenchmarkTagging.STATUS_ASKED
             val finalOutcome = when {
                 cancelled -> "cancelled"
+                outcome == "success" && parked -> "awaiting_yes"
                 outcome != null -> outcome
                 else -> "fail"
             }
+            val reason = BenchmarkTagging.failureReason(
+                finalOutcome, cancelled, outcomeMessage, llmCalls.count { !it.success }, stuckSignals,
+                toolCalls.map { BenchmarkTagging.ToolOutcome(it.name, it.success, it.status) },
+            )
+            val failure = reason?.let {
+                FailureRec(reason = it, atStep = steps, lastTool = toolCalls.lastOrNull()?.name,
+                    detail = (lastStuck ?: outcomeMessage)?.take(160))
+            }
+            val chargeEnd = DeviceCapabilityCheck.chargeCounterUah(ctx)
+            val battery = BatteryRec(
+                chargeStartMah = chargeStartUah?.div(1000),
+                chargeEndMah = chargeEnd?.div(1000),
+                usedMah = if (chargeStartUah != null && chargeEnd != null) (chargeStartUah!! - chargeEnd) / 1000 else null,
+            )
             val modelOut = model.copy(
                 modelName = model.modelName ?: actualModelName,
                 actualModelName = actualModelName,
@@ -416,6 +570,9 @@ object BenchmarkRecorder {
                 totalInputTokens = inTok.takeIf { it.isNotEmpty() }?.sum(),
                 totalOutputTokens = outTok.takeIf { it.isNotEmpty() }?.sum(),
                 failedLlmCalls = llmCalls.count { !it.success }.takeIf { it > 0 },
+                // LiteRT-LM gives no token counts: estimate ~4 characters a token.
+                estLocalInputTokens = localSends.takeIf { it.isNotEmpty() }?.sumOf { it.promptChars / 4 },
+                estLocalOutputTokens = localSends.takeIf { it.isNotEmpty() }?.sumOf { it.responseChars / 4 },
                 localSends = localSends.takeIf { it.isNotEmpty() }?.toList(),
                 toolCalls = toolCalls.toList(),
                 outcome = finalOutcome,
@@ -436,7 +593,13 @@ object BenchmarkRecorder {
                 avgFullBuildMs = pruned.takeIf { it.isNotEmpty() }?.map { it.fullBuildMs }?.average()?.let { BenchmarkRecorder.round2(it) },
             )
             return RunRecord(
-                schema = 1,
+                schema = 2,
+                taskId = BenchmarkTagging.taskId(taskText),
+                network = network,
+                language = language,
+                battery = battery,
+                voice = stt,
+                failure = failure,
                 timestamp = BenchmarkRecorder.istTimestamp(startMs),
                 timestampMs = startMs,
                 appVersion = BuildConfig.VERSION_NAME,
@@ -476,6 +639,16 @@ data class RunRecord(
     @SerializedName("tree") val tree: TreeRec? = null,
     @SerializedName("averages") val averages: AveragesRec? = null,
     @SerializedName("treeTraceFile") val treeTraceFile: String? = null,
+    @SerializedName("taskId") val taskId: String? = null,
+    @SerializedName("userVerdict") val userVerdict: String? = null,
+    @SerializedName("userVerdictAtMs") val userVerdictAtMs: Long? = null,
+    @SerializedName("failure") val failure: FailureRec? = null,
+    @SerializedName("confirm") val confirm: ConfirmRec? = null,
+    @SerializedName("voice") val voice: VoiceRec? = null,
+    @SerializedName("language") val language: String? = null,
+    @SerializedName("network") val network: String? = null,
+    @SerializedName("battery") val battery: BatteryRec? = null,
+    @SerializedName("redacted") val redacted: Boolean? = null,
 )
 
 data class ModelRec(
@@ -494,8 +667,27 @@ data class ModelRec(
 )
 
 data class LlmCallRec(@SerializedName("ms") val ms: Long, @SerializedName("inputTokens") val inputTokens: Int?, @SerializedName("outputTokens") val outputTokens: Int?, @SerializedName("success") val success: Boolean)
-data class ToolCallRec(@SerializedName("name") val name: String, @SerializedName("ms") val ms: Long, @SerializedName("success") val success: Boolean)
-data class LocalSendRec(@SerializedName("ms") val ms: Long, @SerializedName("promptChars") val promptChars: Int)
+data class ToolCallRec(@SerializedName("name") val name: String, @SerializedName("ms") val ms: Long, @SerializedName("success") val success: Boolean, @SerializedName("status") val status: String? = null)
+data class LocalSendRec(@SerializedName("ms") val ms: Long, @SerializedName("promptChars") val promptChars: Int, @SerializedName("responseChars") val responseChars: Int = 0)
+data class FailureRec(@SerializedName("reason") val reason: String, @SerializedName("atStep") val atStep: Int? = null, @SerializedName("lastTool") val lastTool: String? = null, @SerializedName("detail") val detail: String? = null)
+data class ConfirmRec(
+    @SerializedName("reply") val reply: String,
+    @SerializedName("tool") val tool: String? = null,
+    /** From the end of the run (question asked) to her answer. */
+    @SerializedName("waitMs") val waitMs: Long? = null,
+    @SerializedName("actionMs") val actionMs: Long? = null,
+    @SerializedName("actionSuccess") val actionSuccess: Boolean? = null,
+    @SerializedName("verifiedOnScreen") val verifiedOnScreen: Boolean? = null,
+    @SerializedName("actionDetail") val actionDetail: String? = null,
+)
+data class VoiceRec(
+    @SerializedName("sttMs") val sttMs: Long? = null,
+    @SerializedName("sttEngine") val sttEngine: String? = null,
+    @SerializedName("transcriptChars") val transcriptChars: Int? = null,
+    @SerializedName("ttsMs") val ttsMs: Long? = null,
+    @SerializedName("ttsEngine") val ttsEngine: String? = null,
+)
+data class BatteryRec(@SerializedName("chargeStartMah") val chargeStartMah: Long? = null, @SerializedName("chargeEndMah") val chargeEndMah: Long? = null, @SerializedName("usedMah") val usedMah: Long? = null)
 
 data class TaskRec(
     @SerializedName("text") val text: String? = null,
@@ -514,6 +706,8 @@ data class TaskRec(
     @SerializedName("toolCalls") val toolCalls: List<ToolCallRec>? = null,
     @SerializedName("outcome") val outcome: String? = null,
     @SerializedName("outcomeMessage") val outcomeMessage: String? = null,
+    @SerializedName("estLocalInputTokens") val estLocalInputTokens: Int? = null,
+    @SerializedName("estLocalOutputTokens") val estLocalOutputTokens: Int? = null,
 )
 
 data class TreeCaptureRec(
@@ -553,4 +747,8 @@ data class RunSummary(
     val treeReductionPct: Double?,
     val outcome: String,
     val treeTraceFile: String? = null,
+    val timestampMs: Long = 0L,
+    val taskId: String? = null,
+    val userVerdict: String? = null,
+    val failureReason: String? = null,
 )
