@@ -73,6 +73,9 @@ class AppViewModel : ViewModel() {
 
     fun isTaskRunning(): Boolean = taskSessionStore.isTaskRunning()
 
+    /** Next step of a split request, once the yes / no question that paused it is settled. */
+    fun resumeQueuedSteps() = taskOrchestrator.resumeQueuedSteps()
+
     /** Routes the events of the task with [messageId] to [onEvent] (e.g. a recreated chat screen). */
     fun attachTaskCallback(messageId: String, onEvent: (TaskEvent) -> Unit) {
         taskOrchestrator.setTaskEventCallback(messageId, onEvent)

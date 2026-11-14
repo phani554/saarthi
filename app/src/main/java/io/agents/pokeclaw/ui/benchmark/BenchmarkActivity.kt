@@ -11,6 +11,9 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -98,6 +101,7 @@ private fun BenchmarkScreen(onBack: () -> Unit) {
     var testResult by remember { mutableStateOf<RealTestResult?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
+    var traceText by remember { mutableStateOf<String?>(null) }
 
     fun reload() {
         scope.launch {
@@ -292,9 +296,32 @@ private fun BenchmarkScreen(onBack: () -> Unit) {
                     }
                 }
             }
-            items(runs) { r -> RunRow(r) }
+            items(runs) { r ->
+                RunRow(r, onShowTrace = {
+                    scope.launch {
+                        traceText = withContext(Dispatchers.IO) { BenchmarkRecorder.readTrace(context, r.treeTraceFile) }
+                            ?: "No trace for this run."
+                    }
+                })
+            }
             item { Spacer(Modifier.height(24.dp)) }
         }
+    }
+
+    traceText?.let { text ->
+        AlertDialog(
+            onDismissRequest = { traceText = null },
+            title = { Text("Tree compression", fontSize = TITLE) },
+            text = {
+                Text(
+                    text,
+                    fontSize = 13.sp,
+                    fontFamily = FontFamily.Monospace,
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                )
+            },
+            confirmButton = { TextButton(onClick = { traceText = null }) { Text("Close", fontSize = BODY) } },
+        )
     }
 
     if (confirmClear) {
@@ -337,7 +364,7 @@ private fun InfoLine(label: String, value: String) {
 }
 
 @Composable
-private fun RunRow(r: RunSummary) {
+private fun RunRow(r: RunSummary, onShowTrace: () -> Unit) {
     val color = when (r.outcome) {
         "success" -> GREEN
         "cancelled" -> AMBER
@@ -359,6 +386,9 @@ private fun RunRow(r: RunSummary) {
             Text(outcomeText, fontSize = BODY, color = color, fontWeight = FontWeight.Bold)
         }
         Text(r.timestamp, fontSize = 14.sp, color = Color.Gray)
+        if (r.treeTraceFile != null) {
+            TextButton(onClick = onShowTrace) { Text("Show tree compression, step by step", fontSize = BODY) }
+        }
     }
 }
 
@@ -384,12 +414,18 @@ private fun buildExportIntent(context: Context): Intent? {
             FileProvider.getUriForFile(context, authority, jsonl),
             FileProvider.getUriForFile(context, authority, csv),
         )
+        // Spelled-out tree compression of each traced run (for the demo / report).
+        BenchmarkRecorder.tracesDir(context).listFiles()?.sortedBy { it.name }?.forEach { t ->
+            val copy = File(dir, t.name)
+            t.copyTo(copy, overwrite = true)
+            uris += FileProvider.getUriForFile(context, authority, copy)
+        }
         Intent(Intent.ACTION_SEND_MULTIPLE).apply {
             type = "text/plain"
             putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
             putExtra(Intent.EXTRA_SUBJECT, "Saathi benchmark")
             clipData = ClipData.newUri(context.contentResolver, "runs.jsonl", uris[0]).apply {
-                addItem(ClipData.Item(uris[1]))
+                uris.drop(1).forEach { addItem(ClipData.Item(it)) }
             }
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }

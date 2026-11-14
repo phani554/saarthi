@@ -34,49 +34,35 @@ object TaskDependencyGraph {
      * Resolve and adapt a dependent task prompt based on the prerequisite task's recorded outcome.
      */
     fun adaptDependentTask(task: QueuedTask): QueuedTask {
-        val prereqId = task.dependsOnId ?: return task
-        val outcome = taskResultStore[prereqId] ?: return task
-
-        XLog.i(TAG, "Adapting dependent task '${task.messageId}' based on prerequisite '$prereqId' outcome: success=${outcome.isSuccess}")
-
-        if (outcome.isSuccess) {
-            val adaptedText = adaptSuccessPrompt(task.taskText, outcome.summary)
-            return task.copy(taskText = adaptedText)
-        } else {
-            return if (task.failureBehavior == QueuedTask.FailureBehavior.CANCEL_DEPENDENTS) {
-                XLog.w(TAG, "Prerequisite '$prereqId' failed. Cancelling dependent task '${task.taskText}'")
-                task.copy(taskText = "") // Empty text signals cancelled task
-            } else {
-                val failureAdaptedText = adaptFailurePrompt(task.taskText, outcome.summary)
-                XLog.i(TAG, "Prerequisite '$prereqId' failed. Adapted message to report failure truthfully: '$failureAdaptedText'")
-                task.copy(taskText = failureAdaptedText)
-            }
+        val outcome = task.dependsOnId?.let { taskResultStore[it] }
+        if (outcome != null && !outcome.isSuccess && task.failureBehavior == QueuedTask.FailureBehavior.CANCEL_DEPENDENTS) {
+            XLog.w(TAG, "Prerequisite '${task.dependsOnId}' failed. Cancelling dependent task '${task.messageId}'")
+            return task.copy(taskText = "") // Empty text signals cancelled task
         }
+        if (task.stepCount <= 1 && outcome == null) return task
+        // The step's own words stay the task text (routing and playbooks read it); the agent also gets the
+        // whole request and what the step before it found, so "send the cart total" knows the total.
+        val context = buildContext(task, outcome)
+        XLog.i(TAG, "Step ${task.stepIndex + 1}/${task.stepCount} '${task.messageId}' gets context (prereq=${outcome?.isSuccess})")
+        return task.copy(agentPromptOverride = TaskPromptEnvelope.build(emptyList(), task.taskText, context))
     }
 
-    private fun adaptSuccessPrompt(originalPrompt: String, prereqSummary: String): String {
-        val lower = originalPrompt.lowercase()
-        return when {
-            lower.contains("inform") || lower.contains("tell") || lower.contains("send") || lower.contains("message") -> {
-                val contactMatch = Regex("""(?i)\b(?:inform|tell|message)\s+([a-zA-Z0-9\s]+?)\s+that\b""").find(originalPrompt)
-                val contact = contactMatch?.groupValues?.get(1)?.trim() ?: return originalPrompt
-                "Send message to $contact: 'Done: $prereqSummary.'"
-            }
-            // Order tasks keep the user's own wording: the prerequisite's summary is a tool result
-            // ("✓ send_message executed ..."), not a product, and no store may be invented.
-            else -> originalPrompt
+    internal fun buildContext(task: QueuedTask, outcome: TaskOutcome?): String = buildString {
+        if (task.parentGoal.isNotBlank()) {
+            append("Her whole request: \"").append(task.parentGoal.trim()).append("\"\n")
         }
-    }
-
-    private fun adaptFailurePrompt(originalPrompt: String, prereqFailureReason: String): String {
-        val lower = originalPrompt.lowercase()
-        return when {
-            lower.contains("inform") || lower.contains("tell") || lower.contains("send") || lower.contains("message") -> {
-                val contactMatch = Regex("""(?i)\b(?:inform|tell|message)\s+([a-zA-Z0-9\s]+?)\s+that\b""").find(originalPrompt)
-                val contact = contactMatch?.groupValues?.get(1)?.trim() ?: return originalPrompt
-                "Send message to $contact: 'Could not complete the earlier step ($prereqFailureReason).'"
+        append("This is step ").append(task.stepIndex + 1).append(" of ").append(task.stepCount)
+            .append(". Do only this step now; the other steps run separately.\n")
+        when {
+            outcome == null -> Unit
+            outcome.isSuccess -> {
+                append("The previous step finished: ").append(outcome.summary.trim().take(600)).append("\n")
+                append("Use its result (amounts, items, names) directly; do not open apps again to re-check it unless it is missing.")
             }
-            else -> originalPrompt
+            else -> {
+                append("The previous step FAILED: ").append(outcome.summary.trim().take(300)).append("\n")
+                append("Do not claim it succeeded. If this step tells someone about it, tell them truthfully that it could not be done.")
+            }
         }
     }
 

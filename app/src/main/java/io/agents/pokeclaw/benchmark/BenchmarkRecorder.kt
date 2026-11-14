@@ -98,6 +98,7 @@ object BenchmarkRecorder {
                 device = DeviceCapabilityCheck.collectDeviceInfo(ctx),
             )
             current = b
+            TreeCompressionTrace.startRun()
             id
         } catch (e: Throwable) {
             XLog.w(TAG, "startTask failed", e)
@@ -198,7 +199,9 @@ object BenchmarkRecorder {
         if (b.id != runId) return
         current = null
         try {
-            val record = synchronized(b) { b.build(cancelled) }
+            val built = synchronized(b) { b.build(cancelled) }
+            val traceName = writeTrace(ClawApplication.instance, built)
+            val record = if (traceName != null) built.copy(treeTraceFile = traceName) else built
             append(ClawApplication.instance, record)
         } catch (e: Throwable) {
             XLog.w(TAG, "finishTask: could not write benchmark run", e)
@@ -208,6 +211,37 @@ object BenchmarkRecorder {
     // ==================== Storage ====================
 
     fun runsFile(context: Context): File = File(File(context.filesDir, DIR), RUNS_FILE)
+
+    /** Folder holding one spelled-out tree compression trace per recorded run. */
+    fun tracesDir(context: Context): File = File(File(context.filesDir, DIR), "traces")
+
+    private fun writeTrace(context: Context, r: RunRecord): String? = try {
+        val header = buildString {
+            append("Task: ").append(r.task?.text ?: "?").append("\n")
+            append("Time: ").append(r.timestamp ?: "?").append("  Model: ").append(r.model?.modelName ?: r.model?.localModelFile ?: "?")
+            append("  Outcome: ").append(r.task?.outcome ?: "?").append("\n")
+            r.averages?.let {
+                append("Run average: ").append(it.avgRawNodes ?: "?").append(" -> ").append(it.avgPrunedNodes ?: "?")
+                    .append(" nodes (").append(it.avgNodeReductionPct ?: "?").append("% fewer), ")
+                    .append(it.avgRawChars ?: "?").append(" -> ").append(it.avgPrunedChars ?: "?")
+                    .append(" chars (").append(it.avgCharReductionPct ?: "?").append("% smaller) over ")
+                    .append(r.tree?.captureCount ?: 0).append(" screens.")
+            }
+        }
+        TreeCompressionTrace.takeRunText(header)?.let { text ->
+            val name = "run-${r.timestampMs ?: System.currentTimeMillis()}.md"
+            val dir = tracesDir(context).apply { mkdirs() }
+            File(dir, name).writeText(text)
+            name
+        }
+    } catch (e: Throwable) {
+        XLog.w(TAG, "tree trace not written", e)
+        null
+    }
+
+    /** The trace text of a run, or null. */
+    fun readTrace(context: Context, name: String?): String? =
+        name?.let { File(tracesDir(context), it) }?.takeIf { it.exists() }?.readText()
 
     private fun append(context: Context, record: RunRecord) {
         val line = gson.toJson(record)
@@ -222,6 +256,7 @@ object BenchmarkRecorder {
     fun clear(context: Context) {
         synchronized(writeLock) {
             try { runsFile(context).delete() } catch (_: Throwable) {}
+            try { tracesDir(context).deleteRecursively() } catch (_: Throwable) {}
         }
     }
 
@@ -296,6 +331,7 @@ object BenchmarkRecorder {
             steps = r.task?.steps ?: 0,
             treeReductionPct = r.averages?.avgNodeReductionPct,
             outcome = r.task?.outcome ?: "?",
+            treeTraceFile = r.treeTraceFile,
         )
     } catch (_: Throwable) {
         null
@@ -439,6 +475,7 @@ data class RunRecord(
     @SerializedName("task") val task: TaskRec? = null,
     @SerializedName("tree") val tree: TreeRec? = null,
     @SerializedName("averages") val averages: AveragesRec? = null,
+    @SerializedName("treeTraceFile") val treeTraceFile: String? = null,
 )
 
 data class ModelRec(
@@ -515,4 +552,5 @@ data class RunSummary(
     val steps: Int,
     val treeReductionPct: Double?,
     val outcome: String,
+    val treeTraceFile: String? = null,
 )

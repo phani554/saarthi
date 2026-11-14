@@ -78,7 +78,7 @@ object SearchBarService {
         var root = service.rootInActiveWindow ?: return null
         val pkgName = root.packageName?.toString().orEmpty()
 
-        if (pkgName == "com.flipkart.android") {
+        if (pkgName == "com.flipkart.android" && io.agents.pokeclaw.agent.ShoppingStoreRouter.current == io.agents.pokeclaw.agent.ShoppingStoreRouter.Mode.MINUTES) {
             NodeFinder.ensureFlipkartMinutesMode(service)
             root = service.rootInActiveWindow ?: root
         }

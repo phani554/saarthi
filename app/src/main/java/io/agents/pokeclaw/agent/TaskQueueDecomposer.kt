@@ -15,6 +15,10 @@ object TaskQueueDecomposer {
 
     private const val TAG = "TaskDecomposer"
 
+    private val SPLIT = Regex(
+        """(?i),?\s*\b(?:and\s+then|after\s+that|then)\b\s+|,?\s+and\s+(?=(?:send|tell|message|share|inform|whatsapp|text|call|ask)\b)"""
+    )
+
     /**
      * Try to decompose a compound task prompt into atomic sub-tasks.
      * Returns list of atomic task text strings, or empty list if task is single-intent.
@@ -25,7 +29,9 @@ object TaskQueueDecomposer {
 
         // Only explicit sequencing words split a task. Commas never do: "milk, bread and eggs on blinkit"
         // is one order, not verb-less sub-tasks.
-        val parts = clean.split(Regex("""(?i),?\s*\b(?:and\s+then|after\s+that|then)\b\s+"""))
+        // "... and send / tell / message / share ..." also starts a new step: a cart plus a message to
+        // someone are two jobs, and the message needs the first job's result.
+        val parts = clean.split(SPLIT)
             .map { it.trim().trimEnd(',').trim() }
             .filter { it.length > 3 }
 
@@ -38,15 +44,12 @@ object TaskQueueDecomposer {
     /**
      * Enqueue a decomposed sub-task list into TaskQueueManager with dynamic dependency links.
      */
-    fun enqueueSubTasks(parts: List<String>, channel: Channel, baseMessageId: String) {
+    fun enqueueSubTasks(parts: List<String>, channel: Channel, baseMessageId: String, parentGoal: String = parts.joinToString(", then ")) {
         parts.forEachIndexed { index, subTaskText ->
             val subMsgId = "${baseMessageId}_sub_$index"
-            val lower = subTaskText.lowercase()
-            val isDependent = index > 0 && (
-                lower.contains("inform") || lower.contains("tell") || lower.contains("say") ||
-                lower.contains("message") || lower.contains("let ") || lower.contains("once") || lower.contains("after")
-            )
-            val dependsOnId = if (isDependent) "${baseMessageId}_sub_${index - 1}" else null
+            // Every later step gets the step before it (its result, or that it failed): "send the cart
+            // total" is useless without the cart step's total. The old keyword test missed "send"/"share".
+            val dependsOnId = if (index > 0) "${baseMessageId}_sub_${index - 1}" else null
 
             TaskQueueManager.enqueue(
                 QueuedTask(
@@ -54,7 +57,10 @@ object TaskQueueDecomposer {
                     taskText = subTaskText,
                     messageId = subMsgId,
                     dependsOnId = dependsOnId,
-                    failureBehavior = QueuedTask.FailureBehavior.ADAPT_MESSAGE
+                    failureBehavior = QueuedTask.FailureBehavior.ADAPT_MESSAGE,
+                    parentGoal = parentGoal,
+                    stepIndex = index,
+                    stepCount = parts.size,
                 )
             )
         }

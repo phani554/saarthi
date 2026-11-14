@@ -20,7 +20,7 @@ object FlipkartMinutesSwitch {
     const val X_FRAC = 0.381f
     const val Y_FRAC = 0.073f
 
-    fun wanted(task: String): Boolean = Regex("""(?i)\bminutes?\b""").containsMatchIn(task)
+    fun wanted(task: String): Boolean = ShoppingStoreRouter.modeFor(task) == ShoppingStoreRouter.Mode.MINUTES
 
     fun point(width: Int, height: Int): Pair<Int, Int> = Pair((width * X_FRAC).toInt(), (height * Y_FRAC).toInt())
 

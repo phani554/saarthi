@@ -628,8 +628,9 @@ public class ClawAccessibilityService extends AccessibilityService {
             // Benchmark hook: one volatile read when benchmark mode is off.
             final boolean bench = io.agents.pokeclaw.benchmark.BenchmarkRecorder.isRecording();
             final long benchT0 = bench ? System.nanoTime() : 0L;
+            final boolean trace = bench && io.agents.pokeclaw.benchmark.TreeCompressionTrace.begin();
             boolean rootCached = buildNodeTree(root, sb, 0);
-            if (bench) recordBenchmarkCapture(root, sb.length(), nodeCounter.get(), System.nanoTime() - benchT0);
+            if (bench) recordBenchmarkCapture(root, sb.length(), nodeCounter.get(), System.nanoTime() - benchT0, trace ? sb.toString() : null);
             // The root is cached when it is itself a listed node; otherwise it is ours to recycle.
             if (!rootCached) io.agents.pokeclaw.a11y.NodeRecycler.recycle(root);
             return sb.toString();
@@ -738,7 +739,7 @@ public class ClawAccessibilityService extends AccessibilityService {
      * Benchmark only (called when BenchmarkRecorder.isRecording()): builds the full dump of the same root
      * and records raw vs pruned size. Never throws.
      */
-    private void recordBenchmarkCapture(AccessibilityNodeInfo root, int prunedChars, int prunedNodes, long prunedNanos) {
+    private void recordBenchmarkCapture(AccessibilityNodeInfo root, int prunedChars, int prunedNodes, long prunedNanos, String prunedTextForTrace) {
         try {
             long t0 = System.nanoTime();
             StringBuilder full = new StringBuilder();
@@ -748,6 +749,11 @@ public class ClawAccessibilityService extends AccessibilityService {
             io.agents.pokeclaw.benchmark.BenchmarkRecorder.onScreenCapture(
                     benchFullNodeCount.get(), full.length(), prunedNodes, prunedChars,
                     prunedNanos / 1_000_000.0, fullMs, "pruned");
+            if (prunedTextForTrace != null) {
+                io.agents.pokeclaw.benchmark.TreeCompressionTrace.finishScreen(
+                        root.getPackageName() != null ? root.getPackageName().toString() : null,
+                        benchFullNodeCount.get(), full.toString(), prunedNodes, prunedTextForTrace);
+            }
         } catch (Throwable t) {
             XLog.w(TAG, "benchmark capture failed: " + t.getMessage());
         }
@@ -811,12 +817,14 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (node.getPackageName() != null) {
             String pkg = node.getPackageName().toString().toLowerCase();
             if (pkg.contains("inputmethod") || pkg.contains("keyboard") || pkg.contains("honeyboard") || pkg.contains("swiftkey")) {
+                io.agents.pokeclaw.benchmark.TreeCompressionTrace.onKeyboard(node);
                 return false;
             }
         }
 
         // Skip nodes not visible on screen (elements in scroll containers that are off-screen)
         if (!node.isVisibleToUser()) {
+            io.agents.pokeclaw.benchmark.TreeCompressionTrace.onInvisible(node);
             // Still traverse child nodes, because a parent being invisible does not mean all children are invisible
             for (int i = 0; i < node.getChildCount(); i++) {
                 AccessibilityNodeInfo child = node.getChild(i);
@@ -866,11 +874,14 @@ public class ClawAccessibilityService extends AccessibilityService {
             if (hasText) {
                 CharSequence text = node.getText();
                 line.append("\"").append(text.length() > 120 ? text.subSequence(0, 120) + ".." : text).append("\"");
+                if (text.length() > 120) io.agents.pokeclaw.benchmark.TreeCompressionTrace.onTruncated();
             }
             if (hasDesc) {
                 CharSequence desc = node.getContentDescription();
                 if (!hasText || !desc.toString().equals(node.getText().toString())) {
                     line.append(" desc=\"").append(desc.length() > 120 ? desc.subSequence(0, 120) + ".." : desc).append("\"");
+                } else {
+                    io.agents.pokeclaw.benchmark.TreeCompressionTrace.onDuplicateDesc();
                 }
             }
             CharSequence hint = node.getHintText();
@@ -893,7 +904,12 @@ public class ClawAccessibilityService extends AccessibilityService {
 
             if (line.length() > 0) {
                 sb.append(line).append("\n");
+                if (io.agents.pokeclaw.benchmark.TreeCompressionTrace.active()) {
+                    io.agents.pokeclaw.benchmark.TreeCompressionTrace.onKept(node, line.toString());
+                }
             }
+        } else {
+            io.agents.pokeclaw.benchmark.TreeCompressionTrace.onContainer(node);
         }
 
         // Child depth: if current node was skipped (not meaningful), children keep the same depth level

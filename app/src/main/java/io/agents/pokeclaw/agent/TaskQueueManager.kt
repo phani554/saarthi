@@ -14,7 +14,11 @@ data class QueuedTask(
     val messageId: String,
     val agentPromptOverride: String? = null,
     val dependsOnId: String? = null,
-    val failureBehavior: FailureBehavior = FailureBehavior.ADAPT_MESSAGE
+    val failureBehavior: FailureBehavior = FailureBehavior.ADAPT_MESSAGE,
+    /** The whole request she gave, so every step knows what the steps are for. */
+    val parentGoal: String = "",
+    val stepIndex: Int = 0,
+    val stepCount: Int = 1,
 ) {
     enum class FailureBehavior {
         CANCEL_DEPENDENTS,
@@ -43,6 +47,12 @@ object TaskQueueManager {
         synchronized(lock) {
             if (queue.isEmpty()) return
             if (orchestrator.isTaskRunning()) return
+            // A step is waiting for her yes / no: the next step waits too (it may need that answer, and
+            // starting it would take the screen and the mic away from the question).
+            if (OutboundConfirmGate.pendingCount() > 0) {
+                XLog.i(TAG, "Queue paused: a message / call waits for the user's answer (${queue.size} step(s) left)")
+                return
+            }
 
             val rawTask = queue.removeFirst()
             val nextTask = TaskDependencyGraph.adaptDependentTask(rawTask)
@@ -72,4 +82,9 @@ object TaskQueueManager {
     }
 
     fun size(): Int = synchronized(lock) { queue.size }
+
+    /** True while steps of the request [baseMessageId] are still waiting to run. */
+    fun hasPendingFor(baseMessageId: String): Boolean = synchronized(lock) {
+        queue.any { it.messageId.substringBefore("_sub_") == baseMessageId }
+    }
 }

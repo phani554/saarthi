@@ -25,7 +25,9 @@ class MinutesAndSwipeTest {
 
     @Test fun minutesTileIsAPosition() {
         assertTrue(FlipkartMinutesSwitch.wanted("Add KitKat to my Flipkart minutes cart"))
-        assertFalse(FlipkartMinutesSwitch.wanted("Add KitKat to my Flipkart cart"))
+        // Patch 22: snacks go to Minutes even without the word; clothes never do.
+        assertTrue(FlipkartMinutesSwitch.wanted("Add KitKat to my Flipkart cart"))
+        assertFalse(FlipkartMinutesSwitch.wanted("Order a red frock on Flipkart"))
         val (x, y) = FlipkartMinutesSwitch.point(1260, 2800)
         assertTrue(x in 348..612 && y in 126..282)
     }

@@ -74,7 +74,7 @@ object EcommerceAutomationHelper {
         }
 
         // 1. Switch Flipkart to Minutes mode if on Flipkart
-        if (pkg == "com.flipkart.android") {
+        if (pkg == "com.flipkart.android" && io.agents.pokeclaw.agent.ShoppingStoreRouter.current == io.agents.pokeclaw.agent.ShoppingStoreRouter.Mode.MINUTES) {
             NodeFinder.ensureFlipkartMinutesMode(service)
         }
 

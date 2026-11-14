@@ -50,8 +50,30 @@ class TaskOrchestrator(
         taskEventCallbacks.clear()
     }
 
+    /**
+     * Listener of a split request, kept until its last step ends. The chat screen drops its listeners
+     * when a step completes, which used to leave step 2 ("send the total to Kamya?") with nobody to show
+     * or speak its question.
+     */
+    private val parentCallbacks = java.util.concurrent.ConcurrentHashMap<String, (TaskEvent) -> Unit>()
+
+    private fun baseId(messageId: String) = messageId.substringBefore("_sub_")
+
+    /** Records a step's result for the step after it, and forgets the request's listener after its last step. */
+    private fun settleStep(messageId: String, ok: Boolean, summary: String) {
+        if (!messageId.contains("_sub_")) return
+        io.agents.pokeclaw.agent.TaskDependencyGraph.recordOutcome(messageId, ok, summary)
+        val base = baseId(messageId)
+        if (!TaskQueueManager.hasPendingFor(base)) parentCallbacks.remove(base)
+    }
+
+    /** Runs the next step of a split request (after she answered a yes / no question). */
+    fun resumeQueuedSteps() {
+        TaskQueueManager.processNext(this)
+    }
+
     private fun callbackFor(messageId: String): ((TaskEvent) -> Unit)? =
-        taskEventCallbacks[messageId] ?: taskEventCallbacks[messageId.substringBefore("_sub_")]
+        taskEventCallbacks[messageId] ?: taskEventCallbacks[baseId(messageId)] ?: parentCallbacks[baseId(messageId)]
 
     companion object {
         private const val TAG = "TaskOrchestrator"
@@ -121,6 +143,7 @@ class TaskOrchestrator(
 
     fun cancelCurrentTask() {
         GlobalTaskStateCleaner.cleanAll("Task cancelled by user")
+        parentCallbacks.clear()
         if (!taskSessionStore.markStopping()) return
         if (::agentService.isInitialized) {
             agentService.cancel()
@@ -167,8 +190,9 @@ class TaskOrchestrator(
         val decomposedParts = TaskQueueDecomposer.decompose(task)
         if (decomposedParts.size > 1) {
             XLog.i(TAG, "TaskOrchestrator: decomposing compound task into ${decomposedParts.size} atomic sub-tasks: $decomposedParts")
+            callbackFor(messageID)?.let { parentCallbacks[messageID] = it }
             // Enqueue before releasing the lock so another message cannot slip in between.
-            TaskQueueDecomposer.enqueueSubTasks(decomposedParts, channel, messageID)
+            TaskQueueDecomposer.enqueueSubTasks(decomposedParts, channel, messageID, parentGoal = task)
             taskSessionStore.release()
             TaskQueueManager.processNext(this)
             return
@@ -188,6 +212,7 @@ class TaskOrchestrator(
                     XLog.e(TAG, "Tier 1 intent failed: ${route.intent.action}", e)
                     false
                 }
+                settleStep(messageID, intentOk, route.description)
                 if (intentOk) {
                     callbackFor(messageID)?.invoke(TaskEvent.Completed(route.description))
                     ChannelManager.sendMessage(channel, "✓ ${route.description}", messageID)
@@ -213,6 +238,7 @@ class TaskOrchestrator(
                 }
                 val toolOk = result.isSuccess
                 val askUser = io.agents.pokeclaw.agent.OutboundConfirmGate.isAskResult(result)
+                settleStep(messageID, toolOk || askUser, if (askUser) "waiting for her yes: ${route.description}" else (result.data ?: result.error ?: route.description))
                 if (askUser) {
                     // Message / call parked until the user says yes: the "result" is the question to her.
                     val question = io.agents.pokeclaw.agent.OutboundConfirmGate.pendingQuestion() ?: route.description
@@ -426,6 +452,7 @@ class TaskOrchestrator(
                 if (answer.isEmpty()) answer = "Done."
                 try { io.agents.pokeclaw.agent.knowledge.MemoryManager.rememberTaskOutcome(task, true, answer) } catch (e: Exception) { XLog.w(TAG, "rememberTaskOutcome failed", e) }
                 callbackFor(messageID)?.invoke(TaskEvent.Completed(answer, modelName))
+                settleStep(messageID, true, answer)
                 ForegroundService.resetToIdle(ClawApplication.instance)
                 flushRoundBuffer()
                 val completedSession = releaseTask()
@@ -451,6 +478,7 @@ class TaskOrchestrator(
             override fun onError(round: Int, error: Exception, totalTokens: Int) {
                 XLog.e(TAG, "onError: ${error.message}, totalTokens=$totalTokens", error)
                 callbackFor(messageID)?.invoke(TaskEvent.Failed(error.message ?: "Unknown error"))
+                settleStep(messageID, false, error.message ?: "Unknown error")
                 ForegroundService.resetToIdle(ClawApplication.instance)
                 flushRoundBuffer()
                 val failedSession = releaseTask()
@@ -469,6 +497,7 @@ class TaskOrchestrator(
             override fun onSystemDialogBlocked(round: Int, totalTokens: Int) {
                 XLog.w(TAG, "onSystemDialogBlocked: round=$round, totalTokens=$totalTokens")
                 callbackFor(messageID)?.invoke(TaskEvent.Blocked)
+                settleStep(messageID, false, "blocked by a system dialog")
                 flushRoundBuffer()
                 val blockedSession = releaseTask()
                 val blockedChannel = blockedSession.channel ?: channel

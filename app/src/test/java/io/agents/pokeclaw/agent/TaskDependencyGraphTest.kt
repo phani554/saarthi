@@ -28,9 +28,9 @@ class TaskDependencyGraphTest {
         )
 
         val adapted = TaskDependencyGraph.adaptDependentTask(dependentTask)
-        // Since d9907c3 ("honest results") the message reports what actually happened, not the user's guess.
-        assertTrue(adapted.taskText, adapted.taskText.startsWith("Send message to Mom:"))
-        assertTrue(adapted.taskText, adapted.taskText.contains("Done: Amul Taaza 1L Milk added to cart"))
+        // Patch 22: the step text stays; what actually happened rides in the prompt for the model.
+        val prompt = adapted.agentPromptOverride ?: ""
+        assertTrue(prompt, prompt.contains("Amul Taaza 1L Milk added to cart"))
     }
 
     @Test
@@ -47,8 +47,8 @@ class TaskDependencyGraphTest {
         )
 
         val adapted = TaskDependencyGraph.adaptDependentTask(dependentTask)
-        assertTrue(adapted.taskText, adapted.taskText.startsWith("Send message to Mom:"))
-        assertTrue(adapted.taskText, adapted.taskText.contains("Could not complete the earlier step"))
-        assertTrue(adapted.taskText, adapted.taskText.contains("Amul Taaza 1L Milk is out of stock on Blinkit"))
+        val prompt = adapted.agentPromptOverride ?: ""
+        assertTrue(prompt, prompt.contains("Amul Taaza 1L Milk is out of stock on Blinkit"))
+        assertTrue(prompt, prompt.lowercase().contains("fail") || prompt.lowercase().contains("could not"))
     }
 }

@@ -534,6 +534,11 @@ class DefaultAgentService : AgentService {
         val saved = charsBefore - charsAfter
         if (saved > 0) {
             XLog.i(TAG, "Context compressed: ${charsBefore}→${charsAfter} chars, saved ${saved} chars (${saved * 100 / charsBefore}%), rounds=${aiIndices.size}")
+            if (io.agents.pokeclaw.benchmark.BenchmarkRecorder.isRecording()) {
+                val example = messages.filterIsInstance<ToolExecutionResultMessage>().firstOrNull { it.text().length in 1..200 }
+                    ?.let { "${it.toolName()}: ${it.text()}" }
+                io.agents.pokeclaw.benchmark.TreeCompressionTrace.onHistoryCompressed(aiIndices.size, charsBefore, charsAfter, example)
+            }
         }
     }
 
@@ -597,6 +602,10 @@ class DefaultAgentService : AgentService {
         val inAppSearchGuard = InAppSearchGuard.fromTask(optimizedUserRequest)
         val emailComposeGuard = EmailComposeGuard.fromTask(optimizedUserRequest)
         val directDeviceDataGuard = DirectDeviceDataGuard.fromTask(optimizedUserRequest)
+        // Flipkart Minutes vs the regular store: decided from her own words (the rewriter can carry "Minutes"
+        // over from an earlier cart in memory), never from the tab Flipkart last showed.
+        val storeMode = ShoppingStoreRouter.modeFor(rawUserRequest)
+        ShoppingStoreRouter.current = storeMode
 
         // For local LLM, inject matching playbook into system prompt
         val playbookSection = if (config.provider == LlmProvider.LOCAL) {
@@ -625,6 +634,7 @@ class DefaultAgentService : AgentService {
             append(inAppSearchGuard.buildPromptSection())
             append(emailComposeGuard.buildPromptSection())
             append(directDeviceDataGuard.buildPromptSection())
+            append(ShoppingStoreRouter.promptSection(rawUserRequest, storeMode))
             append(buildDeviceContext())
         }
 
@@ -979,7 +989,7 @@ class DefaultAgentService : AgentService {
                 // Flipkart's Minutes tab is an image with no text: switch to it in code once per task.
                 if (toolName == "open_app" && result.isSuccess &&
                     params.values.any { it?.toString()?.contains("flipkart", true) == true } &&
-                    FlipkartMinutesSwitch.wanted(TaskExecutionState.instance.taskGoal) && !minutesSwitchDone
+                    storeMode == ShoppingStoreRouter.Mode.MINUTES && !minutesSwitchDone
                 ) {
                     minutesSwitchDone = true
                     try {

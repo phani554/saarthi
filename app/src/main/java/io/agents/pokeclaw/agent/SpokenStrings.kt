@@ -58,6 +58,15 @@ object SpokenStrings {
     }
 
     @JvmStatic
+    /** Her reply to "send ...? yes or no?" was something else: the message was not sent. */
+    fun notSentCancelled(): String = pick(
+        { "वह संदेश नहीं भेजा गया।" },
+        { "तो संदेश पाठवला नाही." },
+        { "ఆ సందేశం పంపలేదు." },
+        { "That message was not sent." }
+    )
+
+    @JvmStatic
     fun declined(): String = pick(
         { "ठीक है, नहीं किया।" },
         { "ठीक आहे, केलं नाही." },

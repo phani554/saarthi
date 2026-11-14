@@ -433,6 +433,8 @@ class TaskFlowController(
             OutboundConfirmGate.Reply.NO -> {
                 // Drop only the action she was asked about; a queued one behind it is asked next.
                 val more = OutboundConfirmGate.decline()
+                // She said no to part of a split request: the steps after it are dropped, not run blind.
+                if (!more) io.agents.pokeclaw.agent.TaskQueueManager.clear()
                 VoiceManager.onPlaybackFinished = null
                 currentVoiceState = VoiceInteractionState.IDLE
                 clearPreTaskHistory()
@@ -445,7 +447,15 @@ class TaskFlowController(
                 true
             }
             OutboundConfirmGate.Reply.OTHER -> {
+                // Not a yes or no: say plainly that nothing was sent, so a parked message is never lost
+                // silently, then handle her words as a new request.
+                val dropped = OutboundConfirmGate.peek()
                 OutboundConfirmGate.clear()
+                io.agents.pokeclaw.agent.TaskQueueManager.clear()
+                if (dropped != null) {
+                    XLog.i(TAG, "Reply was neither yes nor no: dropped parked ${dropped.toolName} and the queued steps")
+                    addSystem(SpokenStrings.notSentCancelled())
+                }
                 false
             }
         }
@@ -486,6 +496,8 @@ class TaskFlowController(
                     cleanupAfterTask()
                     // Another send / call may have been queued behind this one: ask it now.
                     askNextQueuedConfirmation()
+                    // Otherwise the next step of a split request ("... then share the price") runs now.
+                    if (OutboundConfirmGate.pendingCount() == 0) appViewModel.resumeQueuedSteps()
                 }
             } catch (e: Exception) {
                 XLog.e(TAG, "executeDirectToolTask failed: ${e.message}", e)
