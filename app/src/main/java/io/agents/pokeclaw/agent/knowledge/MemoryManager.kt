@@ -210,10 +210,12 @@ ${io.agents.pokeclaw.care.CareMemoryLearner.AI_SCHEMA}"""
         }
         val parsed = FactExtractor.extract(text)
         val batch = System.nanoTime()
-        val saved = if (parsed.isNotEmpty()) {
-            parsed.mapNotNull { saveFact(it.key, it.value, FactSource.SAID, 0.9f, pending = false, syncCloud = syncCloud, batch = batch) }
-        } else {
-            listOfNotNull(saveFact("note:" + FactExtractor.slug(text).take(40), text, FactSource.SAID, 0.8f, pending = false, syncCloud = syncCloud, batch = batch))
+        val saved = MemoryFactStore.batch {
+            if (parsed.isNotEmpty()) {
+                parsed.mapNotNull { saveFact(it.key, it.value, FactSource.SAID, 0.9f, pending = false, syncCloud = syncCloud, batch = batch) }
+            } else {
+                listOfNotNull(saveFact("note:" + FactExtractor.slug(text).take(40), text, FactSource.SAID, 0.8f, pending = false, syncCloud = syncCloud, batch = batch))
+            }
         }
         return saved
     }
@@ -274,9 +276,19 @@ ${io.agents.pokeclaw.care.CareMemoryLearner.AI_SCHEMA}"""
                 if (request.isBlank() || isSensitive(request)) return@execute
 
                 val batch = System.nanoTime()
-                FactExtractor.orderPreferences(request).forEach { c ->
-                    saveFact(c.key, c.value, FactSource.TASK, 0.7f, pending = false, syncCloud = false, batch = batch)
+                MemoryFactStore.batch {
+                // What really went into the cart beats what the request text guessed.
+                val fromCart = FactExtractor.cartPreferences(request, summary)
+                val fromCartKeys = fromCart.map { MemoryFactStore.normaliseKey(it.key) }.toSet()
+                fromCart.forEach { c ->
+                    val before = MemoryFactStore.get(MemoryFactStore.normaliseKey(c.key))
+                    val saved = saveFact(c.key, c.value, FactSource.TASK, 0.8f, pending = false, syncCloud = false, batch = batch)
+                    // Same product again: count it, so "usually orders" reflects how often.
+                    if (saved == null && before != null && before.value.equals(c.value, true)) MemoryFactStore.incrementCount(c.key)
                 }
+                FactExtractor.orderPreferences(request)
+                    .filter { MemoryFactStore.normaliseKey(it.key) !in fromCartKeys }
+                    .forEach { c -> saveFact(c.key, c.value, FactSource.TASK, 0.7f, pending = false, syncCloud = false, batch = batch) }
 
                 FactExtractor.contactUse(request)?.let { (who, how) ->
                     // "beta ko call karo" -> the son's saved name when known.
@@ -288,6 +300,7 @@ ${io.agents.pokeclaw.care.CareMemoryLearner.AI_SCHEMA}"""
                 val apps = FactExtractor.appsIn(request).toMutableList()
                 if (apps.isEmpty() && FactExtractor.contactUse(request)?.second == "WhatsApp") apps += "WhatsApp"
                 apps.forEach { MemoryFactStore.bump("app:" + FactExtractor.slug(it), it) }
+                }
                 cachedMemoryPrompt = null
                 XLog.d(TAG, "rememberTaskOutcome: learned from finished task (summaryLen=${summary.length})")
             } catch (e: Exception) {

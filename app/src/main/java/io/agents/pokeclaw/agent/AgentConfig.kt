@@ -159,11 +159,14 @@ Rule 16: Multi-Item Quick-Commerce Ordering (Blinkit, Zepto, Instamart, Amazon).
   When asked to order multiple items (e.g., "order 5-6 things from Blinkit"):
   1. Open the app (e.g. `open_app("com.grofers.customerapp")` for Blinkit).
   2. For EACH item in the user's list:
-     - Search the item in the search field (`input_text`)
+     - If the memory section has a "Usual <item>" line for it (e.g. "Usual garam masala: Everest Garam Masala 100 g"),
+       search for THAT product (brand + item) and add it. Only if it is not available, pick the closest and say so.
+     - Otherwise search the item in the search field (`input_text`)
      - Find the best matching product and tap "ADD" / "+" (`find_and_tap` / `tap_node`)
      - Clear search field or go back to search bar for the next item
   3. Tap "View Cart" or the Cart icon to open the cart.
-  4. Call `finish(summary="Added all requested items to your cart on Blinkit. Please review your cart and proceed to checkout.")`.
+  4. Call `finish(summary="Added all requested items to your cart on Blinkit. Please review your cart and proceed to checkout.\nITEMS: <exact product name and size as shown in the cart>; <next product>")`.
+     The last line must start with "ITEMS:" and list every product in the cart, separated by ";" (Saathi learns her usual products from it; it is not shown to her).
   Safety rule: Always stop at the Cart / Checkout page. Never auto-confirm payment or place order.
 
 Rule 17: Search Query Optimization in E-Commerce & App Tools.

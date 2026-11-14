@@ -151,6 +151,15 @@ object MemoryFactStore {
         save(next)
     }
 
+    /** Counts one more use of an existing fact (e.g. the same usual product ordered again). */
+    @Synchronized
+    fun incrementCount(key: String) {
+        val k = normaliseKey(key)
+        val facts = all()
+        val old = facts.firstOrNull { it.key.equals(k, ignoreCase = true) } ?: return
+        save(facts.map { if (it.id == old.id) it.copy(count = maxOf(1, it.count) + 1, updatedAt = System.currentTimeMillis()) else it })
+    }
+
     /** Edit from the memory screen or a correction: user's own words, so confirmed. Not journaled. */
     @Synchronized
     fun edit(id: String, newValue: String): MemoryFact? {
@@ -251,9 +260,32 @@ object MemoryFactStore {
 
     // ── Internals ───────────────────────────────────────────────────────────
 
+    private var batchDepth = 0
+    private var dirty = false
+
+    /**
+     * Runs [block] with writes held in memory and saved once at the end (one JSON write and one
+     * prompt-cache reset instead of one per fact). Used by onboarding and by multi-fact learning.
+     */
+    @Synchronized
+    fun <T> batch(block: () -> T): T {
+        batchDepth++
+        try {
+            return block()
+        } finally {
+            batchDepth--
+            if (batchDepth == 0 && dirty) {
+                dirty = false
+                cache?.let { KVUtils.putString(KEY_FACTS, gson.toJson(it)) }
+                MemoryManager.invalidateCache()
+            }
+        }
+    }
+
     private fun save(facts: List<MemoryFact>) {
         cache = facts
         version++
+        if (batchDepth > 0) { dirty = true; return }
         KVUtils.putString(KEY_FACTS, gson.toJson(facts))
         MemoryManager.invalidateCache()
     }

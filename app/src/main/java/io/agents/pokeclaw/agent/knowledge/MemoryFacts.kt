@@ -406,6 +406,64 @@ object FactExtractor {
         return out.distinctBy { it.key }
     }
 
+    // ── Usual products, learned from what actually went into the cart ──────────
+
+    /** "ITEMS: Everest Garam Masala 100 g; Amul Taaza Milk 1 L" (last line of a cart task's finish summary). */
+    private val ITEMS_LINE = Regex("""(?im)^\s*ITEMS\s*:\s*(.+)$""")
+
+    /** The finish summary without its ITEMS line: what she sees and hears. */
+    fun stripItemsLine(summary: String): String =
+        summary.replace(Regex("""(?im)\n?^\s*ITEMS\s*:.*$"""), "").trim().ifEmpty { summary.trim() }
+
+    /** Products listed on the ITEMS line, cleaned. Empty when there is none. */
+    fun cartItems(summary: String): List<String> =
+        ITEMS_LINE.find(summary)?.groupValues?.get(1).orEmpty()
+            .split(';', '|')
+            .map { it.replace(Regex("""\s*[₹(]?\s*₹\s*[\d,.]+\)?"""), "").replace(Regex("""\s+"""), " ").trim().trim(',', '.') }
+            .filter { it.length in 3..80 }
+
+    private val REQUEST_NOISE = Regex(
+        """(?i)\b(order|buy|get|add|mangao|mangwao|mangana|kharido|bhejo|cart|from|on|se|par|pe|please|me|my|for|to|the|some|ek|do|teen|and|aur|also|plus|ko|ka|ki|ke)\b"""
+    )
+
+    /**
+     * Items she asked for, in her words: "order garam masala and milk from Flipkart Minutes" ->
+     * ["garam masala", "milk"]. Stores and quantities are dropped.
+     */
+    fun requestedItems(request: String): List<String> {
+        var t = request.lowercase()
+        STORES.keys.sortedByDescending { it.length }.forEach { t = t.replace(Regex("""\b${Regex.escape(it)}\b"""), ",") }
+        t = t.replace("minutes", ",")
+        t = QTY.replace(t, ",")
+        t = t.replace(Regex("""\b(and|aur|plus|also|then|phir|mariyu|&)\b"""), ",")
+        return t.split(',', '.', ';', '\n')
+            .map { REQUEST_NOISE.replace(it, " ").replace(Regex("""[^\p{L}\p{N} ]"""), " ").replace(Regex("""\s+"""), " ").trim() }
+            .filter { it.length >= 3 }
+            .distinct()
+    }
+
+    /**
+     * pref:<item> = exact product, for each cart product that matches something she asked for
+     * ("garam masala" -> "Everest Garam Masala 100 g (Flipkart Minutes)"). A product that matches
+     * nothing she said is skipped: the model may have added it by mistake.
+     */
+    fun cartPreferences(request: String, summary: String): List<FactCandidate> {
+        val products = cartItems(summary)
+        if (products.isEmpty()) return emptyList()
+        val store = STORES.entries.firstOrNull { (w, _) -> Regex("""(?i)\b${Regex.escape(w)}\b""").containsMatchIn(request) }?.value
+            ?.let { if (it == "Flipkart" && request.contains("minutes", true)) "Flipkart Minutes" else it }
+        val asked = requestedItems(request)
+        val out = mutableListOf<FactCandidate>()
+        for (product in products) {
+            val pTokens = tokens(product)
+            val phrase = asked.firstOrNull { a -> tokens(a).let { it.isNotEmpty() && pTokens.containsAll(it) } }
+                ?: continue
+            val key = ITEM_WORDS[phrase] ?: slug(phrase)
+            out += FactCandidate("pref:$key", product + (store?.let { " ($it)" } ?: ""))
+        }
+        return out.distinctBy { it.key }
+    }
+
     private val CONTACT_PATTERNS = listOf(
         // English: "call Ravi", "message Ravi on WhatsApp", "send a message to Ravi", "video call Ravi"
         Regex("""(?i)\b(call|phone|ring|dial|message|text|msg|whatsapp)\s+(?:to\s+)?(?:my\s+)?$NAME"""),
@@ -480,7 +538,8 @@ object FactExtractor {
             "profile" -> "${label.replaceFirstChar { it.uppercase() }}: ${f.value}"
             "person" -> "${label.replaceFirstChar { it.uppercase() }}: ${f.value}"
             "health" -> "Health: ${f.value}"
-            "pref" -> if (label == "diet") "Diet: ${f.value}" else "Usual $label: ${f.value}"
+            "pref" -> if (label == "diet") "Diet: ${f.value}" else "Usual $label: ${f.value}" +
+                (if (f.count > 1) " (ordered ${f.count} times)" else "")
             "contact" -> "Often contacts ${f.value}" + (if (f.count > 1) " (${f.count} times" + (if (f.detail.isNotBlank()) ", last by ${f.detail})" else ")") else "")
             "app" -> "Uses ${f.value}" + (if (f.count > 1) " (${f.count} times)" else "")
             "alias" -> "\"$label\" means ${f.value}"

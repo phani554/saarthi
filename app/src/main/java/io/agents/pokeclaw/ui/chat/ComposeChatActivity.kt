@@ -200,6 +200,11 @@ class ComposeChatActivity : ComponentActivity() {
         VoiceManager.init(this)
         taskFlowController.onTriggerVoiceCapture = { triggerVoiceCapture() }
 
+        // First launch: one-time family setup (name, children + nicknames, watchman, usual products).
+        if (savedInstanceState == null && !io.agents.pokeclaw.agent.knowledge.OnboardingStore.isDone()) {
+            startActivity(android.content.Intent(this, io.agents.pokeclaw.ui.onboarding.OnboardingActivity::class.java))
+        }
+
         // Contacts + call log let Saathi map a name or nickname to the right contact on the phone.
         val contactPerms = arrayOf(android.Manifest.permission.READ_CONTACTS, android.Manifest.permission.READ_CALL_LOG)
             .filter { androidx.core.content.ContextCompat.checkSelfPermission(this, it) != android.content.pm.PackageManager.PERMISSION_GRANTED }

@@ -88,6 +88,10 @@
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
         <activity
+            android:name=".ui.onboarding.OnboardingActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
             android:name=".ui.care.CareProfileActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />

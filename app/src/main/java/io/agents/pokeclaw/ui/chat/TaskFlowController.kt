@@ -621,13 +621,15 @@ class TaskFlowController(
             when (event) {
                 is TaskEvent.Completed -> {
                     val askingUser = OutboundConfirmGate.peek() != null
-                    replaceTypingIndicator(event.answer, event.modelName)
+                    // The ITEMS: line is for memory only; she never sees or hears it.
+                    val shownAnswer = io.agents.pokeclaw.agent.knowledge.FactExtractor.stripItemsLine(event.answer)
+                    replaceTypingIndicator(shownAnswer, event.modelName)
                     // Single owner of the final spoken answer (agent loop no longer speaks it too).
                     if (askingUser) {
                         // Already in her language (SpokenStrings confirmation question).
-                        VoiceManager.speakAsync(cleanSpokenAnswer(event.answer), flush = true)
+                        VoiceManager.speakAsync(cleanSpokenAnswer(shownAnswer), flush = true)
                     } else {
-                        speakAnswerInReplyLanguage(event.answer)
+                        speakAnswerInReplyLanguage(shownAnswer)
                     }
                     cleanupAfterTask()
                     checkAutoReplyConfirmation()
