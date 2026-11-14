@@ -143,7 +143,14 @@ public class SendMessageTool extends BaseTool {
 
             // Step 6: Tap the send button (no ENTER key fallback: it needs INJECT_EVENTS and
             // WhatsApp treats Enter as a newline).
-            if (!tapSend(service)) {
+            // WhatsApp swaps the mic for the Send button only after the text lands, so poll for it.
+            boolean tapped = false;
+            for (int poll = 0; poll < 20 && !tapped; poll++) {
+                tapped = tapSend(service);
+                if (!tapped) Thread.sleep(100);
+            }
+            if (!tapped) {
+                XLog.w(TAG, "Send button not found after 2 s; nodes near input: " + describeBottomButtons(service));
                 return ToolResult.error("Could not find send button. The message is typed but NOT sent.");
             }
 
@@ -354,10 +361,8 @@ public class SendMessageTool extends BaseTool {
         String textStr = text != null ? text.toString().toLowerCase() : "";
         String resIdStr = resId != null ? resId.toString().toLowerCase() : "";
 
-        // Exact "Send" / send ids only: contains("send") also matched e.g. "Send voice message".
-        if (descStr.trim().equals("send") || textStr.trim().equals("send") || resIdStr.endsWith(":id/send")
-                || resIdStr.contains("send_button") || resIdStr.contains("send_btn")
-                || descStr.trim().equals("發送") || descStr.trim().equals("发送")) {
+        if (isSendLabel(descStr.trim()) || isSendLabel(textStr.trim()) || resIdStr.endsWith(":id/send")
+                || resIdStr.endsWith(":id/send_container") || resIdStr.contains("send_button") || resIdStr.contains("send_btn")) {
             results.add(node);
         }
 
@@ -365,5 +370,36 @@ public class SendMessageTool extends BaseTool {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) collectSendButtons(child, results);
         }
+    }
+
+    /** "Send" in the phone's language; never the voice/video/media send buttons. */
+    private static boolean isSendLabel(String s) {
+        if (s.isEmpty()) return false;
+        if (s.contains("voice") || s.contains("video") || s.contains("photo") || s.contains("sticker")
+                || s.contains("gif") || s.contains("record") || s.contains("camera") || s.contains("attach")) return false;
+        return s.equals("send") || s.equals("send message")
+                || s.equals("भेजें") || s.equals("भेजा") || s.equals("पाठवा") || s.equals("పంపు") || s.equals("పంపండి")
+                || s.equals("發送") || s.equals("发送");
+    }
+
+    /** Debug line for a failed send: clickable nodes in the bottom fifth of the screen. */
+    private String describeBottomButtons(ClawAccessibilityService service) {
+        AccessibilityNodeInfo root = service.getRootInActiveWindow();
+        if (root == null) return "no root";
+        Rect rb = new Rect();
+        root.getBoundsInScreen(rb);
+        StringBuilder sb = new StringBuilder();
+        describeBottom(root, rb.bottom - rb.height() / 5, sb, 0);
+        return sb.length() > 600 ? sb.substring(0, 600) : sb.toString();
+    }
+
+    private void describeBottom(AccessibilityNodeInfo n, int minTop, StringBuilder sb, int depth) {
+        if (n == null || depth > 40) return;
+        Rect b = new Rect();
+        n.getBoundsInScreen(b);
+        if (n.isClickable() && b.top >= minTop) {
+            sb.append('[').append(n.getViewIdResourceName()).append(" desc=").append(n.getContentDescription()).append("] ");
+        }
+        for (int i = 0; i < n.getChildCount(); i++) describeBottom(n.getChild(i), minTop, sb, depth + 1);
     }
 }
