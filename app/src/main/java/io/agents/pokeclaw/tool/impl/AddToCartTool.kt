@@ -85,30 +85,33 @@ class AddToCartTool : BaseTool() {
             return ToolResult.success("Selected variant option and added product to cart")
         }
 
-        // Check if item is out of stock on active screen
-        if (isOutOfStock(root)) {
-            XLog.i(TAG, "execute: product is out of stock")
-            return ToolResult.error("Product is OUT OF STOCK on screen. Do not retry searching or scrolling for this item. Skip it or call finish.")
-        }
 
         // Check if item is already added to cart on active screen
-        if (isAlreadyInCart(root)) {
+        // Only "already in cart" if the stepper sits on THIS product's card; a screen-wide match
+        // made item 2 look done whenever item 1 showed "1 in cart".
+        val inCartNode = NodeFinder.findNodeByIdOrText(root, "com.grofers.customerapp:id/stepper_add", "added", "1 in cart", "2 in cart", "3 in cart")
+        if (inCartNode != null && matchesProductContext(inCartNode, productName)) {
             XLog.i(TAG, "execute: product already added to cart")
             return ToolResult.success("Product is already in cart")
         }
 
         // 1. Try ID matches first (ensuring negative keywords like wishlist are excluded)
-        for (viewId in ADD_CART_IDS) {
-            val matches = service.findNodesById(viewId)
-            for (node in matches) {
-                if (node.isVisibleToUser && !isNegativeMatch(node) && matchesProductContext(node, productName)) {
+        // Prefer the ADD button whose product card mentions the product; only if none does,
+        // fall back to the first visible one (old behaviour: matchesProductContext was always true).
+        val visibleAddNodes = ADD_CART_IDS.flatMap { service.findNodesById(it) }
+            .filter { it.isVisibleToUser && !isNegativeMatch(it) }
+        val contextMatched = visibleAddNodes.filter { matchesProductContext(it, productName) }
+        val orderedCandidates = if (contextMatched.isNotEmpty()) contextMatched else visibleAddNodes
+        run {
+            for (node in orderedCandidates) {
+                run {
                     val target = findClickableTarget(node)
                     val clicked = service.clickNode(target)
-                    XLog.i(TAG, "execute: clicked ID match $viewId, result=$clicked")
+                    XLog.i(TAG, "execute: clicked ADD (contextMatched=${contextMatched.isNotEmpty()}), result=$clicked")
                     if (clicked) {
                         try { Thread.sleep(300L) } catch (_: InterruptedException) {}
                         val newRoot = service.rootInActiveWindow
-                        if (newRoot != null && (isAlreadyInCart(newRoot) || isOutOfStock(newRoot))) {
+                        if (newRoot != null && isAlreadyInCart(newRoot)) {
                             return ToolResult.success("Added product to cart (verified on UI)")
                         }
                     }
@@ -125,12 +128,18 @@ class AddToCartTool : BaseTool() {
             if (clicked) {
                 try { Thread.sleep(300L) } catch (_: InterruptedException) {}
                 val newRoot = service.rootInActiveWindow
-                if (newRoot != null && (isAlreadyInCart(newRoot) || isOutOfStock(newRoot))) {
+                if (newRoot != null && isAlreadyInCart(newRoot)) {
                     return ToolResult.success("Added product to cart (verified on UI)")
                 }
             }
         }
 
+        // Out-of-stock is only reported when no ADD worked (a screen-wide check would
+        // otherwise block every item whenever one other product is sold out).
+        val latest = service.rootInActiveWindow
+        if (latest != null && isOutOfStock(latest)) {
+            return ToolResult.error("Product is OUT OF STOCK on screen. Do not retry searching or scrolling for this item. Skip it or call finish.")
+        }
         return ToolResult.error("Add to cart button not found or click did not update cart on screen")
     }
 
@@ -185,15 +194,30 @@ class AddToCartTool : BaseTool() {
 
     private fun matchesProductContext(node: AccessibilityNodeInfo, productName: String): Boolean {
         if (productName.isBlank()) return true
-        val parent = node.parent ?: return true
-        val parentText = parent.text?.toString().orEmpty().lowercase()
-        val parentDesc = parent.contentDescription?.toString().orEmpty().lowercase()
-        return parentText.contains(productName) || parentDesc.contains(productName) || true
+        val needle = productName.lowercase().trim()
+        // Look at the product card (parent / grandparent subtree), not just the parent's own text.
+        var card: AccessibilityNodeInfo? = node.parent ?: return false
+        repeat(2) {
+            val text = subtreeText(card, 4)
+            if (text.contains(needle)) return true
+            card = card?.parent ?: return false
+        }
+        return false
+    }
+
+    private fun subtreeText(node: AccessibilityNodeInfo?, depth: Int): String {
+        if (node == null || depth < 0) return ""
+        val sb = StringBuilder()
+        node.text?.let { sb.append(it).append(' ') }
+        node.contentDescription?.let { sb.append(it).append(' ') }
+        for (i in 0 until node.childCount) sb.append(subtreeText(node.getChild(i), depth - 1))
+        return sb.toString().lowercase()
     }
 
     private fun isOutOfStock(root: AccessibilityNodeInfo): Boolean {
-        val text = root.text?.toString().orEmpty().lowercase()
-        return text.contains("out of stock") || text.contains("sold out") || text.contains("currently unavailable")
+        // Old version read root.text only (almost always empty), so it never fired.
+        val found = NodeFinder.findNodeByIdOrText(root, "", "out of stock", "sold out", "currently unavailable")
+        return found != null
     }
 
     private fun isAlreadyInCart(root: AccessibilityNodeInfo): Boolean {

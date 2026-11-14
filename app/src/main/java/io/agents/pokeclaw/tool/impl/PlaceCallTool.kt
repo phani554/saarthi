@@ -13,7 +13,6 @@ import io.agents.pokeclaw.ClawApplication
 import io.agents.pokeclaw.agent.AgentTaskState
 import io.agents.pokeclaw.agent.MultiModelAgentOrchestrator
 import io.agents.pokeclaw.agent.TaskExecutionState
-import io.agents.pokeclaw.agent.TtsRouter
 import io.agents.pokeclaw.agent.knowledge.ContactAliasResolver
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.service.VoiceManager
@@ -82,7 +81,7 @@ class PlaceCallTool : BaseTool() {
     private fun enforceCallLockdown() {
         XLog.w("PlaceCallTool", "Enforcing TOTAL LOCKDOWN for active call — keeping user on active call screen")
         TaskExecutionState.instance.setState(AgentTaskState.CallInProgress)
-        TtsRouter.stopAll()
+        VoiceManager.stop()
         VoiceManager.disarmVoiceLoop()
         MultiModelAgentOrchestrator.killAllTasks()
     }
@@ -211,7 +210,8 @@ class PlaceCallTool : BaseTool() {
             context.startActivity(launchIntent)
         }
 
-        return ToolResult.success("Initiated $modeText with $contact on WhatsApp.")
+        // Was success() after only opening WhatsApp: the agent then told the user the call was placed.
+        return ToolResult.error("Could not start the $modeText with $contact. WhatsApp is open; the call button was not found.")
     }
 
     private fun triggerCallViaContactInfoScreen(service: ClawAccessibilityService, root: AccessibilityNodeInfo, isVideo: Boolean): Boolean {

@@ -190,8 +190,13 @@ fun ChatScreen(
         }
     }
 
-    LaunchedEffect(isLocalModel) {
-        selectedTab = if (isLocalModel) "local" else "cloud"
+    // Re-sync the Local/Cloud tab with the model that is actually active. Before, tapping a tab
+    // whose model failed to activate (or switching from Settings) left "Local" highlighted while a
+    // Cloud model ran, and the whole screen (placeholder, welcome card, task gating) followed the tab.
+    LaunchedEffect(isLocalModel, modelStatus) {
+        if (!modelStatus.startsWith("No model")) {
+            selectedTab = if (isLocalModel) "local" else "cloud"
+        }
     }
 
     ModalNavigationDrawer(

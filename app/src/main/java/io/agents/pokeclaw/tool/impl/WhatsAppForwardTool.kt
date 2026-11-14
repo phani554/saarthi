@@ -100,6 +100,7 @@ class WhatsAppForwardTool : BaseTool() {
             context.startActivity(launchIntent)
         }
 
-        return ToolResult.success("Opened WhatsApp to forward message to $resolvedTarget.")
+        // Was success() after only opening WhatsApp, so "forwarded" was reported when nothing was sent.
+        return ToolResult.error("Could not forward the message to $resolvedTarget. WhatsApp is open but the forward was not completed.")
     }
 }

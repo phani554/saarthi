@@ -75,17 +75,7 @@ object MessageToCartPipeline {
 
         val cartResult = EcommerceAutomationHelper.processMultiProductOrderList(service, items)
 
-        // Step 5: Send a clean, concise 1-line confirmation back to contact in WhatsApp
-        if (cartResult.isSuccess) {
-            val confirmMsg = "Hi, I've added all requested items (${items.joinToString(", ")}) to the $storeApp cart!"
-            XLog.i(TAG, "Sending clean confirmation message to $contactName: '$confirmMsg'")
-            val sendTool = SendMessageTool()
-            sendTool.execute(mapOf(
-                "contact" to contactName,
-                "message" to confirmMsg,
-                "app" to "WhatsApp"
-            ))
-        }
+        // Step 5 removed: it auto-sent a WhatsApp message to the contact without asking the user.
 
         return cartResult
     }
@@ -101,7 +91,11 @@ object MessageToCartPipeline {
         val resId = node.viewIdResourceName.orEmpty().lowercase()
         val text = node.text?.toString().orEmpty().trim()
         if (resId.contains("message_text") || resId.contains("text_content") || (node.className != null && node.className.toString().contains("TextView") && text.length > 3)) {
-            if (!text.contains("AM") && !text.contains("PM") && !text.contains("Yesterday") && !text.contains("Today")) {
+            // Old filter dropped any line containing "AM"/"PM" (e.g. "AMUL milk", "PAMPERS").
+            // Skip only bubbles that ARE a timestamp/date label.
+            val isTimestampLabel = Regex("""^\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?$""", RegexOption.IGNORE_CASE).matches(text) ||
+                text.equals("Yesterday", true) || text.equals("Today", true)
+            if (!isTimestampLabel) {
                 results.add(text)
             }
         }

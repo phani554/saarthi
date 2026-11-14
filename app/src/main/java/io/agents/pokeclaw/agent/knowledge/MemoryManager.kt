@@ -28,12 +28,14 @@ object MemoryManager {
     private const val CACHE_TTL_MS = 60_000L // 1 minute in-memory cache
 
     private val PREFERENCE_PATTERNS = listOf(
-        Pattern.compile("""(?i)\b(?:i\s+(?:prefer|like|love|hate|dislike|use|want|need)|my\s+(?:favorite|preferred|address|phone|email|number|mom|dad|wife|husband|home|office|friend|sister|brother|contact)|always\s+(?:order|buy|use|pick)|never\s+(?:order|buy|use)|i\s+am\s+(?:vegetarian|vegan|allergic|gluten-free))\b.*"""),
+        Pattern.compile("""(?i)\b(?:i\s+(?:prefer|like|love|hate|dislike)|my\s+(?:favorite|preferred|address|phone|email|number|mom|dad|wife|husband|home|office|friend|sister|brother|contact)|always\s+(?:order|buy|use|pick)|never\s+(?:order|buy|use)|i\s+am\s+(?:vegetarian|vegan|allergic|gluten-free))\b.*"""),
         Pattern.compile("""(?i)\b(?:remember\s+that|note\s+that|keep\s+in\s+mind\s+that)\s+(.+)"""),
-        Pattern.compile("""(?i)\b(?:in\s+(?:the\s+)?(?:group|whatsapp|chat)|reply\s+(?:on\s+my\s+behalf|to|in)|tell\s+(?:them|group|everyone|mom|dad|my)|when\s+(?:anyone|someone)\s+asks|if\s+anyone\s+asks)\b.*"""),
-        Pattern.compile("""(?i)\b[a-z0-9_\s]+\s+is\s+my\s+[a-z0-9_\s]+\b.*"""),
-        Pattern.compile("""(?i)\b(?:order|buy|text|message|send\s+message\s+to)\s+[a-z0-9_\s]+\b.*""")
+        Pattern.compile("""(?i)\b[a-z0-9_\s]+\s+is\s+my\s+[a-z0-9_\s]+\b.*""")
+        // Removed: "order/buy/text/message ..." and "tell mom/in the group ..." patterns saved
+        // almost every task command as a "preference", flooding the prompt with noise.
     )
+
+    private val extractionExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
     /**
      * Get the formatted user preferences section for system prompts.
@@ -46,20 +48,20 @@ object MemoryManager {
             return currentCache
         }
 
-        val text = try {
-            val (memories, _) = runBlocking { HybridMemoryRepository.searchMemories("user preferences facts") }
-            memories.ifBlank {
-                KBManager.read(MEMORY_FILE_PATH).getOrNull()?.trim().orEmpty()
-            }
-        } catch (_: Exception) {
-            KBManager.read(MEMORY_FILE_PATH).getOrNull()?.trim().orEmpty()
-        }
+        // Local vault only. Previously this called HybridMemoryRepository.searchMemories(), which
+        // (with no Mem0 key) called back into this function: infinite recursion / StackOverflowError.
+        // Cloud Mem0 results are added separately by callers that have a real query.
+        val text = localMemoryText()
 
         val formatted = if (text.isBlank()) "" else "\n\n## User Preferences & Memory\nThese are user preferences and personal facts learned from previous chats. Use them to personalize actions and answers:\n\n$text"
         cachedMemoryPrompt = formatted
         lastCacheTime = now
         return formatted
     }
+
+    /** Raw local memory file (no network, no recursion). Used by HybridMemoryRepository fallback. */
+    fun localMemoryText(): String =
+        try { KBManager.read(MEMORY_FILE_PATH).getOrNull()?.trim().orEmpty() } catch (_: Exception) { "" }
 
     /**
      * Scan an incoming user prompt/message and extract preference statements to save.
@@ -83,6 +85,12 @@ object MemoryManager {
             }
         }
 
+        // AI extraction runs off the caller's thread: it used to add a full LLM round-trip
+        // before every task started.
+        extractionExecutor.submit { extractWithAi(raw, timestamp) }
+    }
+
+    private fun extractWithAi(raw: String, timestamp: String) {
         try {
             val systemPrompt = "You extract personal user facts, relationships, group names, and preferences from user messages regardless of language."
             val prompt = """Analyze this user message for personal facts or relationships:

@@ -520,14 +520,16 @@ class DefaultAgentService : AgentService {
         TaskExecutionState.instance.startTask(rawUserRequest)
 
         MemoryManager.learnFromMessage(rawUserRequest)
-        val (mem0Memories, _) = HybridMemoryRepository.searchMemories(rawUserRequest)
+        val (mem0Raw, mem0Source) = HybridMemoryRepository.searchMemories(rawUserRequest)
+        val mem0Memories = if (mem0Source == io.agents.pokeclaw.data.memory.MemorySource.MEM0_CLOUD) mem0Raw else 
         val memorySection = MemoryManager.getMemoryPromptSection() +
                 if (mem0Memories.isNotBlank()) "\n\n## Mem0 Cloud Search Results for Request\n$mem0Memories" else ""
         val taskStateSection = TaskExecutionState.instance.toPromptSection()
 
         val fullSystemPrompt = buildString {
             append(basePrompt)
-            append(memorySection)
+            // Small on-device model: keep memory short so the screen and tools fit in context.
+            append(if (config.provider == LlmProvider.LOCAL) memorySection.take(800) else memorySection)
             append(playbookSection)
             append(taskStateSection)
             append(inAppSearchGuard.buildPromptSection())
@@ -587,7 +589,7 @@ class DefaultAgentService : AgentService {
                     val screenResult = screenTool.execute(emptyMap())
                     if (screenResult.isSuccess && !screenResult.data.isNullOrBlank()) {
                         XLog.i(TAG, "runAgentLoop: pre-warm screen attached (${screenResult.data!!.length} chars)")
-                        "$promptForModel\n\nCurrent screen:\n${screenResult.data}"
+                        "$promptForModel\n\nCurrent screen:\n${if (config.provider == LlmProvider.LOCAL) screenResult.data!!.take(2500) else screenResult.data}"
                     } else promptForModel
                 } else promptForModel
             } catch (e: Exception) { promptForModel }
@@ -608,6 +610,7 @@ class DefaultAgentService : AgentService {
         val taskBudget = TaskBudget.fromSettings()
         var softLimitWarned = false
         var hasExecutedTool = false
+        var localNoToolNudges = 0
         val taskStartTime = System.currentTimeMillis()
         val maxIterations = minOf(config.maxIterations, 30)
         if (config.maxIterations > maxIterations) {
@@ -621,9 +624,8 @@ class DefaultAgentService : AgentService {
             // Time limit cutoff: only apply if step count <= 4 (disabled for multi-step workflows)
             if (iterations <= 4 && System.currentTimeMillis() - taskStartTime > 180_000L) {
                 XLog.w(TAG, "runAgentLoop: 180s task time limit reached — completing task cleanly")
-                val budgetMsg = "Task completed successfully."
-                TtsRouter.speakFinalWrapUp(budgetMsg)
-                callback.onComplete(iterations, budgetMsg, totalTokens, actualModelName)
+                // Was "Task completed successfully." even though nothing finished (fake success).
+                callback.onError(iterations, RuntimeException("I couldn't finish this in 3 minutes, so I stopped. Nothing was completed."), totalTokens)
                 return
             }
 
@@ -714,7 +716,7 @@ class DefaultAgentService : AgentService {
                             emailComposeGuard.shouldBlockTextOnlyCompletion())
                 if (!suppressHallucinatedCompletion && !hasFinishCall) {
                     callback.onContent(iterations, llmResponse.text)
-                    io.agents.pokeclaw.service.VoiceManager.speakAsync(llmResponse.text)
+                    // Not spoken: intermediate model text overlapped other speech. Final answer is spoken once by the UI.
                 }
             }
 
@@ -727,6 +729,18 @@ class DefaultAgentService : AgentService {
                     (responseText.contains("accessibility", ignoreCase = true) ||
                      responseText.contains("not enabled", ignoreCase = true) ||
                      responseText.contains("enable it", ignoreCase = true))
+
+                // Small local models often "answer" a phone task in words ("I opened WhatsApp")
+                // without calling any tool. Push back twice before accepting a text-only reply.
+                if (config.provider == LlmProvider.LOCAL && !hasExecutedTool && looksLikeTask && localNoToolNudges < 2) {
+                    localNoToolNudges++
+                    XLog.w(TAG, "runAgentLoop: local model replied without a tool call on a task; nudging ($localNoToolNudges/2)")
+                    messages.add(UserMessage.from(
+                        "You have not done anything on the phone yet. Do not describe results. " +
+                        "Reply with exactly one action in this format:\nAction: tool_name\n{\"arg\": \"value\"}"
+                    ))
+                    continue
+                }
 
                 if (isHallucinatedAccessibilityError) {
                     XLog.w(TAG, "runAgentLoop: detected hallucinated accessibility error text from LLM! Injecting tool prompt.")
@@ -745,7 +759,7 @@ class DefaultAgentService : AgentService {
                 }
                 val finalAnswer = if (responseText.isNotEmpty()) responseText else ClawApplication.instance.getString(R.string.agent_task_completed)
                 XLog.i(TAG, "runAgentLoop: $completionReason, completing")
-                io.agents.pokeclaw.service.VoiceManager.speak(finalAnswer)
+                // Spoken once by the UI on TaskEvent.Completed (speaking here too caused double voice).
                 callback.onComplete(iterations, finalAnswer, totalTokens, actualModelName)
                 return
             }
@@ -798,7 +812,6 @@ class DefaultAgentService : AgentService {
                 }
 
                 callback.onToolCall(iterations, toolName, displayName, toolArgs)
-                io.agents.pokeclaw.service.VoiceManager.speakAsync("Executing $displayName")
                 directDeviceDataGuard.recordToolAttempt(toolName)
                 emailComposeGuard.recordToolAttempt(toolName)
 
@@ -823,7 +836,6 @@ class DefaultAgentService : AgentService {
                 // finish tool → task complete
                 if (toolName == "finish" && result.isSuccess) {
                     val finishData = result.data ?: ClawApplication.instance.getString(R.string.agent_task_completed)
-                    TtsRouter.speakFinalWrapUp(finishData)
                     callback.onComplete(iterations, finishData, totalTokens, actualModelName)
                     return
                 }
@@ -838,7 +850,6 @@ class DefaultAgentService : AgentService {
                         isSuccess = true,
                         summary = completionMsg
                     )
-                    TtsRouter.speakFinalWrapUp(completionMsg)
                     callback.onComplete(iterations, completionMsg, totalTokens, actualModelName)
                     return
                 }
@@ -949,7 +960,7 @@ class DefaultAgentService : AgentService {
 
                 // Gentle senior citizen voice guidance if 12+ steps pass
                 if (iterations >= 12 && iterations % 4 == 0) {
-                    TtsRouter.speak("I am trying to complete this for you. If you see a prompt on your screen, please tap allow or confirm so I can continue.", flush = false)
+                    io.agents.pokeclaw.service.VoiceManager.speakAsync("I am trying to complete this for you. If you see a prompt on your screen, please tap allow or confirm so I can continue.", flush = false)
                 }
             }
             XLog.d(TAG, "Round:$iterations total=$totalTokens thisRound=${llmResponse.tokenUsage?.totalTokenCount()}")

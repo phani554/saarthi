@@ -58,15 +58,6 @@ object VoiceManager : TextToSpeech.OnInitListener {
     var isVoiceOutputEnabled = true
     var onPlaybackFinished: (() -> Unit)? = null
 
-    enum class TaskTtsEngineLock {
-        UNLOCKED,
-        NATIVE_LOCAL,
-        SARVAM_CLOUD
-    }
-
-    @Volatile
-    private var currentTaskEngineLock: TaskTtsEngineLock = TaskTtsEngineLock.UNLOCKED
-
     @Volatile
     var lastDetectedLanguageCode: String = "hi-IN"
 
@@ -88,10 +79,24 @@ object VoiceManager : TextToSpeech.OnInitListener {
     @Volatile
     private var isPlayingAudio = false
 
+    /**
+     * Bumped on every new utterance and every stop. A Sarvam clip or a posted native
+     * utterance only starts if its generation is still current, so a late Sarvam
+     * response can never play on top of newer native speech (and vice versa).
+     */
+    @Volatile
+    private var speechGeneration = 0L
+
+    @Volatile
+    private var isSarvamClipPlaying = false
+
     private val loggingInterceptor = HttpLoggingInterceptor { message ->
         XLog.d(TAG, "OkHttp: $message")
     }.apply {
-        level = HttpLoggingInterceptor.Level.BODY
+        // BASIC only: BODY logged the Sarvam key header, base64 audio and transcripts to logcat.
+        level = HttpLoggingInterceptor.Level.BASIC
+        redactHeader("api-subscription-key")
+        redactHeader("x-goog-api-key")
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -111,6 +116,17 @@ object VoiceManager : TextToSpeech.OnInitListener {
         if (status == TextToSpeech.SUCCESS) {
             isTtsInitialized = true
             tts?.language = Locale("hi", "IN")
+            tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                override fun onStart(utteranceId: String?) {}
+                override fun onDone(utteranceId: String?) {
+                    if (!isSarvamClipPlaying) {
+                        isPlayingAudio = false
+                        _engineState.value = VoiceEngineState.Idle
+                    }
+                }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String?) { onDone(utteranceId) }
+            })
             XLog.i(TAG, "Native TTS initialized successfully")
         } else {
             XLog.e(TAG, "Native TTS initialization failed (status=$status)")
@@ -120,23 +136,6 @@ object VoiceManager : TextToSpeech.OnInitListener {
     fun isPlayingAudio(): Boolean = isPlayingAudio
 
     fun isRecordingInApp(): Boolean = VoiceRecorder.isRecording()
-
-    fun lockTtsEngineForTask(): TaskTtsEngineLock {
-        val sarvamKey = KVUtils.getSarvamApiKey().trim()
-        currentTaskEngineLock = if (sarvamKey.isNotEmpty()) {
-            XLog.i(TAG, "Locked SARVAM_CLOUD TTS engine for task lifetime")
-            TaskTtsEngineLock.SARVAM_CLOUD
-        } else {
-            XLog.i(TAG, "Locked NATIVE_LOCAL TTS engine for task lifetime")
-            TaskTtsEngineLock.NATIVE_LOCAL
-        }
-        return currentTaskEngineLock
-    }
-
-    fun unlockTtsEngineTask() {
-        XLog.i(TAG, "Unlocked task TTS engine lock")
-        currentTaskEngineLock = TaskTtsEngineLock.UNLOCKED
-    }
 
     fun armVoiceLoop() {
         XLog.i(TAG, "Voice auto-loop ARMED behind WaitingForUser state")
@@ -190,6 +189,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
         synchronized(speakLock) {
             stopAudioPlayback()
+            val myGeneration = speechGeneration
 
             val currentState = TaskExecutionState.instance.currentState.value
             val isExecutingState = currentState is AgentTaskState.Executing ||
@@ -205,8 +205,9 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
             val sarvamKey = KVUtils.getSarvamApiKey().trim()
             if (sarvamKey.isNotEmpty()) {
-                val spokenSarvam = speakSarvamTts(cleanText, sarvamKey)
+                val spokenSarvam = speakSarvamTts(cleanText, sarvamKey, myGeneration)
                 if (spokenSarvam) return
+                if (myGeneration != speechGeneration) return // superseded while waiting on Sarvam
             }
 
             if (isTtsInitialized) {
@@ -220,6 +221,11 @@ object VoiceManager : TextToSpeech.OnInitListener {
         val cleanText = cleanTextForSpeech(text).take(400)
         if (cleanText.isBlank()) return
         synchronized(speakLock) {
+            if (isSarvamClipPlaying && !flush) {
+                // Low-priority progress narration: never talk over (or cut) a Sarvam reply.
+                XLog.d(TAG, "Skipping native narration while Sarvam clip plays: '$cleanText'")
+                return
+            }
             stopAudioPlayback()
             if (isTtsInitialized) {
                 speakNativeInternal(cleanText, flush)
@@ -239,7 +245,12 @@ object VoiceManager : TextToSpeech.OnInitListener {
             else -> Locale.getDefault()
         }
 
+        val myGeneration = speechGeneration
         mainHandler.post {
+            if (myGeneration != speechGeneration || isSarvamClipPlaying) {
+                XLog.d(TAG, "Dropping stale native utterance: '$cleanText'")
+                return@post
+            }
             try {
                 tts?.language = locale
             } catch (_: Exception) {}
@@ -256,7 +267,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
         }
     }
 
-    private fun speakSarvamTts(text: String, apiKey: String): Boolean {
+    private fun speakSarvamTts(text: String, apiKey: String, generation: Long): Boolean {
         return try {
             isPlayingAudio = true
             _engineState.value = VoiceEngineState.Speaking
@@ -286,6 +297,11 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 val audios = root.optJSONArray("audios")
                 val base64Audio = audios?.optString(0).orEmpty()
                 if (base64Audio.isNotEmpty()) {
+                    if (generation != speechGeneration) {
+                        XLog.i(TAG, "Sarvam audio arrived after a newer utterance; discarding")
+                        isPlayingAudio = false
+                        return true
+                    }
                     playBase64Audio(base64Audio)
                     XLog.i(TAG, "Spoke via Sarvam TTS successfully: '$text'")
                     return true
@@ -316,12 +332,15 @@ object VoiceManager : TextToSpeech.OnInitListener {
             val tempFile = File.createTempFile("sarvam_tts_", ".wav", ctx.cacheDir)
             FileOutputStream(tempFile).use { it.write(audioBytes) }
 
+            // Make sure the phone's own TTS is silent before the Sarvam clip starts.
+            try { tts?.stop() } catch (_: Exception) {}
+            isSarvamClipPlaying = true
             mediaPlayer = MediaPlayer().apply {
                 setDataSource(tempFile.absolutePath)
                 prepare()
-                start()
                 setOnCompletionListener {
                     tempFile.delete()
+                    isSarvamClipPlaying = false
                     isPlayingAudio = false
                     _engineState.value = VoiceEngineState.Idle
                     mainHandler.postDelayed({
@@ -330,19 +349,24 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 }
                 setOnErrorListener { _, _, _ ->
                     tempFile.delete()
+                    isSarvamClipPlaying = false
                     isPlayingAudio = false
                     _engineState.value = VoiceEngineState.Idle
                     false
                 }
+                start()
             }
         } catch (e: Exception) {
             XLog.e(TAG, "Error playing Sarvam TTS base64 audio", e)
+            isSarvamClipPlaying = false
             isPlayingAudio = false
             _engineState.value = VoiceEngineState.Idle
         }
     }
 
     fun stopAudioPlayback() {
+        speechGeneration++
+        isSarvamClipPlaying = false
         try {
             mainHandler.removeCallbacksAndMessages(null)
         } catch (_: Exception) {}
@@ -368,7 +392,6 @@ object VoiceManager : TextToSpeech.OnInitListener {
         } catch (_: Exception) {}
 
         stopAudioPlayback()
-        unlockTtsEngineTask()
         isPlayingAudio = false
         _engineState.value = VoiceEngineState.Idle
     }
@@ -469,7 +492,8 @@ object VoiceManager : TextToSpeech.OnInitListener {
         }
 
         val request = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent")
+            .addHeader("x-goog-api-key", apiKey) // header, not URL query (query got logged)
             .addHeader("Content-Type", "application/json")
             .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
             .build()

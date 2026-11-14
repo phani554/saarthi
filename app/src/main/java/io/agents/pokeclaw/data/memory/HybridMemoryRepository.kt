@@ -102,7 +102,7 @@ object HybridMemoryRepository : MemoryRepository {
         if (!isApiKeyValid(apiKey)) {
             XLog.d(TAG, "Mem0 API key missing or unconfigured; using LOCAL_FALLBACK")
             _activeMemorySource.value = MemorySource.LOCAL_FALLBACK
-            return@withContext Pair(MemoryManager.getMemoryPromptSection(), MemorySource.LOCAL_FALLBACK)
+            return@withContext Pair(MemoryManager.localMemoryText(), MemorySource.LOCAL_FALLBACK)
         }
 
         try {
@@ -140,7 +140,7 @@ object HybridMemoryRepository : MemoryRepository {
         }
 
         // Fallback Strategy: Local Vault
-        val localContext = MemoryManager.getMemoryPromptSection()
+        val localContext = MemoryManager.localMemoryText()
         Pair(localContext, MemorySource.LOCAL_FALLBACK)
     }
 
@@ -151,8 +151,9 @@ object HybridMemoryRepository : MemoryRepository {
     ): MemorySource = withContext(Dispatchers.IO) {
         val apiKey = KVUtils.getMem0ApiKey().trim()
 
-        // Always learn locally first as safety net
-        MemoryManager.learnFromMessage(userQuery)
+        // No learnFromMessage() here: callers already learn from the user's own words, and this
+        // path is also used for internal notes (stuck recovery, "user_preference_fact"), which then
+        // triggered an extra LLM call each time and wrote junk into the user's memory.
 
         if (!isApiKeyValid(apiKey)) {
             _activeMemorySource.value = MemorySource.LOCAL_FALLBACK

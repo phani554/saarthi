@@ -108,16 +108,22 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
         conversation = lease.conversation
         activeBackendLabel = lease.backendLabel
         XLog.i(TAG, "createConversation: backend=$activeBackendLabel model=${config.baseUrl}")
-        processedMessageCount = 0
+        // processedMessageCount is managed by chatInternal (resetting it here made a mid-task
+        // rebuild replay the whole history into the new session).
     }
 
     private fun buildManualToolPrompt(basePrompt: String, toolSpecs: List<ToolSpecification>): String {
         if (toolSpecs.isEmpty()) return basePrompt
-        val toolSchemas = toolSpecs.mapNotNull { spec ->
+        // Gemma E2B has a small context window. Sending all ~50 tool schemas as JSON filled
+        // most of it before the task even started, so the model lost the screen and guessed.
+        // Only the core phone tools go to the local model, one compact line each.
+        val coreSpecs = toolSpecs.filter { it.name() in LOCAL_CORE_TOOLS }
+            .sortedBy { LOCAL_CORE_TOOLS.indexOf(it.name()) }
+        val toolSchemas = coreSpecs.mapNotNull { spec ->
             try {
-                DynamicOpenApiTool(spec).getToolDescriptionJsonString()
+                compactToolLine(spec)
             } catch (e: Exception) {
-                XLog.w(TAG, "buildManualToolPrompt: failed to serialize schema for ${spec.name()}", e)
+                XLog.w(TAG, "buildManualToolPrompt: failed to describe ${spec.name()}", e)
                 null
             }
         }
@@ -131,7 +137,9 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             append("Action: tool_name\n")
             append("{\"arg1\": \"value1\"}\n")
             append("- The arguments MUST be a valid JSON object. Always use standard double quotes.\n")
-            append("\n## Available Tools (JSON Schema)\n")
+            append("- Exactly ONE action per reply. Never claim something is done before the tool result says so.\n")
+            append("- When the task is done or impossible, use finish with an honest summary.\n")
+            append("\n## Available Tools (name(args): purpose)\n")
             toolSchemas.forEach { schema ->
                 append(schema)
                 append('\n')
@@ -139,7 +147,22 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
         }
     }
 
+    private fun compactToolLine(spec: ToolSpecification): String {
+        val schema = DynamicOpenApiTool(spec).getToolDescriptionJsonString()
+        val obj = com.google.gson.JsonParser.parseString(schema).asJsonObject
+        val props = obj.getAsJsonObject("parameters")?.getAsJsonObject("properties")
+        val required = obj.getAsJsonObject("parameters")?.getAsJsonArray("required")?.map { it.asString }?.toSet().orEmpty()
+        val args = props?.entrySet()?.joinToString(", ") { (k, v) ->
+            val t = v.asJsonObject.get("type")?.asString ?: "string"
+            if (k in required) "$k:$t" else "$k?:$t"
+        }.orEmpty()
+        val desc = (spec.description() ?: "").replace(Regex("\\s+"), " ").take(110)
+        return "- ${spec.name()}($args): $desc"
+    }
+
     private var sendCount = 0
+    private var originalTask: String = ""
+    private val recentActions = ArrayDeque<String>()
 
     override fun chat(messages: List<ChatMessage>, toolSpecs: List<ToolSpecification>): LlmResponse {
         return try {
@@ -156,56 +179,88 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
         currentCoroutineContext().ensureActive()
         ensureEngine()
 
-        // Detect new task or recreate needed
-        if (processedMessageCount == 0 || messages.size < processedMessageCount || sendCount >= 8) {
+        // New task, history rewound, or conversation getting long -> (re)create the session.
+        val isNewTask = processedMessageCount == 0 || messages.size < processedMessageCount
+        val needsRebuild = !isNewTask && sendCount >= MAX_SENDS_PER_SESSION
+        if (isNewTask || needsRebuild) {
             val systemPrompt = messages.filterIsInstance<SystemMessage>().firstOrNull()?.text()
                 ?: config.systemPrompt.ifEmpty { LOCAL_SYSTEM_PROMPT }
             createConversation(systemPrompt, toolSpecs)
             sendCount = 0
-            processedMessageCount = 0
+            if (isNewTask) {
+                processedMessageCount = 0
+                recentActions.clear()
+                originalTask = messages.filterIsInstance<UserMessage>().firstOrNull()?.singleText()?.take(600).orEmpty()
+            }
         }
 
-        // Find new messages to send
         val newMessages = messages.subList(
             processedMessageCount.coerceAtMost(messages.size),
             messages.size
         )
 
-        var lastResponse: Any? = null
-
+        // Batch everything new into ONE sendMessage. Previously each message was sent separately,
+        // and every sendMessage makes the model generate a reply: the discarded in-between replies
+        // stayed in the conversation and the model then "remembered" actions it never took.
+        val parts = mutableListOf<String>()
+        if (needsRebuild) {
+            // Old code replayed every user/tool message (without the model's own actions) into the
+            // fresh session. Now: one compact recap.
+            parts += "Task: $originalTask"
+            if (recentActions.isNotEmpty()) {
+                parts += "Actions so far (oldest first):\n" + recentActions.joinToString("\n")
+            }
+        }
         for (msg in newMessages) {
-            currentCoroutineContext().ensureActive()
             when (msg) {
                 is SystemMessage -> { /* handled in createConversation */ }
                 is UserMessage -> {
-                    val conv = conversation ?: throw RuntimeException("LiteRT-LM conversation not initialized — engine may have failed to load the model")
-                    XLog.i(TAG, "chat: roundSend type=user backend=$activeBackendLabel sendCount=$sendCount")
-                    XLog.d(TAG, "chat: sendMessage user (${msg.singleText().take(80)}...) sendCount=$sendCount")
-                    lastResponse = withContext(Dispatchers.Default) {
-                        currentCoroutineContext().ensureActive()
-                        conv.sendMessage(msg.singleText())
-                    }
-                    sendCount++
+                    val text = msg.singleText()
+                    parts += text.take(LOCAL_MAX_USER_CHARS)
                 }
-                is AiMessage -> { /* already in conversation state */ }
+                is AiMessage -> {
+                    msg.toolExecutionRequests()?.forEach { req ->
+                        recentActions.addLast("${req.name()} ${req.arguments().take(120)}")
+                        while (recentActions.size > 6) recentActions.removeFirst()
+                    }
+                }
                 is ToolExecutionResultMessage -> {
-                    // Truncate tool results to prevent token overflow + reduce crash risk
-                    val truncatedResult = msg.text().take(400)
-                    val toolResultText = "[Tool ${msg.toolName()} result]: $truncatedResult"
-                    val conv = conversation ?: throw RuntimeException("LiteRT-LM conversation not initialized — engine may have failed to load the model")
-                    XLog.i(TAG, "chat: roundSend type=tool_result backend=$activeBackendLabel sendCount=$sendCount tool=${msg.toolName()}")
-                    XLog.d(TAG, "chat: sendMessage toolResult (${toolResultText.take(80)}...) sendCount=$sendCount")
-                    lastResponse = withContext(Dispatchers.Default) {
-                        currentCoroutineContext().ensureActive()
-                        conv.sendMessage(toolResultText)
+                    parts += "[Tool ${msg.toolName()} result]: ${msg.text().take(LOCAL_MAX_TOOL_RESULT_CHARS)}"
+                    if (recentActions.isNotEmpty()) {
+                        val last = recentActions.removeLast()
+                        recentActions.addLast("$last -> ${msg.text().take(80).replace('\n', ' ')}")
                     }
-                    sendCount++
                 }
+            }
+        }
+
+        var lastResponse: Any? = null
+        val payload = parts.filter { it.isNotBlank() }.joinToString("\n\n")
+        if (payload.isNotBlank()) {
+            lastResponse = send(payload)
+            // One correction round if the model wrote "Action:" but the JSON was unusable,
+            // instead of treating the broken text as the final answer.
+            val rawText = (lastResponse as? Message)?.contents?.toString()?.trim().orEmpty()
+            val parsed = extractToolCalls(rawText)
+            if (parsed.hasToolCalls && parsed.requests.isEmpty()) {
+                XLog.w(TAG, "chat: malformed tool call, asking model to repeat it once")
+                lastResponse = send("Your last action could not be parsed. Reply again with exactly:\nAction: tool_name\n{\"arg\": \"value\"}")
             }
         }
 
         processedMessageCount = messages.size
         return parseResponse(lastResponse)
+    }
+
+    private suspend fun send(text: String): Any? {
+        val conv = conversation ?: throw RuntimeException("LiteRT-LM conversation not initialized — engine may have failed to load the model")
+        XLog.i(TAG, "chat: roundSend backend=$activeBackendLabel sendCount=$sendCount chars=${text.length}")
+        val response = withContext(Dispatchers.Default) {
+            currentCoroutineContext().ensureActive()
+            conv.sendMessage(text)
+        }
+        sendCount++
+        return response
     }
 
     override fun chatStreaming(
@@ -229,10 +284,8 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             val rawText = response.contents.toString().trim()
             val parseResult = extractToolCalls(rawText)
             if (parseResult.hasToolCalls) {
-                val thinkingText = rawText
-                    .replace(ACTION_TOOL_PATTERN, "")
-                    .trim()
-                    .ifEmpty { null }
+                // Text before the action only (anything after it is usually a made-up result).
+                val thinkingText = rawText.substringBefore("Action:").trim().ifEmpty { null }
                 return LlmResponse(text = thinkingText, toolExecutionRequests = parseResult.requests)
             }
             return LlmResponse(text = rawText.ifEmpty { null }, toolExecutionRequests = emptyList())
@@ -247,17 +300,22 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
     private fun extractToolCalls(text: String): ToolParseResult {
         val calls = mutableListOf<ToolExecutionRequest>()
         var hasToolCalls = false
+        val mapType = object : TypeToken<Map<String, Any?>>() {}.type
 
-        ACTION_TOOL_PATTERN.findAll(text).forEach { match ->
+        ACTION_NAME_PATTERN.findAll(text).forEachIndexed { idx, match ->
             hasToolCalls = true
             val name = match.groupValues[1].trim()
-            val argsJson = match.groupValues[2].trim()
+            // Balanced-brace scan (old lazy regex cut JSON at the first "}" and broke nested args).
+            val argsJson = balancedJsonAfter(text, match.range.last + 1) ?: if (name in ZERO_ARG_TOOLS) "{}" else null
+            if (argsJson == null) {
+                XLog.w(TAG, "No JSON args found for action $name")
+                return@forEachIndexed
+            }
             try {
-            val mapType = object : TypeToken<Map<String, Any?>>() {}.type
-                val map: Map<String, Any?> = GSON.fromJson(argsJson, mapType) ?: emptyMap()
+                GSON.fromJson<Map<String, Any?>>(argsJson, mapType)
                 calls.add(
                     ToolExecutionRequest.builder()
-                        .id("local_${System.currentTimeMillis()}")
+                        .id("local_${System.currentTimeMillis()}_$idx")
                         .name(name)
                         .arguments(argsJson)
                         .build()
@@ -266,8 +324,32 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
                 XLog.w(TAG, "Failed to parse tool JSON: $argsJson", e)
             }
         }
+        // The loop runs one action per round; extra actions in the same reply were guesses.
+        return ToolParseResult(requests = calls.take(1), hasToolCalls = hasToolCalls)
+    }
 
-        return ToolParseResult(requests = calls, hasToolCalls = hasToolCalls)
+    private fun balancedJsonAfter(text: String, from: Int): String? {
+        var i = from
+        while (i < text.length && text[i].isWhitespace()) i++
+        if (i >= text.length || text[i] != '{') return null
+        var depth = 0
+        var inString = false
+        var escape = false
+        for (j in i until text.length) {
+            val c = text[j]
+            if (inString) {
+                if (escape) escape = false
+                else if (c == '\\') escape = true
+                else if (c == '"') inString = false
+                continue
+            }
+            when (c) {
+                '"' -> inString = true
+                '{' -> depth++
+                '}' -> { depth--; if (depth == 0) return text.substring(i, j + 1) }
+            }
+        }
+        return null
     }
 
     override fun close() {
@@ -282,17 +364,31 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
     companion object {
         private const val TAG = "LocalLlmClient"
 
-        private val ACTION_TOOL_PATTERN = Regex(
-            pattern = """Action:\s*([a-zA-Z0-9_]+)\s*(\{.*?\})""",
-            options = setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
+        private val ACTION_NAME_PATTERN = Regex(
+            pattern = """Action:\s*`?([a-zA-Z0-9_]+)`?""",
+            options = setOf(RegexOption.IGNORE_CASE)
         )
+
+        private const val MAX_SENDS_PER_SESSION = 8
+        private const val LOCAL_MAX_TOOL_RESULT_CHARS = 2000 // was 400: the model could not see the screen
+        private const val LOCAL_MAX_USER_CHARS = 3500
+
+        /** Tools the on-device model may use (order = order shown to the model). */
+        private val LOCAL_CORE_TOOLS = listOf(
+            "get_screen_info", "open_app", "tap_node", "input_text", "system_key",
+            "scroll_to_find", "send_message", "place_call", "wait", "finish"
+        )
+        private val ZERO_ARG_TOOLS = setOf("get_screen_info")
 
         private const val LOCAL_SYSTEM_PROMPT = """You control an Android phone via tools. Screen shows elements as: [n1] "text" [flags] (x,y) where n1 is the node ID and (x,y) is the tap target.
 
 TOOL CALLING RULES:
-- Use open_app(app_name) to open apps, e.g. open_app("Camera"), open_app("WhatsApp")
-- Use tap_node(node_id) to tap elements by node ID (preferred), e.g. tap_node("n3")
-- Use tap(x,y) only when you know exact coordinates and no node ID is available
+- open_app opens an app. Example:
+  Action: open_app
+  {"package_name": "com.whatsapp"}
+- tap_node taps an element by node ID. Example:
+  Action: tap_node
+  {"node_id": "n3"}
 - Use input_text(text) to type into focused editable fields
 - Use system_key(key) with key="back","home","enter" for navigation
 - Use finish(summary) when task is complete

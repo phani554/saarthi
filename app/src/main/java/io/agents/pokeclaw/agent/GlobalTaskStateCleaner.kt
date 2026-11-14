@@ -27,7 +27,7 @@ object GlobalTaskStateCleaner {
 
         // 2. Stop TtsRouter lock & engines
         try {
-            TtsRouter.stopAll()
+            io.agents.pokeclaw.service.VoiceManager.stop()
         } catch (e: Exception) {
             XLog.w(TAG, "TtsRouter stop exception: ${e.message}")
         }

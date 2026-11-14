@@ -92,6 +92,7 @@ Return JSON object:"""
                     val cleanedTask = jsonObj.optString("cleanedEnglishTask", "").trim()
 
                     HybridMemoryRepository.recordTurnAsync(raw, spoken)
+                    io.agents.pokeclaw.agent.knowledge.MemoryManager.learnFromMessage(raw) // spoken facts get remembered
 
                     XLog.i(TAG, "Interaction turn: spoken='$spoken', confirmed=$confirmed, cancelled=$cancelled, cleanedTask='$cleanedTask'")
                     return InteractionResult(
@@ -153,9 +154,10 @@ Return JSON object:"""
             return cached
         }
 
-        val (mem0Results, _) = runBlocking {
+        val (mem0Raw, mem0Source) = runBlocking {
             HybridMemoryRepository.searchMemories(raw)
         }
+        val mem0Results = if (mem0Source == io.agents.pokeclaw.data.memory.MemorySource.MEM0_CLOUD) mem0Raw else ""
         val memorySection = MemoryManager.getMemoryPromptSection() + if (mem0Results.isNotBlank()) "\n\n## Mem0 Relevant Memory Search\n$mem0Results" else ""
 
         return try {

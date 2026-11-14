@@ -80,7 +80,11 @@ class ReadMessageItemsTool : BaseTool() {
         val resId = node.viewIdResourceName.orEmpty().lowercase()
         val text = node.text?.toString().orEmpty().trim()
         if (resId.contains("message_text") || resId.contains("text_content") || (node.className != null && node.className.toString().contains("TextView") && text.length > 3)) {
-            if (!text.contains("AM") && !text.contains("PM") && !text.contains("Yesterday") && !text.contains("Today")) {
+            // Old filter dropped any line containing "AM"/"PM" (e.g. "AMUL milk", "PAMPERS").
+            // Skip only bubbles that ARE a timestamp/date label.
+            val isTimestampLabel = Regex("""^\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?$""", RegexOption.IGNORE_CASE).matches(text) ||
+                text.equals("Yesterday", true) || text.equals("Today", true)
+            if (!isTimestampLabel) {
                 results.add(text)
             }
         }

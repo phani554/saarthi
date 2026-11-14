@@ -59,8 +59,8 @@ object TaskDependencyGraph {
         return when {
             lower.contains("inform") || lower.contains("tell") || lower.contains("send") || lower.contains("message") -> {
                 val contactMatch = Regex("""(?i)\b(?:inform|tell|message)\s+([a-zA-Z0-9\s]+?)\s+that\b""").find(originalPrompt)
-                val contact = contactMatch?.groupValues?.get(1)?.trim() ?: "Mom"
-                "Send message to $contact: 'Milk has been ordered ($prereqSummary). You can start making kheer!'"
+                val contact = contactMatch?.groupValues?.get(1)?.trim() ?: return originalPrompt
+                "Send message to $contact: 'Done: $prereqSummary.'"
             }
             lower.contains("order") || lower.contains("buy") || lower.contains("add") -> {
                 val storeMatch = Regex("""(?i)\b(?:on|from|using)\s+([a-zA-Z0-9\s]+)$""").find(originalPrompt)
@@ -76,8 +76,8 @@ object TaskDependencyGraph {
         return when {
             lower.contains("inform") || lower.contains("tell") || lower.contains("send") || lower.contains("message") -> {
                 val contactMatch = Regex("""(?i)\b(?:inform|tell|message)\s+([a-zA-Z0-9\s]+?)\s+that\b""").find(originalPrompt)
-                val contact = contactMatch?.groupValues?.get(1)?.trim() ?: "Mom"
-                "Send message to $contact: 'Could not order milk ($prereqFailureReason). Please hold off on making kheer for now.'"
+                val contact = contactMatch?.groupValues?.get(1)?.trim() ?: return originalPrompt
+                "Send message to $contact: 'Could not complete the earlier step ($prereqFailureReason).'"
             }
             else -> originalPrompt
         }

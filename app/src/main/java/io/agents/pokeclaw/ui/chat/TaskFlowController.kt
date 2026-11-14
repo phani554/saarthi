@@ -268,7 +268,6 @@ class TaskFlowController(
         addUser(text)
         uiState.isAwaitingReply.value = true
         uiState.isTaskRunning.value = true
-        VoiceManager.lockTtsEngineForTask()
         XLog.i(TAG, "sendTask: isProcessing=TRUE")
         uiState.messages.add(ChatMessage(ChatMessage.Role.ASSISTANT, "..."))
 
@@ -375,12 +374,16 @@ class TaskFlowController(
         }, 1500)
     }
 
+    private fun cleanSpokenAnswer(raw: String): String =
+        if (raw.contains("within time limit") || raw.trim() == "Done.") "Kaam poora ho gaya hai." else raw
+
     private fun handleTaskEvent(event: TaskEvent) {
         try {
             when (event) {
                 is TaskEvent.Completed -> {
                     replaceTypingIndicator(event.answer, event.modelName)
-                    VoiceManager.speakAsync(event.answer, flush = true)
+                    // Single owner of the final spoken answer (agent loop no longer speaks it too).
+                    VoiceManager.speakAsync(cleanSpokenAnswer(event.answer), flush = true)
                     cleanupAfterTask()
                     checkAutoReplyConfirmation()
                 }
@@ -416,7 +419,7 @@ class TaskFlowController(
                     if (!event.toolName.contains("Finish", ignoreCase = true)) {
                         removeTypingIndicator()
                         addSystem("${event.toolName}...")
-                        VoiceManager.speakNative("${event.toolName}...")
+                        // Not spoken: raw tool names ("Tap Node...") talked over the Sarvam reply.
                     }
                 }
                 is TaskEvent.ToolResult -> {
@@ -465,7 +468,6 @@ class TaskFlowController(
 
     private fun cleanupAfterTask() {
         XLog.i(TAG, "cleanupAfterTask: isProcessing=FALSE")
-        VoiceManager.unlockTtsEngineTask()
         isTaskExecutingLock = false
         currentVoiceState = VoiceInteractionState.IDLE
         preTaskHistoryBuilder.clear()

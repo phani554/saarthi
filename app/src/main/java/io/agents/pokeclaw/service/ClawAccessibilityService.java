@@ -265,6 +265,10 @@ public class ClawAccessibilityService extends AccessibilityService {
     }
 
     public boolean performTap(int x, int y, long durationMs) {
+        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(getRootInActiveWindow(), x, y)) {
+            XLog.w(TAG, "performTap blocked by PaymentGate at (" + x + "," + y + ")");
+            return false;
+        }
         Path path = new Path();
         path.moveTo(x, y);
         GestureDescription.StrokeDescription stroke =
@@ -386,6 +390,9 @@ public class ClawAccessibilityService extends AccessibilityService {
     public boolean clickNode(AccessibilityNodeInfo node) {
         if (node == null) {
             return false;
+        }
+        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentNode(node)) {
+            return false; // hard stop at checkout: the user pays, never the agent
         }
         if (node.isClickable()) {
             boolean clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
