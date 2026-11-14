@@ -74,9 +74,12 @@ object LocalModelManager {
         ModelInfo(
             id = "gemma4-e2b",
             displayName = "Gemma 4 E2B — 2.6GB",
-            url = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it_qualcomm_qcs8275.litertlm",
-            fileName = "gemma-4-E2B-it_qualcomm_qcs8275.litertlm",
-            sizeBytes = 2_580_000_000L,
+            // Was ".../gemma-4-E2B-it_qualcomm_qcs8275.litertlm": wrong case (HF file is
+            // "_Qualcomm_QCS8275", so the download 404'd) and an NPU build for a different chip
+            // (QCS8275 IoT), not this phone's SM8635. The generic build runs on CPU/GPU everywhere.
+            url = "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
+            fileName = "gemma-4-E2B-it.litertlm",
+            sizeBytes = 2_588_147_712L,
             minRamGb = 8
         ),
         ModelInfo(

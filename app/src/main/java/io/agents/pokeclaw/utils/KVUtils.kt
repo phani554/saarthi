@@ -57,11 +57,14 @@ object KVUtils {
         val currentPath = getString(KEY_LOCAL_MODEL_PATH, "")
         if (currentPath.isEmpty()) return
 
-        // Migration: gemma-4-E2B-it.litertlm → gemma-4-E2B-it_qualcomm_qcs8275.litertlm
-        if (currentPath.contains("gemma-4-E2B-it.litertlm")) {
-            val newPath = currentPath.replace("gemma-4-E2B-it.litertlm", "gemma-4-E2B-it_qualcomm_qcs8275.litertlm")
-            putString(KEY_LOCAL_MODEL_PATH, newPath)
-            XLog.i("KVUtils", "Migrated model path: $currentPath → $newPath")
+        // Reverse the old bad migration: it renamed a working gemma-4-E2B-it.litertlm path to a
+        // qcs8275 file that usually does not exist on the phone, so local mode "broke".
+        if (currentPath.contains("gemma-4-E2B-it_qualcomm_qcs8275.litertlm") && !java.io.File(currentPath).exists()) {
+            val generic = currentPath.replace("gemma-4-E2B-it_qualcomm_qcs8275.litertlm", "gemma-4-E2B-it.litertlm")
+            if (java.io.File(generic).exists()) {
+                putString(KEY_LOCAL_MODEL_PATH, generic)
+                XLog.i("KVUtils", "Restored model path: $currentPath → $generic")
+            }
         }
     }
 
