@@ -123,9 +123,9 @@ class TaskExecutionState private constructor() {
             defaultChecklist.forEachIndexed { index, item ->
                 _checklist.add(ChecklistItem("step_$index", item, ChecklistStatus.NOT_STARTED))
             }
-        } else {
-            generateChecklistFromGoal(goal)
         }
+        // No keyword checklist any more: it was a fixed shopping/messaging template that nothing ever ticked,
+        // and it told the model "Add product to cart" on tasks that only read a cart (phone log 2026-11-15 00:28).
         XLog.i(TAG, "Task execution state started for goal: '$goal' (${_checklist.size} steps)")
     }
 
@@ -221,11 +221,9 @@ class TaskExecutionState private constructor() {
         if (taskGoal.isBlank()) return ""
 
         val sb = StringBuilder()
-        sb.append("\n\n## Task Execution Memory & Checklist\n")
+        sb.append("\n\n## Task\n")
         sb.append("- Goal: ").append(taskGoal).append("\n")
         if (activePackageName.isNotBlank()) sb.append("- Active App: ").append(activePackageName).append("\n")
-        sb.append("- Current Action State: ").append(activeFunctionName).append("\n")
-        sb.append("- Steps Executed: ").append(stepCount).append("\n")
 
         if (_checklist.isNotEmpty()) {
             sb.append("\n### Checklist Progress:\n")

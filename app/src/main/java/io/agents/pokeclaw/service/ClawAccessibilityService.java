@@ -328,7 +328,11 @@ public class ClawAccessibilityService extends AccessibilityService {
      */
     public boolean performSwipe(int startX, int startY, int endX, int endY, long durationMs) {
         // A swipe that starts on a pay control (e.g. "slide to pay") completes the payment.
-        if (isPaymentAtPoint(startX, startY)) {
+        // A plain vertical scroll that merely starts on a sticky "Place order" bar does not press it
+        // (phone log 2026-11-15 00:30:44 blocked a cart scroll), so only sideways or very short swipes are gated.
+        int dx = Math.abs(endX - startX), dy = Math.abs(endY - startY);
+        boolean verticalScroll = dy > 150 && dy > 2 * dx;
+        if (!verticalScroll && isPaymentAtPoint(startX, startY)) {
             XLog.w(TAG, "performSwipe blocked by PaymentGate at (" + startX + "," + startY + ")");
             return false;
         }
