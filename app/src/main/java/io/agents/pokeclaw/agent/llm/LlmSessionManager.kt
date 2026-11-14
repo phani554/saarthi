@@ -70,7 +70,7 @@ object LlmSessionManager {
             .apiKey(if (forceOpenRouter) openRouterKey else cloud.apiKey)
             .modelName(modelName)
             .baseUrl(baseUrl)
-            .customHeaders(mapOf("HTTP-Referer" to "https://pokeclaw.agents.io", "X-Title" to "PokeClaw"))
+            .customHeaders(mapOf("HTTP-Referer" to "https://github.com/phani554/saarthi", "X-Title" to "Saathi"))
             .temperature(temperature)
             .build()
     }
@@ -131,7 +131,7 @@ object LlmSessionManager {
             .apiKey(apiKey)
             .modelName(resolvedModel)
             .baseUrl(baseUrl)
-            .customHeaders(mapOf("HTTP-Referer" to "https://pokeclaw.agents.io", "X-Title" to "PokeClaw"))
+            .customHeaders(mapOf("HTTP-Referer" to "https://github.com/phani554/saarthi", "X-Title" to "Saathi"))
             .temperature(temperature)
             .build()
     }

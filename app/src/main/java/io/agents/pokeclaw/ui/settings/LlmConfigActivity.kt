@@ -30,6 +30,7 @@ import io.agents.pokeclaw.agent.ModelPricing
 import io.agents.pokeclaw.agent.llm.ActiveModelMode
 import io.agents.pokeclaw.agent.llm.LocalModelManager
 import io.agents.pokeclaw.agent.llm.ModelConfigRepository
+import io.agents.pokeclaw.service.ModelDownloadService
 import io.agents.pokeclaw.base.BaseActivity
 import io.agents.pokeclaw.data.memory.HybridMemoryRepository
 import io.agents.pokeclaw.ui.chat.ThemeManager
@@ -421,19 +422,16 @@ class LlmConfigActivity : BaseActivity() {
                             isDownloading = true
                             text = "Downloading · Stop"
 
-                            executor.submit {
-                                LocalModelManager.downloadModel(this@LlmConfigActivity, model, object : LocalModelManager.DownloadCallback {
+                            // Runs in ModelDownloadService so it keeps going after this screen closes or the screen goes off.
+                            run {
+                                ModelDownloadService.start(this@LlmConfigActivity, model, object : LocalModelManager.DownloadCallback {
                                     override fun onProgress(bytesDownloaded: Long, totalBytes: Long, bytesPerSecond: Long) {
                                         val pct = if (totalBytes > 0) (bytesDownloaded * 100 / totalBytes).toInt() else 0
                                         runOnUiThread { if (isEnabled) text = "$pct% · Stop" }
                                     }
                                     override fun onComplete(modelPath: String) {
+                                        // The service already saved it as the local default.
                                         runOnUiThread {
-                                            ModelConfigRepository.saveLocalDefault(
-                                                modelPath = modelPath,
-                                                modelId = model.id,
-                                                activateNow = false
-                                            )
                                             downloadsInFlight.remove(model.id)
                                             isDownloading = false
                                             if (isFinishing || isDestroyed) return@runOnUiThread

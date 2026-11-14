@@ -95,7 +95,7 @@ object PrescriptionExtractor {
         val request = Request.Builder()
             .url(OPENROUTER_URL)
             .addHeader("Authorization", "Bearer $apiKey")
-            .addHeader("HTTP-Referer", "https://pokeclaw.agents.io")
+            .addHeader("HTTP-Referer", "https://github.com/phani554/saarthi")
             .addHeader("X-Title", "Saathi")
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()

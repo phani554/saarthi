@@ -29,7 +29,7 @@ object DebugReportManager {
     fun buildReport(context: Context): File {
         val reportDir = File(context.cacheDir, REPORT_DIR).apply { mkdirs() }
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val output = File(reportDir, "pokeclaw-debug-$timestamp.zip")
+        val output = File(reportDir, "saathi-debug-$timestamp.zip")
 
         ZipOutputStream(FileOutputStream(output)).use { zip ->
             addText(zip, "summary.txt", buildSummary(context))

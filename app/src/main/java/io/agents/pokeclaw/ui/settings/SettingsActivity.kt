@@ -279,7 +279,11 @@ class SettingsActivity : BaseActivity() {
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.WECHAT) },
             showDivider = true
         )
-        menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name] = channelGroup.addMenuItem(
+        // LAN Config (a Wi-Fi web server for typing keys from a laptop) is off with the remote channels.
+        if (!io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) {
+            channelGroup.visibility = android.view.View.GONE
+        }
+        if (io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) menuItems[SettingsViewModel.MenuAction.LAN_CONFIG.name] = channelGroup.addMenuItem(
             leadingIcon = R.drawable.ic_lan_config,
             title = getString(R.string.menu_lan_config),
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.LAN_CONFIG) },
@@ -412,19 +416,9 @@ class SettingsActivity : BaseActivity() {
             leadingIcon = android.R.drawable.ic_menu_manage,
             title = "Benchmark & phone check",
             onClick = { openByClassName("io.agents.pokeclaw.ui.benchmark.BenchmarkActivity") },
-            showDivider = true
+            showDivider = false
         )
 
-        toolsGroup.addMenuItem(
-            leadingIcon = android.R.drawable.ic_menu_manage,
-            title = "Manage Tools",
-            onClick = {
-                Toast.makeText(this, "12 tools enabled. Tool management coming soon.", Toast.LENGTH_SHORT).show()
-            },
-            showDivider = false
-        ).apply {
-            setTrailingText("12 enabled")
-        }
 
         // Remote Control (Telegram / Discord / WeChat bots). Switched off by product scope:
         // the whole group is hidden while ChannelFeatures.REMOTE_CHANNELS_ENABLED is false.
@@ -490,22 +484,22 @@ class SettingsActivity : BaseActivity() {
             leadingIcon = android.R.drawable.ic_menu_share,
             title = "GitHub",
             onClick = {
-                startActivity(Intent(Intent.ACTION_VIEW, "https://github.com/ithiria894/saarthi".toUri()))
+                startActivity(Intent(Intent.ACTION_VIEW, "https://github.com/phani554/saarthi".toUri()))
             },
             showDivider = true
         ).apply {
-            setTrailingText("ithiria894/saarthi")
+            setTrailingText("phani554/saarthi")
         }
 
         aboutGroup.addMenuItem(
             leadingIcon = android.R.drawable.ic_menu_compass,
             title = "Built by",
             onClick = {
-                startActivity(Intent(Intent.ACTION_VIEW, "https://github.com/ithiria894".toUri()))
+                startActivity(Intent(Intent.ACTION_VIEW, "https://github.com/phani554".toUri()))
             },
             showDivider = false
         ).apply {
-            setTrailingText("ithiria894")
+            setTrailingText("Phani")
         }
     }
 

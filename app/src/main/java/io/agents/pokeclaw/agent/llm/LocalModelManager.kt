@@ -451,7 +451,7 @@ object LocalModelManager {
                 // Rename temp to final
                 if (targetFile.exists()) targetFile.delete()
                 if (!tempFile.renameTo(targetFile)) {
-                    callback.onError("Download finished but PokeClaw could not move the model into place")
+                    callback.onError("Download finished but Saathi could not move the model into place")
                     return
                 }
 

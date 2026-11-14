@@ -263,7 +263,7 @@ object TaskShortcuts {
                     "Screenshot taken."
                 } else {
                     XLog.w(TAG, "Shortcut: accessibility service not running for screenshot")
-                    "Screenshot requires Accessibility permission. Please enable PokeClaw in Accessibility settings."
+                    "Screenshot requires Accessibility permission. Please enable Saathi in Accessibility settings."
                 }
             } else {
                 "Screenshot shortcut requires Android 9.0 or above."
@@ -304,7 +304,7 @@ object TaskShortcuts {
                 XLog.i(TAG, "Shortcut: pressed Back")
                 "Went back."
             } else {
-                "Back shortcut requires Accessibility permission. Please enable PokeClaw in Accessibility settings."
+                "Back shortcut requires Accessibility permission. Please enable Saathi in Accessibility settings."
             }
         } catch (e: Exception) {
             XLog.w(TAG, "Shortcut: back failed — ${e.message}")

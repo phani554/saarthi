@@ -71,6 +71,26 @@ object PromptRewriter {
         val hasPriorProposal = conversationHistory.contains("Saarthi:")
         if (!hasPriorProposal) pendingCleanedTask = ""
 
+        // A plain "haan" / "yes" / "avunu" to the question just asked starts the task without another model
+        // call. Small on-device models often missed the yes and asked the same question again.
+        if (hasPriorProposal && pendingCleanedTask.isNotBlank() &&
+            ConfirmReplyClassifier.classify(raw) == ConfirmReplyClassifier.Reply.YES) {
+            val task = pendingCleanedTask
+            pendingCleanedTask = ""
+            XLog.i(TAG, "Interaction turn: plain yes, starting proposed task without a model call")
+            return InteractionResult(
+                spokenResponse = SpokenStrings.taskStart(SpokenStrings.appNameIn(task)),
+                isConfirmed = true,
+                cleanedEnglishTask = task,
+                isCancelled = false
+            )
+        }
+
+        // On-device model: no model call for this turn. Small local models often lost the request and
+        // answered "What would you like me to do?", and the mic re-opened after each answer, so she was
+        // asked the same thing again and again. Repeat her words back and wait for a yes (or a no).
+        if (LlmSessionManager.isLocalOnly()) return fallbackResult(raw, hasPriorProposal, useModel = false)
+
         val memorySection = MemoryManager.getMemoryPromptSection()
         // Decided from this turn's speech / text before we get here (ReplyLanguageState).
         val replyLang = ReplyLanguageState.replyLanguage()
@@ -99,7 +119,7 @@ Latest User Speech: "$raw"
 Return JSON object:"""
 
             val resultStr = LlmSessionManager.singleShotInteraction(systemPrompt, prompt, 0.2)
-                ?: LlmSessionManager.singleShotLocal(systemPrompt, prompt, 0.2)
+                ?: if (LlmSessionManager.isLocalOnly()) null else LlmSessionManager.singleShotLocal(systemPrompt, prompt, 0.2)
 
             if (!resultStr.isNullOrBlank()) {
                 val jsonStart = resultStr.indexOf('{')
@@ -111,6 +131,11 @@ Return JSON object:"""
                     // Never trust the model's isConfirmed on the very first utterance.
                     val confirmed = !cancelled && hasPriorProposal && jsonObj.optBoolean("isConfirmed", false)
                     val cleanedTask = jsonObj.optString("cleanedEnglishTask", "").trim()
+                    // No task, no yes, no cancel ("What would you like me to do?"): the model lost the request.
+                    if (!cancelled && !confirmed && cleanedTask.isBlank()) {
+                        XLog.w(TAG, "Interaction turn: model returned no task; using the plain fallback")
+                        return fallbackResult(raw, hasPriorProposal)
+                    }
 
                     HybridMemoryRepository.recordTurnAsync(raw, spoken)
 
@@ -148,9 +173,11 @@ Return JSON object:"""
         }
     }
 
-    private fun fallbackResult(raw: String, hasPriorProposal: Boolean): InteractionResult {
+    private fun fallbackResult(raw: String, hasPriorProposal: Boolean, useModel: Boolean = true): InteractionResult {
         val lower = raw.lowercase()
-        val isCancelled = lower.contains("no thanks") || lower.contains("nothing else") ||
+        // Local mode: only a short "na" / "cancel" reply cancels ("main nahi aaungi" is a message, not a no).
+        val isCancelled = if (!useModel) ConfirmReplyClassifier.classify(raw) == ConfirmReplyClassifier.Reply.NO
+        else lower.contains("no thanks") || lower.contains("nothing else") ||
                 lower.contains("cancel") || lower.contains("stop") ||
                 lower.contains("nahi") || lower.contains("nayi") || lower.contains("vaddu") ||
                 lower.contains("exit") || lower.contains("kuch nahi") || lower.contains("nako") ||
@@ -163,6 +190,8 @@ Return JSON object:"""
         val optimized = when {
             isCancelled -> ""
             isConfirmed -> pendingCleanedTask
+            // Local mode: the task agent gets her own words; optimize() would be another slow model call.
+            !useModel -> raw
             else -> optimize(raw)
         }
         pendingCleanedTask = if (isCancelled || isConfirmed) "" else optimized
@@ -219,7 +248,7 @@ Rules:
 5. Output ONLY the optimized English action task. No preamble."""
 
             val result = LlmSessionManager.singleShotInteraction(systemPrompt, prompt, 0.2)
-                ?: LlmSessionManager.singleShotLocal(systemPrompt, prompt, 0.2)
+                ?: if (LlmSessionManager.isLocalOnly()) null else LlmSessionManager.singleShotLocal(systemPrompt, prompt, 0.2)
 
             val cleaned = result?.trim()?.removeSurrounding("\"")?.removeSurrounding("'")
             val llmOk = !cleaned.isNullOrBlank() && cleaned.length > 3

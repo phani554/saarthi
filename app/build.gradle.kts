@@ -209,7 +209,7 @@ androidComponents {
         variant.outputs.forEach { output ->
             if (output is com.android.build.api.variant.impl.VariantOutputImpl) {
                 val versionName = android.defaultConfig.versionName ?: "0.0.0"
-                val fileName = "PokeClaw_v${versionName}_${getDateTime()}.apk"
+                val fileName = "Saathi_v${versionName}_${getDateTime()}.apk"
                 println("output file name: $fileName")
                 output.outputFileName.set(fileName)
             }

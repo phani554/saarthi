@@ -100,6 +100,11 @@ object ConfigServerManager {
      * Call on app start: auto-starts if it was enabled last time
      */
     fun autoStartIfNeeded(context: Context) {
+        // Never on Saathi: the LAN config screen is hidden with the remote channels.
+        if (!io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) {
+            if (KVUtils.isConfigServerEnabled()) KVUtils.setConfigServerEnabled(false)
+            return
+        }
         if (KVUtils.hasLlmConfig() && KVUtils.isConfigServerEnabled()) {
             start(context)
         }
