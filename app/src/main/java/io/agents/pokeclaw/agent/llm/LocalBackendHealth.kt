@@ -39,6 +39,8 @@ object LocalBackendHealth {
     fun shouldForceCpu(preferCpu: Boolean): Boolean {
         recoverPendingGpuCrashIfNeeded()
         maybeRearmVerifiedGpu()
+        // An explicit CPU request from the caller (chat's CPU retry) wins over a GPU/NPU preference.
+        if (preferCpu) return true
         val backendPreference = KVUtils.getLocalBackendPreference()
         if (backendPreference.equals("GPU", ignoreCase = true) ||
             backendPreference.equals("NPU", ignoreCase = true)

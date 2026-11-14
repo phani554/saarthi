@@ -472,6 +472,99 @@ object LocalModelManager {
         }
     }
 
+    /** Progress of [importModelFile]; totalBytes is -1 when the provider does not report a size. */
+    fun interface ImportProgress {
+        fun onProgress(bytesCopied: Long, totalBytes: Long)
+    }
+
+    /**
+     * Copies a .litertlm file the user picked (Storage Access Framework [uri]) into [getModelDir] and
+     * returns the copied file. Blocking: call from a background thread. Copies to a temporary file first
+     * and renames it when complete, so a failed or stopped copy never leaves a half model behind.
+     * Throws IllegalArgumentException with a user-readable message for a wrong file or too little space.
+     */
+    fun importModelFile(
+        context: Context,
+        uri: android.net.Uri,
+        progress: ImportProgress? = null,
+        isCancelled: () -> Boolean = { false },
+    ): File {
+        val resolver = context.contentResolver
+        var displayName: String? = null
+        var size = -1L
+        resolver.query(
+            uri,
+            arrayOf(android.provider.OpenableColumns.DISPLAY_NAME, android.provider.OpenableColumns.SIZE),
+            null, null, null
+        )?.use { c ->
+            if (c.moveToFirst()) {
+                val nameIdx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+                val sizeIdx = c.getColumnIndex(android.provider.OpenableColumns.SIZE)
+                if (nameIdx >= 0 && !c.isNull(nameIdx)) displayName = c.getString(nameIdx)
+                if (sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+            }
+        }
+        if (displayName == null) displayName = uri.lastPathSegment
+        val targetName = ModelImportNames.targetFileName(displayName)
+            ?: throw IllegalArgumentException("Pick a .litertlm model file (got ${displayName ?: "unknown file"})")
+
+        val dir = getModelDir(context)
+        if (size > 0) {
+            val free = try { StatFs(dir.absolutePath).availableBytes } catch (_: Exception) { Long.MAX_VALUE }
+            if (free < size + 64L * 1024L * 1024L) {
+                throw IllegalArgumentException(
+                    "Not enough space: the model needs ${size / 1_000_000} MB, ${free / 1_000_000} MB free"
+                )
+            }
+        }
+
+        val target = File(dir, targetName)
+        val temp = File(dir, ModelImportNames.tempFileName(targetName))
+        temp.delete()
+        var copied = 0L
+        try {
+            val input = resolver.openInputStream(uri)
+                ?: throw IllegalArgumentException("Could not open the picked file")
+            input.use { ins ->
+                FileOutputStream(temp).use { out ->
+                    val buf = ByteArray(1 shl 20)
+                    var lastReport = 0L
+                    while (true) {
+                        if (isCancelled()) throw java.util.concurrent.CancellationException("Import stopped")
+                        val n = ins.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        copied += n
+                        if (copied - lastReport >= 8L * 1024L * 1024L) {
+                            lastReport = copied
+                            progress?.onProgress(copied, size)
+                        }
+                    }
+                    out.fd.sync()
+                }
+            }
+            if (copied <= 0L) throw IllegalArgumentException("The picked file is empty")
+            if (size > 0 && copied != size) {
+                throw IllegalStateException("Copy incomplete: $copied of $size bytes")
+            }
+            // Replacing the file the shared engine has open: release that engine first.
+            if (target.exists() && EngineHolder.getBackendLabel(target.absolutePath) != null) {
+                XLog.i(TAG, "Import replaces the loaded model ${target.name}; closing the engine")
+                EngineHolder.close()
+            }
+            if (target.exists() && !target.delete()) {
+                throw IllegalStateException("Could not replace the existing ${target.name}")
+            }
+            if (!temp.renameTo(target)) throw IllegalStateException("Could not save ${target.name}")
+            progress?.onProgress(copied, size)
+            XLog.i(TAG, "Imported model ${target.name} (${target.length()} bytes)")
+            return target
+        } catch (e: Throwable) {
+            temp.delete()
+            throw e
+        }
+    }
+
     /**
      * Delete a downloaded model to free space.
      */

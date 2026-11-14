@@ -31,18 +31,31 @@ No public SM8635 file exists; you compile it yourself.
 1. Compile on WSL2/x86-64: NPU project `code/09-gemma-npu-test/tools/compile_gemma4_sm8635_wsl.sh`
    (input `gemma-4-E2B-it_NPU_Uncompiled.litertlm`, output `gemma-4-E2B-it_NPU_SM8635.litertlm`).
    Do NOT JIT-compile E2B on the phone (it ran out of memory).
-2. Gradle (app/build.gradle.kts / libs.versions.toml):
-   - litertlm is now 0.16.1; Backend.NPU is created by reflection. If NPU init fails on 0.16.1, try 0.18.1 (needs Kotlin 2.3).
-   - add `com.google.ai.edge.litert:litert-npu-runtime-qualcomm:2.3.2` (dispatch lib).
-   - put the V73 QNN libs in `app/src/main/jniLibs/arm64-v8a/`: `libQnnHtp.so`, `libQnnSystem.so`,
-     `libQnnHtpV73Stub.so`, `libQnnHtpV73Skel.so` (+ `libLiteRtDispatch_Qualcomm.so`). Same QAIRT version for all
-     (2.50.0.260828 matches the compiler); NPU project `code/22/tools/get_v73_runtime_libs.sh` fetches them.
-   - `android { packaging { jniLibs { useLegacyPackaging = true } } }`.
-3. Push the model, then pick it in Settings → Local model. The app uses NPU only when the file name contains
-   `_NPU_SM8635` AND all five libs are in nativeLibraryDir; otherwise GPU -> CPU.
+2. Gradle (done, 2026-11-14): the APK now ships the NPU libraries from Maven; nothing goes in `jniLibs/` by hand.
+   - `com.google.ai.edge.litert:litert-npu-runtime-qualcomm:2.3.2` (Google Maven): `libLiteRtDispatch_Qualcomm.so`,
+     `libLiteRtCompilerPlugin_Qualcomm.so`, and a manifest entry for `libcdsprpc.so`. No Java/Kotlin code, no deps,
+     minSdk 24. Built against QAIRT 2.50.0.260828. Its dispatch check accepts an older LiteRT runtime (litertlm
+     0.16.1) with a warning only, so no litertlm/Kotlin bump is needed.
+   - `com.qualcomm.qti:qnn-runtime:2.50.0` (Maven Central, was 2.45.0): `libQnnHtp.so`, `libQnnSystem.so`,
+     `libQnnHtpV68/V69/V73/V75/V79/V81 Stub+Skel` (V73 = SM8635), plus `libQnnHtpPrepare.so` etc. Must be >= the
+     QAIRT the dispatch lib was built with: 2.45 fails with "Qnn library version ... is mismatched".
+   - `useLegacyPackaging = true` (already) so the libs are extracted to `nativeLibraryDir`; `ADSP_LIBRARY_PATH` is
+     set to `nativeLibraryDir;/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/vendor/dsp` before `Backend.NPU(nativeLibraryDir)`.
+3. Push the model, then pick it in Settings → Local model. When the app tries the NPU (`NpuGate`, used by
+   `EngineHolder` and the phone check screen):
+   - the file is an NPU build: its name contains `_NPU_` (or `qualcomm` plus a chip id, e.g. `_Qualcomm_SM8650`),
+     or "Use NPU" is on (local backend preference `NPU`; today set by the debug receiver / `LocalBackendHealth.debugForceNpuRetry()`);
+   - the chip in the name (e.g. `SM8635`) matches `Build.SOC_MODEL` (Android 12+). If the name has no chip, or the
+     phone does not report one, the NPU is tried anyway;
+   - `libLiteRtDispatch_Qualcomm.so`, `libQnnHtp.so`, `libQnnSystem.so` and the chip's HTP stub/skel (any stub/skel
+     for chips not in the table) are in `nativeLibraryDir`.
+   There is no hard-coded list of allowed files or phones (Gallery's `model_allowlist.json` has no `sm8635` key,
+   google-ai-edge/gallery#857; this app does not use it). Whatever happens, NPU failure falls back to GPU, then CPU,
+   and logcat says why: `EngineHolder: NPU will be tried|skipped for <file>: <reason>` and
+   `NPU (mtp=false) init failed ..., trying next option`.
 4. Proof it is on the NPU: logcat `engine ready ... with NPU backend`, `Loaded qnn shared library`,
    no XNNPACK fallback. If you see `avc: denied ... sku` or `Failed to set up QNN manager`, the OEM blocks it;
    stay on GPU.
 5. If NPU init fails, restart the app before testing GPU (NPU is "first or never" per process).
 
-Not verified: nothing here was compiled or run in this app yet.
+Verified 2026-11-14: the app builds with these libs and the gate has unit tests (NpuGateTest). Not verified: an NPU run inside this app on the phone.

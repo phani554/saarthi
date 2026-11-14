@@ -50,10 +50,24 @@ class LlmConfigActivity : BaseActivity() {
     private val executor = Executors.newSingleThreadExecutor()
     private var isDownloading = false
 
+    // "Import .litertlm file": copies run on their own thread so they never queue behind a download.
+    private val importExecutor = Executors.newSingleThreadExecutor()
+    @Volatile private var importCancelled = false
+    private var importInFlight = false // main thread only
+    private var importStatus: TextView? = null
+    private var importButton: TextView? = null
+
+    private val importLauncher = registerForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) startModelImport(uri) }
+
     override fun onDestroy() {
         super.onDestroy()
         // Lets a running download finish (no interrupt) but stops the thread leaking with this screen.
         executor.shutdown()
+        // A half-done import is stopped and its temporary file deleted.
+        importCancelled = true
+        importExecutor.shutdown()
     }
     private var selectedProvider: CloudProvider = CloudProvider.OPENAI
     private var selectedModelId: String = ""
@@ -393,6 +407,13 @@ class LlmConfigActivity : BaseActivity() {
                         setTextColor(getColor(R.color.colorInfoPrimary))
                         setPadding(dp(12), dp(6), dp(12), dp(6))
                         setOnClickListener {
+                            if (LocalModelManager.isDownloading(model.id)) {
+                                // Second tap stops it; the partial file is deleted.
+                                LocalModelManager.cancelDownload(this@LlmConfigActivity, model)
+                                text = "Stopping..."
+                                isEnabled = false
+                                return@setOnClickListener
+                            }
                             if (isDownloading || !downloadsInFlight.add(model.id)) {
                                 Toast.makeText(this@LlmConfigActivity, "Already downloading", Toast.LENGTH_SHORT).show()
                                 return@setOnClickListener
@@ -406,13 +427,6 @@ class LlmConfigActivity : BaseActivity() {
                                         val pct = if (totalBytes > 0) (bytesDownloaded * 100 / totalBytes).toInt() else 0
                                         runOnUiThread { if (isEnabled) text = "$pct% · Stop" }
                                     }
-                            if (LocalModelManager.isDownloading(model.id)) {
-                                // Second tap stops it; the partial file is deleted.
-                                LocalModelManager.cancelDownload(this@LlmConfigActivity, model)
-                                text = "Stopping..."
-                                isEnabled = false
-                                return@setOnClickListener
-                            }
                                     override fun onComplete(modelPath: String) {
                                         runOnUiThread {
                                             ModelConfigRepository.saveLocalDefault(
@@ -437,6 +451,16 @@ class LlmConfigActivity : BaseActivity() {
                                             Toast.makeText(this@LlmConfigActivity, error, Toast.LENGTH_LONG).show()
                                         }
                                     }
+                                    override fun onCancelled() {
+                                        downloadsInFlight.remove(model.id)
+                                        runOnUiThread {
+                                            isDownloading = false
+                                            if (isFinishing || isDestroyed) return@runOnUiThread
+                                            text = "↓ Download"
+                                            isEnabled = true
+                                            Toast.makeText(this@LlmConfigActivity, "Download stopped", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }
                                 })
                             }
                         }
@@ -451,26 +475,203 @@ class LlmConfigActivity : BaseActivity() {
                     })
                 }
             }
-                                    override fun onCancelled() {
-                                        downloadsInFlight.remove(model.id)
-                                        runOnUiThread {
-                                            isDownloading = false
-                                            if (isFinishing || isDestroyed) return@runOnUiThread
-                                            text = "↓ Download"
-                                            isEnabled = true
-                                            Toast.makeText(this@LlmConfigActivity, "Download stopped", Toast.LENGTH_SHORT).show()
-                                        }
-                                    }
 
             card.addView(row)
             modelList.addView(card)
         }
+
+        // Local engine choice (Auto / NPU / GPU / CPU) + import of a .litertlm file from storage
+        addLocalEngineCard(modelList, tc)
 
         // Storage info
         updateStorageInfo()
 
         // Cloud LLM — Provider tabs + model cards
         setupCloudLlm(tc)
+    }
+
+    /**
+     * Card under the local model list: which backend the local model runs on (stored as the local backend
+     * preference that EngineHolder/NpuGate read: "" = Auto, "NPU", "GPU", "CPU"), and an import button for
+     * a .litertlm file (e.g. an NPU build for this phone's chip) picked with the system file picker.
+     */
+    private fun addLocalEngineCard(modelList: LinearLayout, tc: ThemeManager.ChatColors) {
+        val card = CardView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { topMargin = dp(6); bottomMargin = dp(6) }
+            radius = dp(12).toFloat()
+            cardElevation = dp(1).toFloat()
+            setCardBackgroundColor(tc.toolbarBg)
+        }
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(16), dp(14), dp(16), dp(14))
+        }
+
+        column.addView(TextView(this).apply {
+            text = "Run local model on"
+            textSize = 14f
+            setTextColor(tc.aiText)
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+        })
+
+        val choices = listOf("" to "Auto", "NPU" to "NPU", "GPU" to "GPU", "CPU" to "CPU")
+        val current = KVUtils.getLocalBackendPreference().uppercase().let { pref ->
+            if (choices.any { it.first == pref }) pref else ""
+        }
+        val group = RadioGroup(this).apply {
+            orientation = RadioGroup.HORIZONTAL
+            setPadding(0, dp(6), 0, dp(2))
+        }
+        choices.forEach { (value, label) ->
+            group.addView(RadioButton(this).apply {
+                id = View.generateViewId()
+                text = label
+                textSize = 13f
+                setTextColor(tc.aiText)
+                tag = value
+                isChecked = value == current
+                setPadding(dp(2), 0, dp(10), 0)
+            })
+        }
+
+        val hint = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#8b949e"))
+        }
+        fun renderHint() {
+            val pref = KVUtils.getLocalBackendPreference().uppercase()
+            val running = io.agents.pokeclaw.agent.llm.LocalModelRuntime.currentBackendLabel(null)
+            val npu = io.agents.pokeclaw.agent.llm.EngineHolder.lastNpuDecision
+            hint.text = buildString {
+                append(
+                    when (pref) {
+                        "NPU" -> "Use NPU: tries the phone's Qualcomm NPU first, then GPU, then CPU."
+                        "GPU" -> "GPU first, then CPU. The NPU is not used."
+                        "CPU" -> "CPU only: slowest, but works on every phone."
+                        else -> "Auto: NPU for NPU model files, else GPU, then CPU."
+                    }
+                )
+                if (running != null) append("\nNow running on: $running")
+                if (npu != null) append("\nNPU check: ${npu.reason}")
+                append("\nA change applies the next time the model loads.")
+            }
+        }
+        renderHint()
+        group.setOnCheckedChangeListener { g, checkedId ->
+            val value = g.findViewById<RadioButton>(checkedId)?.tag as? String ?: return@setOnCheckedChangeListener
+            if (value == KVUtils.getLocalBackendPreference().uppercase()) return@setOnCheckedChangeListener
+            if (value == "NPU" || value == "GPU") {
+                // An explicit accelerator choice lifts the automatic CPU-safe quarantine for this phone.
+                KVUtils.clearLocalCpuSafeMode()
+            }
+            KVUtils.setLocalBackendPreference(value)
+            renderHint()
+            val label = choices.first { it.first == value }.second
+            Toast.makeText(this, "Local model: $label", Toast.LENGTH_SHORT).show()
+        }
+        column.addView(group)
+        column.addView(hint)
+
+        val importBtn = TextView(this).apply {
+            text = if (importInFlight) "Importing · Stop" else "⤓ Import .litertlm file"
+            textSize = 13f
+            setTextColor(getColor(R.color.colorInfoPrimary))
+            setPadding(0, dp(12), dp(12), dp(4))
+            setOnClickListener {
+                if (importInFlight) {
+                    importCancelled = true
+                    text = "Stopping..."
+                    return@setOnClickListener
+                }
+                try {
+                    importLauncher.launch(arrayOf("application/octet-stream", "*/*"))
+                } catch (e: Exception) {
+                    Toast.makeText(this@LlmConfigActivity, "No file picker available", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+        val status = TextView(this).apply {
+            textSize = 12f
+            setTextColor(Color.parseColor("#8b949e"))
+            text = "Copies a model file from this phone's storage and uses it as the local model."
+        }
+        importButton = importBtn
+        importStatus = status
+        column.addView(importBtn)
+        column.addView(status)
+
+        card.addView(column)
+        modelList.addView(card)
+    }
+
+    private fun startModelImport(uri: android.net.Uri) {
+        if (importInFlight) {
+            Toast.makeText(this, "Already importing a model", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (ClawApplication.appViewModelInstance.isTaskRunning()) {
+            Toast.makeText(this, "Wait for the running task to finish, then import", Toast.LENGTH_LONG).show()
+            return
+        }
+        importInFlight = true
+        importCancelled = false
+        importButton?.text = "Importing · Stop"
+        importStatus?.text = "Copying..."
+        val appContext = applicationContext
+        importExecutor.submit {
+            try {
+                val file = LocalModelManager.importModelFile(
+                    appContext,
+                    uri,
+                    progress = { copied, total ->
+                        val line = if (total > 0) {
+                            "Copying ${copied / 1_000_000} of ${total / 1_000_000} MB (${copied * 100 / total}%)"
+                        } else {
+                            "Copying ${copied / 1_000_000} MB"
+                        }
+                        runOnUiThread { if (!isFinishing && !isDestroyed) importStatus?.text = line }
+                    },
+                    isCancelled = { importCancelled },
+                )
+                runOnUiThread {
+                    importInFlight = false
+                    // Select it as the local model (switch to local only when local is already the mode
+                    // or no cloud default exists, the same rule as "Use").
+                    val builtIn = LocalModelManager.AVAILABLE_MODELS.find { it.fileName.equals(file.name, ignoreCase = true) }
+                    val modelId = builtIn?.id ?: file.nameWithoutExtension
+                    val activate = ModelConfigRepository.isLocalActive() || !KVUtils.hasDefaultCloudModel()
+                    ModelConfigRepository.saveLocalDefault(file.absolutePath, modelId, activate)
+                    try {
+                        ClawApplication.appViewModelInstance.updateAgentConfig()
+                        ClawApplication.appViewModelInstance.initAgent()
+                    } catch (e: Exception) {
+                        io.agents.pokeclaw.utils.XLog.w("LlmConfigActivity", "agent reconfigure after import failed", e)
+                    }
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    Toast.makeText(this, "Imported ${file.name}", Toast.LENGTH_SHORT).show()
+                    recreate()
+                }
+            } catch (e: java.util.concurrent.CancellationException) {
+                runOnUiThread {
+                    importInFlight = false
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    importButton?.text = "⤓ Import .litertlm file"
+                    importStatus?.text = "Import stopped."
+                }
+            } catch (e: Throwable) {
+                io.agents.pokeclaw.utils.XLog.e("LlmConfigActivity", "Model import failed", e)
+                runOnUiThread {
+                    importInFlight = false
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    importButton?.text = "⤓ Import .litertlm file"
+                    importStatus?.text = "Import failed: ${e.message ?: e.javaClass.simpleName}"
+                    Toast.makeText(this, e.message ?: "Import failed", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     private fun updateStorageInfo() {

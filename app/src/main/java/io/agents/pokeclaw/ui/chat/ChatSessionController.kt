@@ -383,8 +383,17 @@ class ChatSessionController(
                     if (currentConversation == null || !isModelReady) {
                         throw IllegalStateException("Local model is still loading. Try again in a moment.")
                     }
-                    val response = currentConversation.sendMessage(text)
-                    val responseText = response.toString()
+                    val responseText = try {
+                        currentConversation.sendMessage(text).toString()
+                    } catch (e: Exception) {
+                        val failedPath = loadedModelPath ?: ModelConfigRepository.snapshot().local.modelPath
+                        val label = LocalModelRuntime.currentBackendLabel(failedPath)
+                        if (failedPath.isNullOrEmpty() || label == null || label.equals("CPU", ignoreCase = true) || isTaskRunning()) {
+                            throw e
+                        }
+                        XLog.w(TAG, "sendChat: local $label generation failed, retrying on CPU", e)
+                        retryLocalChatOnCpu(failedPath, text)
+                    }
                     val inputTokensEst = text.length / 4 + 1
                     val outputTokensEst = responseText.length / 4 + 1
                     val modelPath = ModelConfigRepository.snapshot().local.modelPath.ifEmpty { loadedModelPath.orEmpty() }
@@ -574,8 +583,33 @@ class ChatSessionController(
         }
     }
 
+    /**
+     * The GPU/NPU engine failed mid-chat: close this chat's session, reload the same model on the CPU
+     * backend (EngineHolder swaps the engine when preferCpu is set) and send the message once more.
+     * Runs on the executor. The shared engine stays on CPU until the model changes or the app restarts.
+     */
     private fun retryLocalChatOnCpu(modelPath: String, text: String): String {
-        throw IllegalStateException("NPU Initialization Failed - Check QNN dependencies")
+        val old = conversation
+        conversation = null
+        isModelReady = false
+        try {
+            old?.close()
+        } catch (_: Exception) {
+        }
+        LocalModelRuntime.releaseSession(old)
+        val lease = LocalModelRuntime.openConversation(
+            context = activity,
+            modelPath = modelPath,
+            conversationConfig = buildConversationConfig(),
+            preferCpu = true,
+        )
+        engine = lease.engine
+        conversation = lease.conversation
+        loadedModelPath = modelPath
+        isModelReady = true
+        XLog.i(TAG, "retryLocalChatOnCpu: reloaded on ${lease.backendLabel}")
+        postToMain { updateLocalModelStatus(modelPath) }
+        return lease.conversation.sendMessage(text).toString()
     }
 
     private fun buildConversationConfig(systemPrompt: String? = null): ConversationConfig {

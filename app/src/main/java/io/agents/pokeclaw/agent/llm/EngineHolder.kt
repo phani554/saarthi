@@ -26,6 +26,8 @@ object EngineHolder {
     private var engine: Engine? = null
     private var currentModelPath: String? = null
     private var currentBackendLabel: String? = null
+    /** Local backend preference (Auto "" / NPU / GPU / CPU) the current engine was built under. */
+    private var currentPreference: String? = null
 
     /**
      * Return the existing Engine if the model path matches, otherwise close the
@@ -38,7 +40,16 @@ object EngineHolder {
     @Synchronized
     fun getOrCreate(modelPath: String, cacheDir: String, preferCpu: Boolean = false): Engine {
         val existing = engine
-        if (existing != null && currentModelPath == modelPath && currentBackendLabel != null) {
+        // preferCpu (chat's CPU retry after an accelerator failure) must not get the old GPU/NPU engine back.
+        val wantCpuSwap = preferCpu && currentBackendLabel != null && currentBackendLabel != "CPU"
+        // A new choice in Settings › Models (Auto/NPU/GPU/CPU) rebuilds the engine on its next use.
+        val preference = try {
+            io.agents.pokeclaw.utils.KVUtils.getLocalBackendPreference().uppercase()
+        } catch (_: Throwable) {
+            ""
+        }
+        val preferenceChanged = currentPreference != null && currentPreference != preference
+        if (existing != null && currentModelPath == modelPath && currentBackendLabel != null && !wantCpuSwap && !preferenceChanged) {
             XLog.d(TAG, "getOrCreate: reusing engine for $modelPath (${currentBackendLabel ?: "unknown"})")
             return existing
         }
@@ -59,7 +70,7 @@ object EngineHolder {
         }
 
         // Old code: GPU only, and any GPU failure (OpenCL missing, driver issue) killed local mode.
-        // Now: NPU (only for an SM8635 AOT file with the QNN libs bundled) -> GPU -> CPU.
+        // Now: NPU (when NpuGate allows it: NPU build or "Use NPU", chip matches, QNN libs bundled) -> GPU -> CPU.
         val nativeDir = io.agents.pokeclaw.ClawApplication.instance.applicationInfo.nativeLibraryDir
         // Crash quarantine: a native abort during GPU/NPU/MTP init can't be caught, so the attempt is
         // marked before it starts. If the process dies, the next launch promotes the marker to CPU-safe
@@ -72,7 +83,17 @@ object EngineHolder {
         }
         val order = buildList {
             if (!forceCpu) {
-                if (isNpuModel(modelPath) && npuLibsPresent(nativeDir)) add("NPU")
+                // "GPU" chosen in Settings › Models skips the NPU even for an NPU build.
+                val userPrefersGpu = try {
+                    io.agents.pokeclaw.utils.KVUtils.getLocalBackendPreference().equals("GPU", ignoreCase = true)
+                } catch (_: Throwable) {
+                    false
+                }
+                if (userPrefersGpu) {
+                    lastNpuDecision = NpuGate.Decision(false, "GPU chosen in Settings")
+                } else if (shouldTryNpu(modelPath, nativeDir)) {
+                    add("NPU")
+                }
                 add("GPU")
             }
             add("CPU")
@@ -109,6 +130,12 @@ object EngineHolder {
                 engine = newEngine
                 currentModelPath = modelPath
                 currentBackendLabel = label
+                // Read again: the crash quarantine above may have changed it (e.g. to CPU).
+                currentPreference = try {
+                    io.agents.pokeclaw.utils.KVUtils.getLocalBackendPreference().uppercase()
+                } catch (_: Throwable) {
+                    preference
+                }
                 if (label != "CPU") LocalBackendHealth.noteGpuInitSuccess(modelPath)
                 else if (risky) LocalBackendHealth.markGpuInitFinished()
                 XLog.i(TAG, "getOrCreate: engine ready for $modelPath with $label backend (mtp=$mtp)")
@@ -153,13 +180,29 @@ object EngineHolder {
         false
     }
 
-    /** SM8635 (iQOO Neo 10R) NPU builds are AOT-compiled per chip, e.g. gemma-4-E2B-it_NPU_SM8635.litertlm. */
-    private fun isNpuModel(path: String): Boolean = path.contains("_NPU_SM8635", ignoreCase = true)
+    /**
+     * NPU gate (see NpuGate): NPU build or user's "Use NPU" preference, chip in the file name matches
+     * Build.SOC_MODEL (unknown on either side = try anyway), QNN libs present. Never a hard-coded file list;
+     * a failed NPU init always falls through to GPU and then CPU.
+     */
+    private fun shouldTryNpu(modelPath: String, nativeDir: String): Boolean {
+        val decision = try {
+            val userWantsNpu = io.agents.pokeclaw.utils.KVUtils.getLocalBackendPreference().equals("NPU", ignoreCase = true)
+            val deviceSoc = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) android.os.Build.SOC_MODEL else null
+            val present = java.io.File(nativeDir).list()?.toList().orEmpty()
+            NpuGate.decide(modelPath, userWantsNpu, deviceSoc, present)
+        } catch (e: Throwable) {
+            NpuGate.Decision(false, "NPU check failed: ${e.message}")
+        }
+        lastNpuDecision = decision
+        XLog.i(TAG, "NPU ${if (decision.tryNpu) "will be tried" else "skipped"} for ${java.io.File(modelPath).name}: ${decision.reason}")
+        return decision.tryNpu
+    }
 
-    private fun npuLibsPresent(dir: String): Boolean =
-        listOf("libLiteRtDispatch_Qualcomm.so", "libQnnHtp.so", "libQnnSystem.so", "libQnnHtpV73Stub.so", "libQnnHtpV73Skel.so")
-            .all { java.io.File(dir, it).exists() }
-            .also { if (!it) XLog.w(TAG, "NPU model selected but QNN V73 libs are not in $dir; using GPU/CPU") }
+    /** Last NPU gate result (for the phone check screen and debug reports). */
+    @Volatile
+    var lastNpuDecision: NpuGate.Decision? = null
+        private set
 
     private fun backendFor(label: String, nativeDir: String): Backend? = when (label) {
         "GPU" -> Backend.GPU()
@@ -194,6 +237,7 @@ object EngineHolder {
         engine = null
         currentModelPath = null
         currentBackendLabel = null
+        currentPreference = null
         XLog.i(TAG, "close: done")
     }
 

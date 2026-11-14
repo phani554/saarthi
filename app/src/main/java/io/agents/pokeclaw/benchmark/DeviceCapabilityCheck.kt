@@ -14,6 +14,7 @@ import android.os.StatFs
 import io.agents.pokeclaw.agent.llm.EngineHolder
 import io.agents.pokeclaw.agent.llm.LocalBackendHealth
 import io.agents.pokeclaw.agent.llm.LocalModelManager
+import io.agents.pokeclaw.agent.llm.NpuGate
 import io.agents.pokeclaw.agent.llm.LocalModelRuntime
 import io.agents.pokeclaw.agent.llm.ModelConfigRepository
 import io.agents.pokeclaw.utils.XLog
@@ -85,10 +86,6 @@ object DeviceCapabilityCheck {
     private const val E2B_SIZE_FALLBACK = 2_588_147_712L
     private const val REAL_TEST_TIMEOUT_MS = 180_000L
 
-    // Same library list EngineHolder.npuLibsPresent() checks (that function is private there).
-    private val NPU_LIBS = listOf(
-        "libLiteRtDispatch_Qualcomm.so", "libQnnHtp.so", "libQnnSystem.so", "libQnnHtpV73Stub.so", "libQnnHtpV73Skel.so"
-    )
     private val OPENCL_PATHS = listOf(
         "/vendor/lib64/libOpenCL.so",
         "/system/vendor/lib64/libOpenCL.so",
@@ -247,22 +244,26 @@ object DeviceCapabilityCheck {
             reasons += CheckReason("info", "No OpenCL library found. The model will likely run on the processor (CPU), which is slower.")
         }
 
+        // NPU: same gate EngineHolder uses (NpuGate), so this screen says exactly why NPU will or won't be tried.
         val socModel = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) Build.SOC_MODEL.orEmpty() else ""
-        val isSm8635 = socModel.contains("SM8635", ignoreCase = true) ||
-            Build.HARDWARE.orEmpty().contains("sm8635", ignoreCase = true) ||
-            Build.BOARD.orEmpty().contains("sm8635", ignoreCase = true)
-        if (isSm8635) {
-            val nativeDir = context.applicationInfo.nativeLibraryDir
-            val missing = NPU_LIBS.filterNot { File(nativeDir, it).exists() }
-            val npuModel = (target.path?.contains("_NPU_SM8635", ignoreCase = true) == true) ||
-                (LocalModelManager.getModelDir(context).listFiles()?.any { it.name.contains("_NPU_SM8635", ignoreCase = true) } == true)
-            reasons += when {
-                missing.isNotEmpty() -> CheckReason("info", "Chip is SM8635 but NPU libraries are missing: ${missing.joinToString()}.")
-                !npuModel -> CheckReason("info", "Chip is SM8635 and NPU libraries are present, but no _NPU_SM8635 model file is downloaded.")
-                else -> CheckReason("info", "NPU path available (SM8635 + QNN libraries + NPU model).")
-            }
+        val nativeLibs = File(context.applicationInfo.nativeLibraryDir).list()?.toList().orEmpty()
+        val userWantsNpu = io.agents.pokeclaw.utils.KVUtils.getLocalBackendPreference().equals("NPU", ignoreCase = true)
+        val npuFiles = LocalModelManager.getModelDir(context).listFiles()
+            ?.filter { it.name.endsWith(".litertlm", ignoreCase = true) && NpuGate.isNpuBuild(it.name) }
+            .orEmpty()
+        val npuCandidate = target.path?.takeIf { NpuGate.isNpuBuild(it) || userWantsNpu } ?: npuFiles.firstOrNull()?.path
+        val chip = socModel.ifBlank { "unknown (Android < 12 does not report it)" }
+        reasons += if (npuCandidate == null) {
+            val missing = NpuGate.missingLibs(nativeLibs, socModel.ifBlank { null }, null)
+            CheckReason(
+                "info",
+                "NPU not used: no NPU model file (name with _NPU_ or _qualcomm_<chip>) and Use NPU is off. " +
+                    "Chip: $chip. " + if (missing.isEmpty()) "QNN libraries are bundled." else "Missing QNN libraries: ${missing.joinToString()}."
+            )
         } else {
-            reasons += CheckReason("info", "NPU path not available (needs Snapdragon SM8635; this chip: ${socModel.ifBlank { Build.HARDWARE }}).")
+            val d = NpuGate.decide(npuCandidate, userWantsNpu, socModel.ifBlank { null }, nativeLibs)
+            CheckReason("info", (if (d.tryNpu) "NPU will be tried first (falls back to GPU, then CPU): " else "NPU not used: ") +
+                "${File(npuCandidate).name}: ${d.reason}.")
         }
 
         try {

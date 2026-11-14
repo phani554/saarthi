@@ -167,7 +167,9 @@ dependencies {
     // LiteRT-LM on-device LLM inference (Google AI Edge)
     implementation(libs.litertlm.android)
 
-    // Qualcomm NPU Backends (New)
+    // Qualcomm NPU: LiteRT dispatch (libLiteRtDispatch_Qualcomm.so) + QNN runtime (libQnnHtp, libQnnSystem,
+    // Hexagon V68-V81 stub/skel; V73 = SM8635). Libraries land in nativeLibraryDir because useLegacyPackaging=true.
+    implementation(libs.litert.npu.runtime.qualcomm)
     implementation(libs.qualcomm.qnn.runtime)
     implementation(libs.qualcomm.qnn.delegate)
 
