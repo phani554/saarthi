@@ -87,13 +87,19 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
         val promptWithManualTools = buildManualToolPrompt(systemPrompt, toolSpecs)
         XLog.i(TAG, "createConversation: sdk tools hidden, manual tool schemas injected (${toolSpecs.size})")
 
-        val convConfig = ConversationConfig(
+        // NPU bundles reject a custom sampler (NPU research guard rail G3), so leave it default there.
+        val onNpu = LocalModelRuntime.currentBackendLabel(config.baseUrl) == "NPU"
+        val convConfig = if (onNpu) ConversationConfig(
+            systemInstruction = Contents.of(promptWithManualTools),
+            tools = emptyList(),
+            automaticToolCalling = false
+        ) else ConversationConfig(
             systemInstruction = Contents.of(promptWithManualTools),
             tools = emptyList(),
             samplerConfig = SamplerConfig(
-                topK = 64,
-                topP = 0.95,
-                temperature = config.temperature,
+                topK = 40,
+                topP = 0.9,
+                temperature = config.temperature.coerceAtMost(0.3), // tool calling: keep it near-greedy
             ),
             automaticToolCalling = false
         )
@@ -369,7 +375,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             options = setOf(RegexOption.IGNORE_CASE)
         )
 
-        private const val MAX_SENDS_PER_SESSION = 8
+        private const val MAX_SENDS_PER_SESSION = 4 // keeps a session well inside the KV cache; recap carries state
         private const val LOCAL_MAX_TOOL_RESULT_CHARS = 2000 // was 400: the model could not see the screen
         private const val LOCAL_MAX_USER_CHARS = 3500
 

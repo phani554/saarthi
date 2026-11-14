@@ -53,7 +53,7 @@ object LocalModelRuntime {
             )
         } catch (e: Exception) {
             XLog.e(TAG, "acquireSharedEngine: GPU initialization failed for $modelPath", e)
-            throw IllegalStateException("GPU Backend Initialization Failed", e)
+            throw IllegalStateException("Local model could not start on NPU, GPU or CPU", e)
         }
     }
 

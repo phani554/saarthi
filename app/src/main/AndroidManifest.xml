@@ -60,6 +60,8 @@
         <!-- LiteRT-LM GPU backend optional native deps (per Google AI Edge guide) -->
         <uses-native-library android:name="libvndksupport.so" android:required="false" />
         <uses-native-library android:name="libOpenCL.so" android:required="false" />
+        <!-- Hexagon NPU (FastRPC) for the optional SM8635 Gemma build; harmless elsewhere -->
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
 
         <!-- Splash Activity -->
         <activity

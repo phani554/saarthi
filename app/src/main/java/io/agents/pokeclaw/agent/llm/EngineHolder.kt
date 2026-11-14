@@ -58,36 +58,68 @@ object EngineHolder {
             currentModelPath = null
         }
 
-        XLog.i(TAG, "getOrCreate: creating new engine for $modelPath (GPU backend)")
-
-        // === GPU Backend (Primary) ===
-        try {
-            val engineConfig = EngineConfig(
-                modelPath = modelPath,
-                backend = Backend.GPU(),
-                maxNumTokens = 8172,
-                cacheDir = cacheDir
-            )
-            val newEngine = Engine(engineConfig)
-            try {
-                newEngine.initialize()
-            } catch (e: Exception) {
-                XLog.e(TAG, "getOrCreate: GPU init failed for $modelPath", e)
-                try {
-                    newEngine.close()
-                } catch (_: Exception) {
-                }
-                throw e
-            }
-            engine = newEngine
-            currentModelPath = modelPath
-            currentBackendLabel = "GPU"
-            XLog.i(TAG, "getOrCreate: engine ready for $modelPath with GPU backend")
-            return newEngine
-        } catch (gpuError: Exception) {
-            XLog.e(TAG, "getOrCreate: GPU backend init failed for $modelPath", gpuError)
-            throw gpuError
+        // Old code: GPU only, and any GPU failure (OpenCL missing, driver issue) killed local mode.
+        // Now: NPU (only for an SM8635 AOT file with the QNN libs bundled) -> GPU -> CPU.
+        val nativeDir = io.agents.pokeclaw.ClawApplication.instance.applicationInfo.nativeLibraryDir
+        val order = buildList {
+            if (isNpuModel(modelPath) && npuLibsPresent(nativeDir)) add("NPU")
+            add("GPU")
+            add("CPU")
         }
+        var lastError: Exception? = null
+        for (label in order) {
+            val backend = backendFor(label, nativeDir) ?: continue
+            try {
+                val engineConfig = EngineConfig(
+                    modelPath = modelPath,
+                    backend = backend,
+                    // Was 8172 (typo). NPU files have a fixed 4096 KV cache; the generic file gets 8192.
+                    maxNumTokens = if (label == "NPU") 4096 else 8192,
+                    cacheDir = cacheDir
+                )
+                val newEngine = Engine(engineConfig)
+                try {
+                    newEngine.initialize()
+                } catch (e: Exception) {
+                    try { newEngine.close() } catch (_: Exception) {}
+                    throw e
+                }
+                engine = newEngine
+                currentModelPath = modelPath
+                currentBackendLabel = label
+                XLog.i(TAG, "getOrCreate: engine ready for $modelPath with $label backend")
+                return newEngine
+            } catch (e: Exception) {
+                XLog.e(TAG, "getOrCreate: $label init failed for $modelPath, trying next backend", e)
+                lastError = e
+            }
+        }
+        throw lastError ?: IllegalStateException("No LiteRT backend could load $modelPath")
+    }
+
+    /** SM8635 (iQOO Neo 10R) NPU builds are AOT-compiled per chip, e.g. gemma-4-E2B-it_NPU_SM8635.litertlm. */
+    private fun isNpuModel(path: String): Boolean = path.contains("_NPU_SM8635", ignoreCase = true)
+
+    private fun npuLibsPresent(dir: String): Boolean =
+        listOf("libLiteRtDispatch_Qualcomm.so", "libQnnHtp.so", "libQnnSystem.so", "libQnnHtpV73Stub.so", "libQnnHtpV73Skel.so")
+            .all { java.io.File(dir, it).exists() }
+            .also { if (!it) XLog.w(TAG, "NPU model selected but QNN V73 libs are not in $dir; using GPU/CPU") }
+
+    private fun backendFor(label: String, nativeDir: String): Backend? = when (label) {
+        "GPU" -> Backend.GPU()
+        "CPU" -> Backend.CPU()
+        "NPU" -> try {
+            // FastRPC must find our skel before the first QNN call.
+            android.system.Os.setenv("ADSP_LIBRARY_PATH", "$nativeDir;/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/vendor/dsp", true)
+            // Reflection so this compiles on litertlm 0.10.0 (no Backend.NPU); works on 0.18.1+.
+            Class.forName("com.google.ai.edge.litertlm.Backend\$NPU")
+                .getConstructor(String::class.java)
+                .newInstance(nativeDir) as Backend
+        } catch (e: Throwable) {
+            XLog.w(TAG, "Backend.NPU not available in this litertlm version: ${e.message}")
+            null
+        }
+        else -> null
     }
 
     /**
