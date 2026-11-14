@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * SOS: texts everyone on the distress list, then phones them one by one in the user's priority
- * order (e.g. loved one -> building watchman -> family doctor) until someone stays on the line.
+ * order (e.g. loved one -> building watchman; never the chemist or a doctor) until someone stays on the line.
  *
  * Android does not tell a normal app whether an outgoing call was answered. Rule used here:
  * a call that ends within [LIKELY_UNANSWERED_MS] (ringing + a very short pickup) moves on to the

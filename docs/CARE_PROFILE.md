@@ -28,7 +28,7 @@ needed). "Order my medicines from the chemist" sends the saved medicine list.
 ## SOS
 Triggers: SOS button (chat: tap twice), voice ("bachao", "help me", "emergency", "madad", "kapadandi"...,
 but not "add emergency contact"), or the agent's send_distress_signal tool.
-1. SMS to everyone on the list except the doctor (needs SEND_SMS).
+1. SMS to family and the watchman only; the chemist and doctors are never texted or called (needs SEND_SMS).
 2. Calls in order (needs CALL_PHONE; else opens the dialer for the first one only).
 3. A call that ends within 60 s counts as unanswered → next person. Android doesn't tell apps whether an
    outgoing call was answered, so this errs on calling one person too many.

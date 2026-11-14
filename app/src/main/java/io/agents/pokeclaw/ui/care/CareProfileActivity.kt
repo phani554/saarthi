@@ -222,7 +222,7 @@ private fun CareProfileScreen(onBack: () -> Unit) {
             }
 
             item { Section("SOS call order") }
-            item { Text("When SOS is pressed or she says \"bachao\" / \"help\", Saathi texts everyone, then calls top to bottom until someone answers.", fontSize = 14.sp) }
+            item { Text("When SOS is pressed or she says \"bachao\" / \"help\", Saathi texts family and the watchman, then calls them top to bottom until someone answers. The chemist and doctors are never called.", fontSize = 14.sp) }
             val order = profile.distressOrder()
             items(order.size) { i ->
                 val c = order[i]

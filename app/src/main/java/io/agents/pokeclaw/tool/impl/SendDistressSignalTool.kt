@@ -19,7 +19,7 @@ class SendDistressSignalTool : BaseTool() {
     override fun getName(): String = "send_distress_signal"
 
     override fun getDescriptionEN(): String =
-        "SOS: text and phone the user's emergency contacts (loved one, building watchman, family doctor) in their saved priority order."
+        "SOS: text and phone the user's emergency contacts (family and the building watchman only; never the chemist or a doctor) in their saved priority order."
 
     override fun getDescriptionCN(): String =
         "通过 WhatsApp 或短信向照顾者发送紧急求救信号/SOS警报。"

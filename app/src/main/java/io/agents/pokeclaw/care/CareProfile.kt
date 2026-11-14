@@ -57,9 +57,11 @@ data class CareProfile(
     /** Distress order: the saved priority first, then any other callable contact (loved ones, watchman, doctor). */
     fun distressOrder(): List<CareContact> {
         // Unconfirmed (learned) contacts are never part of the SOS chain.
-        val callable = contacts.filter { it.hasPhone && !it.pending }
+        // SOS reaches only family (loved ones) and the watchman: never the chemist or a doctor,
+        // even if an older saved order listed them (owner rule, 2026-11-14).
+        val defaultRank = listOf(CareRoles.LOVED_ONE, CareRoles.WATCHMAN)
+        val callable = contacts.filter { it.hasPhone && !it.pending && it.role in defaultRank }
         val ordered = distressPriority.mapNotNull { k -> callable.firstOrNull { keyOf(it) == k } }
-        val defaultRank = listOf(CareRoles.LOVED_ONE, CareRoles.WATCHMAN, CareRoles.FAMILY_DOCTOR)
         val rest = callable.filter { it !in ordered && it.role in defaultRank }
             .sortedBy { defaultRank.indexOf(it.role) }
         return ordered + rest
