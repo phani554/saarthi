@@ -521,7 +521,7 @@ class DefaultAgentService : AgentService {
 
         MemoryManager.learnFromMessage(rawUserRequest)
         val (mem0Raw, mem0Source) = HybridMemoryRepository.searchMemories(rawUserRequest)
-        val mem0Memories = if (mem0Source == io.agents.pokeclaw.data.memory.MemorySource.MEM0_CLOUD) mem0Raw else 
+        val mem0Memories = if (mem0Source == io.agents.pokeclaw.data.memory.MemorySource.MEM0_CLOUD) mem0Raw else ""
         val memorySection = MemoryManager.getMemoryPromptSection() +
                 if (mem0Memories.isNotBlank()) "\n\n## Mem0 Cloud Search Results for Request\n$mem0Memories" else ""
         val taskStateSection = TaskExecutionState.instance.toPromptSection()
