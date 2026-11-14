@@ -160,6 +160,8 @@ object MemoryManager {
     }
 
     private fun extractWithAi(raw: String, batch: Long) {
+        // Local mode: no AI fact extraction (it was a cloud call); the offline patterns above still run.
+        if (LlmSessionManager.isLocalOnly()) return
         try {
             val systemPrompt = "You extract personal user facts, relationships, group names, and preferences from user messages regardless of language."
             val prompt = """Analyze this user message for personal facts or relationships:

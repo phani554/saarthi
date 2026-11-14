@@ -2322,9 +2322,7 @@ private fun MonitorDialog(
     var contact by remember { mutableStateOf("") }
     var selectedApp by remember { mutableStateOf("WhatsApp") }
     var appMenuExpanded by remember { mutableStateOf(false) }
-    var selectedTone by remember { mutableStateOf("Casual") }
     val apps = MonitorTargetSpec.supportedApps
-    val tones = listOf("Casual", "Formal", "Funny")
 
     // Centered modal overlay
     Box(
@@ -2453,41 +2451,7 @@ private fun MonitorDialog(
                 }
                 Spacer(Modifier.height(8.dp))
 
-                // Tone row: label + pill chips
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "Tone",
-                        fontSize = 11.sp,
-                        color = colors.textSecondary,
-                        modifier = Modifier.widthIn(min = 50.dp),
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        tones.forEach { tone ->
-                            val isOn = tone == selectedTone
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = if (isOn) colors.userBubble.copy(alpha = 0.1f) else colors.background,
-                                border = androidx.compose.foundation.BorderStroke(
-                                    1.dp,
-                                    if (isOn) colors.userBubble else colors.inputBorder,
-                                ),
-                            ) {
-                                Text(
-                                    tone,
-                                    fontSize = 11.sp,
-                                    color = if (isOn) colors.accent else colors.textSecondary,
-                                    modifier = Modifier
-                                        .clickable { selectedTone = tone }
-                                        .padding(horizontal = 10.dp, vertical = 5.dp),
-                                )
-                            }
-                        }
-                    }
-                }
+                // Tone control removed (owner decision 2026-11-14): the reply tone was never used.
                 Spacer(Modifier.height(6.dp))
 
                 // Start Monitoring button
@@ -2499,7 +2463,6 @@ private fun MonitorDialog(
                                 MonitorTargetSpec(
                                     label = trimmed,
                                     app = selectedApp,
-                                    tone = selectedTone,
                                 )
                             )
                         }

@@ -20,6 +20,12 @@ class ChannelSetup(
 ) {
 
     fun setup() {
+        if (!ChannelFeatures.REMOTE_CHANNELS_ENABLED) {
+            // Telegram / Discord / WeChat are off: stop anything left running and register no listener.
+            ChannelManager.init()
+            ChannelManager.setOnMessageReceivedListener(null)
+            return
+        }
         ChannelManager.init(
             discordBotToken = KVUtils.getDiscordBotToken().ifEmpty { null },
             telegramBotToken = KVUtils.getTelegramBotToken().ifEmpty { null },

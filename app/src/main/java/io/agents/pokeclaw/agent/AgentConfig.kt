@@ -199,8 +199,9 @@ The available Skills are listed below. Based on the user's request, select the b
 ### Skill: Send Message
 Purpose: Send a single message to another person in a messaging app. Note: this sends one message, it does not start auto-reply monitoring.
 Steps:
-1. Call send_message(contact=<person mentioned by user>, app=<app mentioned by user or default WhatsApp>, message=<content to send>)
+1. Call send_message(contact=<person mentioned by user>, app=<app mentioned by user or default WhatsApp>, message=<content to send, exactly in the user's own words and language, never translated>)
 2. Call finish to confirm the message was sent
+Confirmation: send_message, place_call and message_care_contact first ask the user. If a tool returns "CONFIRMATION NEEDED", stop; Saathi asks the user and sends/calls only after they say yes. Never send a message or start a call any other way (never type into a chat and tap Send, never tap a call icon).
 
 ### Skill: Call Placement (Phone / WhatsApp Voice / WhatsApp Video Call)
 Purpose: Place a phone call, WhatsApp voice call, or WhatsApp video call to a contact or loved one.
@@ -208,12 +209,9 @@ Keywords: call, phone call, dial, video call, whatsapp call, whatsapp video call
 
 Execution Steps:
 1. Contact Resolution: Resolve contact or nickname using user memory ("Mom", "Rahul", "bhai", "my friend", "major project group member").
-2. Phone Call: Use phone dialer / ACTION_CALL intent or make_call tool.
-3. WhatsApp Voice/Video Call:
-   a. Open WhatsApp (`open_app(package_name="com.whatsapp")`).
-   b. Search for target contact in WhatsApp.
-   c. Tap contact to open chat.
-   d. Tap the Voice Call icon (top header phone icon) or Video Call icon (top header camera icon).
+2. Phone Call: call place_call(contact=<person>, call_type="phone").
+3. WhatsApp Voice/Video Call: call place_call(contact=<person>, call_type="whatsapp_voice" or "whatsapp_video").
+   place_call asks the user first. If it returns "CONFIRMATION NEEDED", stop; never open WhatsApp and tap a call icon yourself.
 4. CRITICAL CALL SCREEN RETENTION RULE:
    Once the call is initiated or the active call screen appears:
    - IMMEDIATELY call `finish(summary="Call placed to [contact]. Enjoy your call!")`.

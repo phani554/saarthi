@@ -56,7 +56,7 @@ public class SendMessageTool extends BaseTool {
     public List<ToolParameter> getParameters() {
         return Arrays.asList(
                 new ToolParameter("contact", "string", "Contact name or phone number to message (e.g. 'Mom', '+1 604 555 1234')", true),
-                new ToolParameter("message", "string", "The message text to send", true),
+                new ToolParameter("message", "string", "The message text to send, exactly in the user's own words and language (never translate it)", true),
                 new ToolParameter("app", "string", "Messaging app name (default: WhatsApp)", false)
         );
     }
@@ -74,7 +74,12 @@ public class SendMessageTool extends BaseTool {
         Object appParam = params.get("app");
         String app = appParam != null ? appParam.toString() : "WhatsApp";
 
-        XLog.i(TAG, "Sending '" + message + "' to " + contact + " (raw='" + rawContact + "') via " + app);
+        // Always ask the user before a message goes to a person (she answers haan / na).
+        ToolResult ask = io.agents.pokeclaw.agent.OutboundConfirmGate.check(
+                getName(), params, io.agents.pokeclaw.agent.SpokenStrings.confirmSend(rawContact, message));
+        if (ask != null) return ask;
+
+        XLog.i(TAG, "Sending message (" + message.length() + " chars) via " + app);
 
         try {
             // Step 1: Resolve and open the messaging app

@@ -48,11 +48,19 @@ object LlmSessionManager {
         }
 
         val forceOpenRouter = KVUtils.isRouteViaOpenRouter()
-        val openRouterKey = KVUtils.getApiKeyForProvider("OPENROUTER").ifEmpty { cloud.apiKey }.trim()
+        // Only OpenRouter's own key on the OpenRouter route (no fallback to another provider's key).
+        val openRouterKey = KVUtils.getApiKeyForProvider("OPENROUTER").trim()
+        if (forceOpenRouter && openRouterKey.isEmpty()) {
+            XLog.w(TAG, "createCloudChatModel: OpenRouter route on but no OpenRouter key")
+            return null
+        }
         val modelName = if (forceOpenRouter && !cloud.modelName.contains("/")) {
-            "google/gemini-3.8-flash"
+            io.agents.pokeclaw.agent.OPENROUTER_DEFAULT_MODEL
         } else {
-            cloud.modelName.ifEmpty { "gpt-4o-mini" }
+            cloud.modelName.ifEmpty {
+                if (cloud.provider == io.agents.pokeclaw.agent.CloudProvider.OPENROUTER) io.agents.pokeclaw.agent.OPENROUTER_DEFAULT_MODEL
+                else "gpt-4o-mini"
+            }
         }
         val baseUrl = if (forceOpenRouter) "https://openrouter.ai/api/v1" else cloud.resolvedBaseUrl.ifEmpty { "https://api.openai.com/v1" }
 
@@ -68,16 +76,29 @@ object LlmSessionManager {
     }
 
     /**
-     * Creates a ChatModel specifically configured for the designated Voice Interaction & Dialect Model
-     * (e.g., sarvam-105b, z-ai/glm-5.3-flash, or google/gemini-3.5-flash-lite).
+     * The voice-turn / rewrite model. When an OpenRouter key is saved, the old Gemini / Sarvam-LLM
+     * default becomes OpenRouter GLM 5.3 Flash (owner decision 2026-11-14); no UI sets this id.
+     */
+    fun resolveInteractionModel(): String {
+        val saved = KVUtils.getInteractionModelId().trim()
+        val hasOpenRouterKey = KVUtils.getApiKeyForProvider("OPENROUTER").isNotBlank()
+        val oldDefault = saved.isBlank() || saved.contains("gemini", ignoreCase = true) ||
+            saved.startsWith("sarvam", ignoreCase = true)
+        if (hasOpenRouterKey && oldDefault) return io.agents.pokeclaw.agent.OPENROUTER_DEFAULT_MODEL
+        return saved.ifBlank { "gemini-3.5-flash-lite" }
+    }
+
+    /**
+     * Creates a ChatModel for the voice-interaction / prompt-rewrite model (see [resolveInteractionModel]).
+     * Each route uses only its own provider's key; a missing key returns null (no other key is tried).
      */
     fun createInteractionChatModel(temperature: Double = 0.3): ChatModel? {
-        val interactionModel = KVUtils.getInteractionModelId().ifBlank { "google/gemini-3.5-flash-lite" }
+        val interactionModel = resolveInteractionModel()
         val sarvamKey = KVUtils.getSarvamApiKey().trim()
         val forceOpenRouter = KVUtils.isRouteViaOpenRouter()
-        val openRouterKey = KVUtils.getApiKeyForProvider("OPENROUTER").ifEmpty { KVUtils.getLlmApiKey() }.trim()
+        val openRouterKey = KVUtils.getApiKeyForProvider("OPENROUTER").trim()
 
-        if (!forceOpenRouter && (interactionModel.startsWith("sarvam") || interactionModel == "sarvam-105b")) {
+        if (!forceOpenRouter && interactionModel.startsWith("sarvam")) {
             if (sarvamKey.isEmpty()) {
                 XLog.w(TAG, "Sarvam interaction model selected but Sarvam API key is blank")
                 return null
@@ -94,14 +115,13 @@ object LlmSessionManager {
         }
 
         val isOpenRouter = forceOpenRouter || interactionModel.contains("/") || KVUtils.getLlmProvider().equals("OPENROUTER", ignoreCase = true)
-        val resolvedModel = if (forceOpenRouter && !interactionModel.contains("/")) "google/gemini-3.5-flash-lite" else interactionModel
+        val resolvedModel = if (isOpenRouter && !interactionModel.contains("/")) io.agents.pokeclaw.agent.OPENROUTER_DEFAULT_MODEL else interactionModel
         val baseUrl = if (isOpenRouter) "https://openrouter.ai/api/v1" else "https://generativelanguage.googleapis.com/v1beta/openai/"
         // The Google endpoint gets a Google key, never the OpenRouter key (wrong host + guaranteed 401).
-        val apiKey = if (isOpenRouter) openRouterKey
-            else KVUtils.getApiKeyForProvider("GOOGLE").ifEmpty { KVUtils.getLlmApiKey() }.trim()
+        val apiKey = if (isOpenRouter) openRouterKey else KVUtils.getApiKeyForProvider("GOOGLE").trim()
 
         if (apiKey.isEmpty()) {
-            XLog.w(TAG, "Interaction model selected but API key is blank")
+            XLog.w(TAG, "Interaction model selected but its provider key is blank")
             return null
         }
 
@@ -120,6 +140,8 @@ object LlmSessionManager {
      * Single-shot call using the Interaction Model (for dialect turns, quick chat, or prompt rewriting).
      */
     fun singleShotInteraction(systemPrompt: String, userPrompt: String, temperature: Double = 0.2): String? {
+        // Local mode: nothing leaves the phone, so dialect turns / rewrites run on the local model.
+        if (isLocalOnly()) return singleShotLocal(systemPrompt, userPrompt, temperature)
         return try {
             val chatModel = createInteractionChatModel(temperature)
             if (chatModel != null) {
@@ -138,6 +160,14 @@ object LlmSessionManager {
             handleLlmError(e)
             singleShotCloud(systemPrompt, userPrompt, temperature)
         }
+    }
+
+    /** True when the active model is on-device: no cloud LLM or cloud memory calls may be made. */
+    @JvmStatic
+    fun isLocalOnly(): Boolean = try {
+        ModelConfigRepository.snapshot().isLocalActive()
+    } catch (e: Exception) {
+        false
     }
 
     fun handleLlmError(e: Exception) {

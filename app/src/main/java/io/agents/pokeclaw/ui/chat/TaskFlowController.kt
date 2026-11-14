@@ -17,6 +17,8 @@ import io.agents.pokeclaw.AppViewModel
 import io.agents.pokeclaw.ServiceBindingState
 import io.agents.pokeclaw.TaskEvent
 import io.agents.pokeclaw.agent.DirectDeviceDataGuard
+import io.agents.pokeclaw.agent.OutboundConfirmGate
+import io.agents.pokeclaw.agent.SpokenStrings
 import io.agents.pokeclaw.agent.PipelineRouter
 import io.agents.pokeclaw.agent.TaskPromptEnvelope
 import io.agents.pokeclaw.agent.llm.LlmSessionManager
@@ -30,7 +32,6 @@ import io.agents.pokeclaw.ui.settings.SettingsActivity
 import io.agents.pokeclaw.utils.KVUtils
 import io.agents.pokeclaw.utils.XLog
 import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -67,8 +68,6 @@ class TaskFlowController(
             RegexOption.IGNORE_CASE
         )
 
-        // Progress narration goes through a lock in VoiceManager; never do that on the main thread.
-        private val narrationExecutor = Executors.newSingleThreadExecutor()
     }
 
     enum class VoiceInteractionState {
@@ -146,6 +145,9 @@ class TaskFlowController(
             activity.runOnUiThread { addSystem("SOS stopped.") }
             return
         }
+
+        // Answer to "Ravi ko '...' bhejun? Haan ya na?" goes to the parked message / call first.
+        if (handleConfirmationReply(userSpeech)) return
 
         // The selected tab has no model (input is disabled): don't quietly run a voice task on the other mode's model.
         if (!appViewModel.isTaskRunning() && uiState.modelStatus.value == NO_MODEL_STATUS) {
@@ -256,6 +258,7 @@ class TaskFlowController(
      * false when nothing was started, so the voice loop can leave TASK_EXECUTING.
      */
     fun sendTask(text: String): Boolean {
+        if (handleConfirmationReply(text)) return true
         if (appViewModel.isTaskRunning() || isTaskExecutingLock) {
             addSystem("A task is already running. Stop it first.")
             return false
@@ -344,8 +347,16 @@ class TaskFlowController(
         uiState.isAwaitingReply.value = false
         uiState.isTaskRunning.value = false
 
-        if (!KVUtils.hasLlmConfig()) {
-            Toast.makeText(activity, "Configure LLM in Settings first", Toast.LENGTH_LONG).show()
+        // The selected model needs its own key (cloud) or a downloaded model (local); never another provider's key.
+        val modelConfig = ModelConfigRepository.snapshot()
+        val aiReady = if (modelConfig.isLocalActive()) modelConfig.local.isConfigured
+            else modelConfig.activeCloud.apiKey.isNotBlank()
+        if (!aiReady) {
+            val line = SpokenStrings.aiNotSetUp()
+            addUser(text)
+            addSystem(line)
+            VoiceManager.speakAsync(line, flush = true)
+            onPersistConversation()
             return false
         }
 
@@ -355,6 +366,10 @@ class TaskFlowController(
 
         val agentPromptOverride = buildAgentPromptOverride(text)
         addUser(text)
+        // One short start line (voice turns already spoke theirs in PromptRewriter); no per-step speech.
+        if (currentVoiceState != VoiceInteractionState.TASK_EXECUTING) {
+            VoiceManager.speakAsync(SpokenStrings.taskStart(SpokenStrings.appNameIn(text)), flush = true)
+        }
         uiState.isAwaitingReply.value = true
         uiState.isTaskRunning.value = true
         XLog.i(TAG, "sendTask: isProcessing=TRUE")
@@ -389,6 +404,40 @@ class TaskFlowController(
             return false
         }
         return true
+    }
+
+    /**
+     * The user's reply while a message / call waits for her yes (OutboundConfirmGate). "haan" runs exactly
+     * the parked call, "na" drops it; anything else drops it and returns false so it is handled as a
+     * new request. Returns true when the reply was consumed here. Call on the main thread.
+     */
+    fun handleConfirmationReply(text: String): Boolean {
+        if (OutboundConfirmGate.peek() == null) return false
+        if (appViewModel.isTaskRunning() || isTaskExecutingLock) return false
+        return when (OutboundConfirmGate.classify(text)) {
+            OutboundConfirmGate.Reply.YES -> {
+                val approved = OutboundConfirmGate.approve() ?: return false
+                VoiceManager.onPlaybackFinished = null
+                XLog.i(TAG, "User approved parked ${approved.toolName}")
+                executeDirectToolTask(text, DirectDeviceDataGuard.DeterministicToolCall(approved.toolName, approved.params))
+            }
+            OutboundConfirmGate.Reply.NO -> {
+                OutboundConfirmGate.clear()
+                VoiceManager.onPlaybackFinished = null
+                currentVoiceState = VoiceInteractionState.IDLE
+                clearPreTaskHistory()
+                addUser(text)
+                val line = SpokenStrings.declined()
+                addSystem(line)
+                VoiceManager.speakAsync(line, flush = true)
+                onPersistConversation()
+                true
+            }
+            OutboundConfirmGate.Reply.OTHER -> {
+                OutboundConfirmGate.clear()
+                false
+            }
+        }
     }
 
     private fun executeDirectToolTask(text: String, toolCall: DirectDeviceDataGuard.DeterministicToolCall): Boolean {
@@ -490,11 +539,21 @@ class TaskFlowController(
         try {
             when (event) {
                 is TaskEvent.Completed -> {
+                    val fromVoice = currentVoiceState == VoiceInteractionState.TASK_EXECUTING
+                    val askingUser = OutboundConfirmGate.peek() != null
                     replaceTypingIndicator(event.answer, event.modelName)
                     // Single owner of the final spoken answer (agent loop no longer speaks it too).
                     VoiceManager.speakAsync(cleanSpokenAnswer(event.answer), flush = true)
                     cleanupAfterTask()
                     checkAutoReplyConfirmation()
+                    if (askingUser && fromVoice) {
+                        // The answer was "send / call ...? Haan ya na?": open the mic for her reply.
+                        VoiceManager.onPlaybackFinished = {
+                            if (OutboundConfirmGate.peek() != null) {
+                                activity.runOnUiThread { onTriggerVoiceCapture?.invoke() }
+                            }
+                        }
+                    }
                 }
                 is TaskEvent.Failed -> {
                     val rawError = event.error
@@ -536,8 +595,7 @@ class TaskFlowController(
                     uiState.isAwaitingReply.value = false
                     uiState.isTaskRunning.value = true
                     addStep(event.description, success = true)
-                    val description = event.description
-                    narrationExecutor.execute { VoiceManager.speakNative(description) }
+                    // Not spoken: only the task start, questions to the user and the final result are spoken.
                 }
                 is TaskEvent.LoopStart -> {
                     uiState.isAwaitingReply.value = false

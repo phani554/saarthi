@@ -362,6 +362,15 @@ object KVUtils {
         val saved = getString(KEY_LLM_API_KEY, "")
         return saved.ifBlank { BuildConfig.GEMINI_API_KEY }
     }
+
+    /** The generic key slot exactly as saved (no built-in fallback). Used only for the one-time per-provider migration. */
+    fun getSavedLlmApiKey(): String = getString(KEY_LLM_API_KEY, "")
+
+    /**
+     * Gemini key for voice transcription only (when no Sarvam key is set): the saved Google key,
+     * else the old generic slot / built-in key, so voice keeps working. Never used for AI model calls.
+     */
+    fun getVoiceGeminiKey(): String = getApiKeyForProvider("GOOGLE").ifBlank { getLlmApiKey() }
     fun setLlmApiKey(value: String) = putString(KEY_LLM_API_KEY, value)
 
     /** Per-provider API key storage — allows users to save keys for multiple providers simultaneously. */

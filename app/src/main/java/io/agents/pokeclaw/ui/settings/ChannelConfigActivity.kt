@@ -37,6 +37,11 @@ class ChannelConfigActivity : BaseActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (!io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) {
+            // Remote bot channels are switched off: never show the bot-token screen.
+            finish()
+            return
+        }
         setContentView(R.layout.activity_channel_config)
 
         val channelType = intent.getSerializableExtra(EXTRA_CHANNEL_TYPE) as? ChannelType

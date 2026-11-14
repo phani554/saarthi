@@ -147,7 +147,7 @@ class LlmConfigActivity : BaseActivity() {
 
         // Card 2: Interaction Model Name update
         val tvInteractionModel = findViewById<TextView>(R.id.tvVoiceInteractionModelName)
-        val interactionModelId = KVUtils.getInteractionModelId().ifBlank { "gemini-3.5-flash-lite" }
+        val interactionModelId = io.agents.pokeclaw.agent.llm.LlmSessionManager.resolveInteractionModel()
         val isOpenRouterRoute = KVUtils.isRouteViaOpenRouter() || interactionModelId.contains("/")
         val interactionRouteTag = if (isOpenRouterRoute) " (OpenRouter)" else " (Gemini API)"
         tvInteractionModel?.text = "$interactionModelId$interactionRouteTag"
@@ -623,7 +623,8 @@ class LlmConfigActivity : BaseActivity() {
             selectedModelId = when {
                 provider == CloudProvider.CUSTOM -> cloudSeed.modelName
                 provider == cloudSeed.provider && provider.models.any { it.id == cloudSeed.modelName } -> cloudSeed.modelName
-                else -> provider.models.firstOrNull()?.id ?: ""
+                // Recommended model first (OpenRouter: GLM 5.3 Flash), else the first listed.
+                else -> (provider.models.firstOrNull { it.recommended } ?: provider.models.firstOrNull())?.id ?: ""
             }
             updateTabStyles()
             renderModels()

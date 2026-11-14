@@ -8,7 +8,10 @@ Open: Settings → Care profile & SOS (or the red SOS in the chat toolbar).
 - SOS call order
 
 ## Prescription upload
-Photo → Gemini vision (uses the Gemini key in Settings, header auth) → shows medicines, doctor, date,
+Photo → OpenRouter chat completions with the image (model `anthropic/claude-haiku-5.5`, constant
+`PrescriptionExtractor.OPENROUTER_VISION_MODEL`, OpenRouter key from Settings; Gemini only when no OpenRouter
+key is saved and a Google key is). In local mode the screen says "This photo is sent to OpenRouter to read it."
+→ shows medicines, doctor, date,
 conditions and anything unclear → saved only after "Save". Always check names against the paper.
 The prescribing doctor becomes the family doctor only if none is saved.
 

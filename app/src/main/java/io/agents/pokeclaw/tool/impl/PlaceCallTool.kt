@@ -73,6 +73,11 @@ class PlaceCallTool : BaseTool() {
             return ToolResult.error("Missing required parameter: contact")
         }
 
+        // Always ask the user before calling a person (she answers haan / na).
+        io.agents.pokeclaw.agent.OutboundConfirmGate.check(
+            getName(), params, io.agents.pokeclaw.agent.SpokenStrings.confirmCall(rawContact, callType)
+        )?.let { return it }
+
         val context = ClawApplication.instance
         val resolvedContact = ContactAliasResolver.resolve(rawContact)
         XLog.i("PlaceCallTool", "Placing $callType call to '$resolvedContact' (raw: '$rawContact')")

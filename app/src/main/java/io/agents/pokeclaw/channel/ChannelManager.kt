@@ -58,6 +58,12 @@ object ChannelManager {
         handlers.values.forEach {
             try { it.disconnect() } catch (e: Exception) { XLog.w(TAG, "Disconnect before re-init failed: ${e.message}") }
         }
+        if (!ChannelFeatures.REMOTE_CHANNELS_ENABLED) {
+            // Remote channels are switched off: no handlers, so nothing polls, connects or sends.
+            handlers.clear()
+            XLog.i(TAG, "Remote channels disabled (ChannelFeatures.REMOTE_CHANNELS_ENABLED=false)")
+            return
+        }
         handlers[Channel.DISCORD] = DiscordChannelHandler(
             scope,
             discordBotToken?.takeIf { it.isNotEmpty() } ?: "",

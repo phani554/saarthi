@@ -1,18 +1,9 @@
 # Playbook: WhatsApp Calls & Message Forwarding
 
-Follow these steps for WhatsApp Voice Call, Video Call, and Message Forwarding:
+## Calls (voice or video)
+Call `place_call(contact="<contact_name>", call_type="whatsapp_voice")` (or `"whatsapp_video"`, or `"phone"`).
+place_call asks the user first. If it returns "CONFIRMATION NEEDED", stop: Saathi asks the user and places the
+call only after they say yes. Never open WhatsApp and tap the Phone or Camera icon yourself (those taps are blocked).
 
-## Step 1: Contact & Chat Resolution
-1. Open WhatsApp (`open_app(package_name="com.whatsapp")`).
-2. Search for the target contact or group using `find_search_bar(query="<contact_name>")` or `input_text`.
-3. Tap the contact row on the right text area (65% X offset) to open chat.
-
-## Step 2: Chat Verification Guard
-1. Call `get_screen_info` to inspect the top action bar header.
-2. Verify that the contact/group display name matches the user's intended target contact.
-3. If the chat header does NOT match, tap back key and re-search.
-
-## Step 3: Execution & Call Retention
-- **For WhatsApp Voice Call**: Tap the Phone icon in the top header action bar. Once call screen is active, call `finish(summary="Voice call placed to <contact>.")`.
-- **For WhatsApp Video Call**: Tap the Camera icon in the top header action bar. Once video call screen is active, call `finish(summary="Video call placed to <contact>.")`.
-- **For Message Forwarding**: Long-press message -> tap Forward icon -> select target contact -> tap Send. Verify delivery and call `finish`.
+## Message Forwarding
+Forwarding is not supported. Use `send_message` with the text instead; it also asks the user before sending.

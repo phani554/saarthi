@@ -154,6 +154,15 @@ private fun CareProfileScreen(onBack: () -> Unit) {
             }
 
             item { Section("Prescription") }
+            // Local mode keeps everything on the phone, except this photo, which the user chooses to send.
+            if (io.agents.pokeclaw.agent.llm.ModelConfigRepository.isLocalActive()) {
+                item {
+                    Text(
+                        "This photo is sent to ${PrescriptionExtractor.uploadTarget() ?: "OpenRouter"} to read it.",
+                        fontSize = 16.sp
+                    )
+                }
+            }
             item {
                 Button(onClick = { picker.launch("image/*") }, enabled = !busy, modifier = Modifier.fillMaxWidth().height(56.dp)) {
                     Text(if (busy) "Reading prescription…" else "Upload prescription photo", fontSize = 18.sp)

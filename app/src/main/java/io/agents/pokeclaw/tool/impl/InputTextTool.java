@@ -94,6 +94,11 @@ public class InputTextTool extends BaseTool {
             return ToolResult.error("No target text field found" + (nodeId.isEmpty() ? "" : " after tapping node " + nodeId));
         }
 
+        // Never type a PIN / passcode, and never type on a payment screen of a UPI / bank app.
+        if (io.agents.pokeclaw.agent.PaymentGate.blocksTextInput(targetNode, service.getRootInActiveWindow())) {
+            return ToolResult.error("Blocked: this is a PIN / payment field. Saathi never enters a PIN or pays; the user must do it themselves.");
+        }
+
         // First try tapping to gain focus
         targetNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
         targetNode.performAction(AccessibilityNodeInfo.ACTION_CLICK);

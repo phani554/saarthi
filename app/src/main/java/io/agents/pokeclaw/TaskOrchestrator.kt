@@ -194,7 +194,13 @@ class TaskOrchestrator(
                     ToolResult.error(e.message ?: "Tool error")
                 }
                 val toolOk = result.isSuccess
-                if (!toolOk) {
+                val askUser = io.agents.pokeclaw.agent.OutboundConfirmGate.isAskResult(result)
+                if (askUser) {
+                    // Message / call parked until the user says yes: the "result" is the question to her.
+                    val question = io.agents.pokeclaw.agent.OutboundConfirmGate.pendingQuestion() ?: route.description
+                    taskEventCallback?.invoke(TaskEvent.Completed(question))
+                    ChannelManager.sendMessage(channel, question, messageID)
+                } else if (!toolOk) {
                     val err = result.error ?: result.data ?: "failed"
                     XLog.w(TAG, "Tier 1 tool failed: $err")
                     taskEventCallback?.invoke(TaskEvent.Failed("${route.description}: $err"))
@@ -209,7 +215,7 @@ class TaskOrchestrator(
                 ChannelManager.flushMessages(channel)
                 releaseTask()
                 ForegroundService.resetToIdle(ClawApplication.instance)
-                if (toolOk) FloatingCircleManager.setSuccessState() else FloatingCircleManager.setErrorState()
+                if (toolOk || askUser) FloatingCircleManager.setSuccessState() else FloatingCircleManager.setErrorState()
                 onTaskFinished()
                 return
             }

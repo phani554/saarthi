@@ -60,12 +60,13 @@ object ConversationCompactor {
         try {
             val tempConversation = engine.createConversation(
                 ConversationConfig(
-                    systemInstruction = Contents.of("You are an ultra-fast summarization assistant. Produce structured bulleted digests of conversation history without preamble."),
+                    systemInstruction = Contents.of("You are an ultra-fast summarization assistant. Produce structured bulleted digests of conversation history in English, without preamble."),
                     samplerConfig = SamplerConfig(topK = 32, topP = 0.9, temperature = 0.2)
                 )
             )
 
-            val prompt = """Compact this conversation history into structured key points:
+            val prompt = """Compact this conversation history into structured key points.
+Write the digest in English. Keep names, numbers and quoted messages exactly as said.
 - Key Facts: [important names, details, preferences]
 - Decisions: [agreed outcomes]
 - Pending Actions: [open tasks]

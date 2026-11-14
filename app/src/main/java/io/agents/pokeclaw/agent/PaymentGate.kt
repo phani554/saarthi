@@ -112,4 +112,106 @@ object PaymentGate {
         }
         return node
     }
+
+    // ── UPI / bank apps: strict mode (owner decision 2026-11-14) ─────────────────────────────
+    // Saathi never pays. Inside these apps any tap / type / gesture is refused when its target or the
+    // screen looks payment-related, and a PIN is never typed anywhere. Amazon is not listed: it keeps
+    // the label-based checks above (pay screens only). Ids checked against the Play Store and the
+    // Juspay UPI package list (juspay.io/in/docs/api-reference/docs/express-checkout/upi-package-names).
+    @JvmField
+    val UPI_BANK_PACKAGES: Set<String> = setOf(
+        "com.google.android.apps.nbu.paisa.user",   // Google Pay
+        "com.phonepe.app",                          // PhonePe
+        "net.one97.paytm",                          // Paytm
+        "in.org.npci.upiapp",                       // BHIM
+        "com.sbi.lotusintouch",                     // YONO SBI
+        "com.sbi.SBIFreedomPlus",                   // SBI Anywhere / YONO Lite
+        "com.sbi.upi",                              // SBI Pay
+        "com.snapwork.hdfc", "com.snapwork.hdfcbank", "com.enstage.wibmo.hdfc", // HDFC
+        "com.csam.icici.bank.imobile", "com.icicibank.pockets",                 // ICICI
+        "com.axis.mobile", "com.upi.axispay",                                   // Axis
+        "com.kotak.bank.mobile", "com.msf.kbank.mobile",                        // Kotak (new, old)
+        "com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge",     // Kotak 811
+        "com.fss.pnbpsp",                           // PNB UPI
+        "com.mobikwik_new",                         // MobiKwik
+        "com.freecharge.android",                   // Freecharge
+        "com.dreamplug.androidapp",                 // CRED
+        "money.super.payments",                     // super.money
+        "com.samsung.android.spay",                 // Samsung Pay / Wallet
+    )
+
+    private val PAY_SCREEN = Regex(
+        """\b(pay|payment|payments|paying|send money|transfer|amount|upi|pin|mpin|bank|balance|recharge|bill|scan|qr|request money|wallet|debit|credit|card|cvv|otp|proceed|confirm)\b|₹|\brs\.?\s*\d""",
+        RegexOption.IGNORE_CASE
+    )
+    private val PIN_HINT = Regex("""\b(upi\s*pin|m-?pin|atm\s*pin|card\s*pin|pin|passcode|cvv)\b""", RegexOption.IGNORE_CASE)
+    private val POSTAL_PIN = Regex("""\b(pin\s*-?\s*code|pincode|postal|zip)\b""", RegexOption.IGNORE_CASE)
+    private const val SCREEN_SCAN_MAX_NODES = 400
+
+    @JvmStatic
+    fun isUpiOrBankPackage(pkg: CharSequence?): Boolean = pkg != null && pkg.toString() in UPI_BANK_PACKAGES
+
+    /** True when any visible text on the screen of [root] looks payment-related. */
+    @JvmStatic
+    fun isPaymentScreen(root: AccessibilityNodeInfo?): Boolean {
+        if (root == null) return false
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.addLast(root)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < SCREEN_SCAN_MAX_NODES) {
+            val n = queue.removeFirst()
+            visited++
+            val t = n.text?.toString()
+            val d = n.contentDescription?.toString()
+            if ((t != null && PAY_SCREEN.containsMatchIn(t)) || (d != null && PAY_SCREEN.containsMatchIn(d))) return true
+            for (i in 0 until n.childCount) n.getChild(i)?.let { queue.addLast(it) }
+        }
+        return false
+    }
+
+    /** Strict block for a screen root: a UPI / bank app showing anything payment-related. */
+    @JvmStatic
+    fun isStrictBlockedScreen(root: AccessibilityNodeInfo?): Boolean {
+        if (root == null || !isUpiOrBankPackage(root.packageName)) return false
+        val blocked = isPaymentScreen(root)
+        if (blocked) XLog.w(TAG, "Blocked action inside UPI/bank app ${root.packageName}")
+        return blocked
+    }
+
+    /** Strict block for a node target: inside a UPI / bank app, the node or its screen looks payment-related. */
+    @JvmStatic
+    fun isStrictBlockedNode(node: AccessibilityNodeInfo?, activeRoot: AccessibilityNodeInfo?): Boolean {
+        if (node == null || !isUpiOrBankPackage(node.packageName)) return false
+        if (isPaymentNode(node)) return true
+        val root = try { node.window?.root } catch (_: Exception) { null } ?: activeRoot
+        if (root != null && isUpiOrBankPackage(root.packageName)) return isStrictBlockedScreen(root)
+        // No root to read: inside a UPI / bank app, fail closed.
+        return true
+    }
+
+    /** A PIN / passcode / CVV field: never typed into, in any app. */
+    @JvmStatic
+    fun isPinField(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        val hint = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) node.hintText?.toString().orEmpty() else ""
+        val id = node.viewIdResourceName.orEmpty().substringAfter(":id/").replace('_', ' ')
+        val desc = node.contentDescription?.toString().orEmpty()
+        val labels = "$hint $id $desc"
+        // "PIN code" / "pincode" in India is the postal code (delivery address forms): not a secret PIN.
+        val postal = POSTAL_PIN.containsMatchIn(labels)
+        if (!postal && PIN_HINT.containsMatchIn(labels)) return true
+        // Password-type field in a UPI / bank app (PIN pads, login PINs).
+        return node.isPassword && isUpiOrBankPackage(node.packageName)
+    }
+
+    /** Text entry check: block PIN fields everywhere and any typing on a payment screen of a UPI / bank app. */
+    @JvmStatic
+    fun blocksTextInput(node: AccessibilityNodeInfo?, activeRoot: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        if (isPinField(node)) {
+            XLog.w(TAG, "Blocked typing into a PIN / passcode field")
+            return true
+        }
+        return isStrictBlockedNode(node, activeRoot)
+    }
 }

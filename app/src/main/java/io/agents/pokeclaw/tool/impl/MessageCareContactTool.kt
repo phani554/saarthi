@@ -22,12 +22,12 @@ class MessageCareContactTool : BaseTool() {
     override fun getDisplayName() = "Message care contact"
     override fun getDescriptionEN() =
         "WhatsApp a saved care contact by role: chemist, family_doctor, doctor, watchman, loved_one. " +
-            "If message is empty for the chemist, sends the current medicine order list."
+            "If message is empty for the chemist, sends the current medicine order list. Saathi asks the user before sending."
     override fun getDescriptionCN() = getDescriptionEN()
     override fun getParameters() = listOf(
         ToolParameter("role", "string", "chemist | family_doctor | doctor | watchman | loved_one", true),
         ToolParameter("message", "string", "Text to send (optional for chemist)", false),
-        ToolParameter("confirmed", "boolean", "Set true only after the user said yes to the medicine order read back to them (chemist with empty message)", false),
+        ToolParameter("confirmed", "boolean", "Ignored: Saathi itself asks the user before anything is sent", false),
     )
 
     private fun norm(s: String?): String = s.orEmpty().replace(Regex("\\s+"), " ").trim()
@@ -47,13 +47,13 @@ class MessageCareContactTool : BaseTool() {
             message = "Namaste, please send these medicines:\n" + profile.medicines.joinToString("\n") {
                 "- " + listOf(it.name, it.dose).filter { s -> s.isNotBlank() }.joinToString(" ")
             } + "\nThank you."
-            // A medicine order is never sent on the model's say-so alone.
-            if (!optionalBoolean(params, "confirmed", false)) {
-                return ToolResult.error("CONFIRMATION NEEDED, nothing sent. Read this order to the user and ask if it should go to ${contact.label()}. " +
-                    "Only if they say yes, call message_care_contact again with role=chemist and confirmed=true.\n$message")
-            }
         }
         if (message.isBlank()) return ToolResult.error("Message is empty.")
+        // Every message to a care contact is read back first (the medicine order too); the model's
+        // own confirmed=true no longer counts. The SOS chain does not use this tool.
+        io.agents.pokeclaw.agent.OutboundConfirmGate.check(
+            getName(), params, io.agents.pokeclaw.agent.SpokenStrings.confirmSend(contact.label(), message)
+        )?.let { return it }
 
         var digits = contact.digits.removePrefix("+").filter { it.isDigit() }
         if (digits.length == 11 && digits.startsWith("0")) digits = digits.substring(1) // trunk prefix 0XXXXXXXXXX

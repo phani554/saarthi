@@ -64,7 +64,7 @@ class DefaultAgentService : AgentService {
         private const val LOCAL_TASK_PROMPT = """You are Saarthi, an AI phone assistant controlling an Android phone using tools.
 
 ## Execution Rules
-1. Action Tasks: Use high-level direct tools (send_message, place_call, send_distress_signal, message_care_contact (chemist auto-order and auto_reply need confirmed=true after the user says yes), find_search_bar, add_to_cart, read_cart) to execute tasks end-to-end in 1 fast step whenever possible.
+1. Action Tasks: Use high-level direct tools (send_message, place_call, send_distress_signal, message_care_contact; these three ask the user first: on "CONFIRMATION NEEDED" stop, never send or call another way; auto_reply needs confirmed=true after the user says yes, find_search_bar, add_to_cart, read_cart) to execute tasks end-to-end in 1 fast step whenever possible.
 2. E-Commerce Cart Completion: When requested items are added to cart and the Cart Summary / "Pay ₹XX" / "View Cart" CTA is visible on screen, DO NOT perform math calculations or audit price discrepancies! (Differences like delivery fees are normal). Call finish(summary="Items added to cart. Total: ₹XX") IMMEDIATELY! Never switch tabs to audit item prices.
 3. Fact / Memory Statements: If user shares a preference, confirm and call finish(summary="Got it! Noted.").
 4. Precision: Never guess or tap random suggestions. When searching for contacts or items, use exact keywords from memory/request.
@@ -278,6 +278,10 @@ class DefaultAgentService : AgentService {
     // ==================== Pre-flight Check ====================
 
     private fun preCheck(): String? {
+        // Missing key for the selected provider: refuse, never borrow another provider's or a generic key.
+        if (::config.isInitialized && config.provider != LlmProvider.LOCAL && config.apiKey.isBlank()) {
+            return SpokenStrings.AI_NOT_SET_UP_EN
+        }
         if (ClawAccessibilityService.getConnectedInstance(5000L) == null) {
             return ClawApplication.instance.getString(R.string.agent_accessibility_not_enabled)
         }
@@ -373,6 +377,55 @@ class DefaultAgentService : AgentService {
             }
         }
         throw lastException!!
+    }
+
+    // ==================== Recovery BACK ====================
+
+    /** Screens that are never a task's target app (BACK out of them is fine). */
+    private fun isSystemSurface(pkg: String): Boolean =
+        pkg.isBlank() || pkg == ClawApplication.instance.packageName || pkg == "com.android.systemui" ||
+            pkg.contains("launcher") || pkg.contains("settings") || pkg.contains("permission") ||
+            pkg == "android"
+
+    private fun foregroundPkg(service: ClawAccessibilityService): String =
+        try { service.rootInActiveWindow?.packageName?.toString().orEmpty() } catch (_: Exception) { "" }
+
+    private fun relaunchApp(pkg: String): Boolean = try {
+        val ctx = ClawApplication.instance
+        val intent = ctx.packageManager.getLaunchIntentForPackage(pkg)
+        if (intent == null) false else {
+            // NEW_TASK without CLEAR flags brings the app's existing task back as it was.
+            intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+            ctx.startActivity(intent)
+            true
+        }
+    } catch (e: Exception) {
+        XLog.w(TAG, "relaunch of target app failed: ${e.message}")
+        false
+    }
+
+    /**
+     * Recovery BACK that never leaves the target app: when already outside [targetPkg] the app is
+     * relaunched instead of pressing BACK; otherwise BACK is pressed and, if that took the phone out of
+     * the app (it was at its root screen), the app is relaunched. Returns what was done, for the log.
+     */
+    private suspend fun recoveryBack(service: ClawAccessibilityService, targetPkg: String): String {
+        val target = targetPkg.takeUnless { isSystemSurface(it) }
+        val before = foregroundPkg(service)
+        if (target != null && before != target) {
+            return if (relaunchApp(target)) "relaunched" else {
+                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK); "back"
+            }
+        }
+        service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        if (target == null) return "back"
+        delay(700)
+        val after = foregroundPkg(service)
+        if (after.isNotEmpty() && after != target) {
+            XLog.i(TAG, "BACK left the target app; relaunching it")
+            return if (relaunchApp(target)) "back, then relaunched" else "back"
+        }
+        return "back"
     }
 
     // ==================== Dead Loop Detection ====================
@@ -923,6 +976,15 @@ class DefaultAgentService : AgentService {
                     emailComposeGuard.recordSuccessfulTool(toolName)
                 }
 
+                // Outbound message/call parked until the user says yes: end the task with the question
+                // (spoken and shown in her language); TaskFlowController handles her "haan" / "na".
+                if (OutboundConfirmGate.isAskResult(result)) {
+                    val question = OutboundConfirmGate.pendingQuestion() ?: (result.error ?: "")
+                    XLog.i(TAG, "Outbound '$toolName' needs the user's yes; ending the task with the question")
+                    callback.onComplete(iterations, question, totalTokens, actualModelName)
+                    return
+                }
+
                 // System dialog blocking detected → notify user and stop task
                 if (!result.isSuccess && result.error == GetScreenInfoTool.SYSTEM_DIALOG_BLOCKED) {
                     XLog.w(TAG, "System dialog blocked, notifying user and stopping task")
@@ -984,9 +1046,10 @@ class DefaultAgentService : AgentService {
                                 (currentPkg.contains("settings") || currentPkg.contains("permission"))
                             var backtrackNotice = ""
                             if (isAccidentalNav && service != null) {
-                                XLog.w(TAG, "Chain of Thought Backtracking: accidental navigation to '$currentPkg' detected! Pressing Back.")
-                                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-                                backtrackNotice = "\n\n[Chain of Thought Self-Correction] Accidental navigation to '$currentPkg' detected. Auto-backtracked using Back key to unblock screen."
+                                XLog.w(TAG, "Accidental navigation to '$currentPkg' detected; returning to the target app")
+                                // Back to the app the tool started in (relaunch it rather than BACK out of it).
+                                val how = recoveryBack(service, TaskExecutionState.instance.activePackageName)
+                                backtrackNotice = "\n\n[Self-Correction] Accidental navigation to '$currentPkg' detected. Returned to the target app ($how)."
                             }
 
                             val baseData = if (result.isSuccess) (result.data ?: "✓ Action succeeded") else "✗ Error: ${result.error}"
@@ -1062,13 +1125,13 @@ class DefaultAgentService : AgentService {
                                 val cotPrompt = ChainOfThoughtLearnings.getReasoningPrompt(ChainOfThoughtLearnings.IssueType.SUB_SCREEN_OVERLAY, "Blocking overlay auto-dismissed")
                                 messages.add(UserMessage.from(cotPrompt))
                             } else {
-                                XLog.i(TAG, "Active recovery: pressing Back key to unblock screen")
-                                service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                                XLog.i(TAG, "Active recovery: Back (staying inside the target app)")
+                                recoveryBack(service, root.packageName?.toString().orEmpty())
                                 val cotPrompt = ChainOfThoughtLearnings.getReasoningPrompt(ChainOfThoughtLearnings.IssueType.SUB_SCREEN_OVERLAY, "Pressed Back key to clear unresponsive screen")
                                 messages.add(UserMessage.from(cotPrompt))
                             }
                         } catch (_: Exception) {
-                            service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                            recoveryBack(service, root.packageName?.toString().orEmpty())
                             val cotPrompt = ChainOfThoughtLearnings.getReasoningPrompt(ChainOfThoughtLearnings.IssueType.UNRESPONSIVE_BUTTON, "Pressed Back key to unblock screen")
                             messages.add(UserMessage.from(cotPrompt))
                         }
@@ -1078,10 +1141,7 @@ class DefaultAgentService : AgentService {
                     messages.add(UserMessage.from(cotPrompt))
                 }
 
-                // Gentle senior citizen voice guidance if 12+ steps pass
-                if (iterations >= 12 && iterations % 4 == 0) {
-                    io.agents.pokeclaw.service.VoiceManager.speakAsync("I am trying to complete this for you. If you see a prompt on your screen, please tap allow or confirm so I can continue.", flush = false)
-                }
+                // No mid-task speech (owner decision 2026-11-14): only task start, questions and the result are spoken.
             }
             XLog.d(TAG, "Round:$iterations total=$totalTokens thisRound=${llmResponse.tokenUsage?.totalTokenCount()}")
         }

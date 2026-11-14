@@ -82,6 +82,7 @@ Rules:
 3. Pre-Task Confirmation & Intent:
    - Check if user is confirming: 'proceed', 'go ahead', 'yes', 'start', 'ha', 'sahi hai', 'sare', 'avunu', 'cheyyi', 'seri', 'ok'.
    - IF confirmed: set isConfirmed=true, isCancelled=false, spokenResponse="Starting task now.", cleanedEnglishTask="<Clean English Instruction for GLM 5.3>".
+   - cleanedEnglishTask is always English, EXCEPT the text of a message the user wants sent: keep that exactly in the user's own words and language, in quotes (e.g. Send message to Ravi: "main aa rahi hoon"). Never translate it.
    - IF initial request or changes: set isConfirmed=false, isCancelled=false, respond in user's language asking for confirmation.
 4. Output ONLY a valid JSON object with keys: "spokenResponse", "isConfirmed", "isCancelled", "cleanedEnglishTask"."""
 
@@ -119,7 +120,10 @@ Return JSON object:"""
 
                     XLog.i(TAG, "Interaction turn: confirmed=$confirmed, cancelled=$cancelled, taskLen=${finalTask.length}")
                     return InteractionResult(
-                        spokenResponse = spoken.ifBlank { if (confirmed) "Task start kar raha hoon." else "Kya main yeh karoon? Haan ya nahi boliye." },
+                        // Start line in her language ("Theek hai, WhatsApp khol rahi hoon"); the model's
+                        // own confirmed line was often the English "Starting task now."
+                        spokenResponse = if (confirmed) SpokenStrings.taskStart(SpokenStrings.appNameIn(finalTask))
+                            else spoken.ifBlank { "Kya main yeh karoon? Haan ya nahi boliye." },
                         isConfirmed = confirmed,
                         cleanedEnglishTask = finalTask,
                         isCancelled = cancelled
@@ -153,7 +157,7 @@ Return JSON object:"""
         pendingCleanedTask = if (isCancelled || isConfirmed) "" else optimized
         val spoken = when {
             isCancelled -> "Okay, no problem! Let me know if you need anything else."
-            isConfirmed -> "Task start kar raha hoon."
+            isConfirmed -> SpokenStrings.taskStart(SpokenStrings.appNameIn(optimized))
             else -> "Maine samjha: $optimized. 'Proceed' boleine start karne ke liye."
         }
 
@@ -199,7 +203,7 @@ Rules:
 2. Explicitly analyze the User Memory and Mem0 search results above!
    - If user asks to order an item (e.g. "milk" or "bread") that has a preferred brand/variant in memory (e.g. "Amul Taaza 1L Milk"), explicitly include that exact brand/variant in the prompt so the agent searches the exact item!
    - If user mentions a contact nickname or group (e.g. "Mom" or "project group") that has a display name in memory (e.g. "Sarita (Mom)" or "Final Year Project"), explicitly use that display name!
-3. Combine multi-clause messaging (e.g. "send hi to Mom for dinner and ask her what I should bring") into ONE clear instruction: "Send message to Mom: 'Hi, what should I bring for dinner?'".
+3. Combine multi-clause messaging into ONE clear instruction, but keep the message text itself exactly in the user's own words and language, in quotes, never translated (e.g. "Ravi ko bolo main aa rahi hoon" -> Send message to Ravi: "main aa rahi hoon").
 4. Preserve size/quantity/volume constraints (e.g. "1L amul milk", "pepsi 250ml").
 5. Output ONLY the optimized English action task. No preamble."""
 

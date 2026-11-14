@@ -163,7 +163,20 @@ Saathi is designed as a digital companion that interprets a user's intent, manag
 - Emergency **KILL TASK** action to cancel active orchestration work.
 - Explicit task states for planning, execution, recovery, waiting for the user, completion, failure, and cancellation.
 
+### 🎯 Scope (2026-11-14)
+
+- Saathi works only on this phone: WhatsApp, other installed apps, and quick-commerce apps (Blinkit, Zepto, Instamart, Flipkart Minutes, BigBasket and similar).
+- Remote-control channels (Telegram, Discord, WeChat bots) are switched off by one flag, `ChannelFeatures.REMOTE_CHANNELS_ENABLED`, and their settings are hidden.
+
 ### 🛡️ Safety-oriented behavior
+
+- **Asks before contacting anyone:** every message or call to a person (send_message, message_care_contact, place_call / WhatsApp call) is read back first, e.g. "Ravi ko 'main aa rahi hoon' bhejun? Haan ya na?", and goes out only after the user says yes. The SOS chain stays automatic.
+- **Shopping list read-back:** a list read from a WhatsApp chat is read back and added to the cart only after "haan".
+- **Never pays:** inside UPI and bank apps (Google Pay, PhonePe, Paytm, BHIM, SBI, HDFC, ICICI, Axis, Kotak, MobiKwik, Freecharge, CRED, super.money and others) any tap, typing or gesture on a payment screen is refused, and a PIN is never typed in any app.
+- **Stays in the target app:** recovery BACK relaunches the target app instead of leaving it.
+- **Quiet narration:** Saathi speaks the task start, any question to the user and the final result, never each step.
+- **Local mode keeps data on the phone:** with an on-device model, no cloud LLM, Mem0 or AI fact extraction is used (voice STT/TTS still uses Sarvam when set up; a prescription photo is sent only when the user uploads one, with a notice).
+- **No borrowed keys:** a missing key for the selected AI provider gives "AI is not set up. Open Settings › AI model." instead of using another provider's key.
 
 - Prefer semantic accessibility selectors over screen coordinates.
 - Detect repeated UI states and attempt bounded recovery.

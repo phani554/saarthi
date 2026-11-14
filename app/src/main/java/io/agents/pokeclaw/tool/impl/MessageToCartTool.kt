@@ -4,6 +4,8 @@
 package io.agents.pokeclaw.tool.impl
 
 import io.agents.pokeclaw.agent.MessageToCartPipeline
+import io.agents.pokeclaw.agent.OutboundConfirmGate
+import io.agents.pokeclaw.agent.SpokenStrings
 import io.agents.pokeclaw.tool.BaseTool
 import io.agents.pokeclaw.tool.ToolParameter
 import io.agents.pokeclaw.tool.ToolResult
@@ -36,7 +38,35 @@ class MessageToCartTool : BaseTool() {
 
         val contact = requireString(params, "contact").trim()
         val storeApp = optionalString(params, "store_app", "Flipkart Minutes").trim()
+        val storePackage = MessageToCartPipeline.storePackageFor(storeApp)
+            ?: return ToolResult.error("Unknown store '$storeApp'. Use Blinkit, Zepto, Flipkart Minutes or Amazon.")
 
-        return MessageToCartPipeline.execute(service, contact, storeApp)
+        // Second pass: the user said yes to the list read back to her; add exactly those items.
+        val approvedItems = optionalString(params, ITEMS_PARAM, "")
+            .split('\n').map { it.trim() }.filter { it.isNotEmpty() }
+        if (approvedItems.isNotEmpty() && OutboundConfirmGate.consumeApproval(params)) {
+            return MessageToCartPipeline.addToCart(service, storePackage, approvedItems)
+        }
+
+        // First pass: read and parse the list, then ask her before anything goes into a cart.
+        val read = MessageToCartPipeline.readItems(service, contact)
+        read.error?.let { return it }
+        val parked = mapOf<String, Any>(
+            "contact" to contact,
+            "store_app" to storeApp,
+            ITEMS_PARAM to read.items.joinToString("\n"),
+        )
+        return OutboundConfirmGate.check(
+            getName(), parked,
+            SpokenStrings.confirmShoppingList(read.items, storeApp),
+            "nothing was added to the cart yet. Saathi reads these items to the user and adds them only " +
+                "after they say yes: ${read.items.joinToString("; ")}. Stop here: do not call this tool again " +
+                "and do not add these items any other way."
+        ) ?: MessageToCartPipeline.addToCart(service, storePackage, read.items)
+    }
+
+    companion object {
+        /** Internal param holding the read-back list (newline-separated); not offered to the model. */
+        private const val ITEMS_PARAM = "__confirmed_items"
     }
 }

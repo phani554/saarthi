@@ -101,8 +101,9 @@ object HybridMemoryRepository : MemoryRepository {
     ): Pair<String, MemorySource> = withContext(Dispatchers.IO) {
         val apiKey = KVUtils.getMem0ApiKey().trim()
 
-        if (!isApiKeyValid(apiKey)) {
-            XLog.d(TAG, "Mem0 API key missing or unconfigured; using LOCAL_FALLBACK")
+        // Local mode: nothing leaves the phone, so no Mem0 cloud search.
+        if (!isApiKeyValid(apiKey) || io.agents.pokeclaw.agent.llm.LlmSessionManager.isLocalOnly()) {
+            XLog.d(TAG, "Mem0 skipped (no key or local mode); using LOCAL_FALLBACK")
             _activeMemorySource.value = MemorySource.LOCAL_FALLBACK
             return@withContext Pair(MemoryManager.relevantFactsText(query), MemorySource.LOCAL_FALLBACK)
         }
@@ -157,7 +158,8 @@ object HybridMemoryRepository : MemoryRepository {
         // path is also used for internal notes (stuck recovery, "user_preference_fact"), which then
         // triggered an extra LLM call each time and wrote junk into the user's memory.
 
-        if (!isApiKeyValid(apiKey)) {
+        // Local mode: nothing leaves the phone, so no Mem0 cloud write.
+        if (!isApiKeyValid(apiKey) || io.agents.pokeclaw.agent.llm.LlmSessionManager.isLocalOnly()) {
             _activeMemorySource.value = MemorySource.LOCAL_FALLBACK
             return@withContext MemorySource.LOCAL_FALLBACK
         }

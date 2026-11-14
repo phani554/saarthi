@@ -119,6 +119,10 @@ public class FindAndTapTool extends BaseTool {
                     node.getBoundsInScreen(bounds);
                     int cx = bounds.centerX();
                     int cy = bounds.centerY();
+                    if (io.agents.pokeclaw.agent.OutboundConfirmGate.isDirectOutboundControl(node)
+                            || io.agents.pokeclaw.agent.OutboundConfirmGate.isDirectOutboundAt(service.getRootInActiveWindow(), cx, cy)) {
+                        return ToolResult.error(io.agents.pokeclaw.agent.OutboundConfirmGate.DIRECT_SEND_BLOCKED);
+                    }
                     boolean tapped = service.performTap(cx, cy);
                     if (tapped) {
                         XLog.i(TAG, "Found and tapped \"" + text + "\" at (" + cx + "," + cy + ")");

@@ -19,12 +19,16 @@ import java.io.ByteArrayOutputStream
 import java.util.concurrent.TimeUnit
 
 /**
- * Reads a prescription photo with Gemini (vision) and returns medicines, doctor and conditions.
+ * Reads a prescription photo with a vision model on OpenRouter (Gemini only as a fallback when no
+ * OpenRouter key is saved) and returns medicines, doctor and conditions.
  * Nothing is saved here; the UI shows the result and the user confirms before it is stored.
  */
 object PrescriptionExtractor {
     private const val TAG = "PrescriptionExtractor"
-    private const val MODEL = "gemini-2.5-flash"
+    /** Vision model on OpenRouter, picked for low hallucination when reading medicines. Easy to change. */
+    const val OPENROUTER_VISION_MODEL = "anthropic/claude-haiku-5.5"
+    private const val OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+    private const val GEMINI_MODEL = "gemini-2.5-flash"
 
     data class Extraction(
         val medicines: List<Medicine>,
@@ -39,14 +43,25 @@ object PrescriptionExtractor {
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
 
-    /** Blocking; call off the main thread. */
+    /** Where the photo goes for reading: "OpenRouter", "Google Gemini", or null when no key is set. */
+    fun uploadTarget(): String? = when {
+        openRouterKey().isNotBlank() -> "OpenRouter"
+        geminiKey().isNotBlank() -> "Google Gemini"
+        else -> null
+    }
+
+    private fun openRouterKey(): String = KVUtils.getApiKeyForProvider("OPENROUTER").trim()
+
+    /** Gemini fallback key: only a key saved for Google (no generic or built-in key). */
+    private fun geminiKey(): String = KVUtils.getApiKeyForProvider("GOOGLE").ifBlank {
+        if (KVUtils.getLlmProvider().equals("GOOGLE", ignoreCase = true)) KVUtils.getSavedLlmApiKey() else ""
+    }.trim()
+
+    /** Blocking; call off the main thread. Nothing is saved here (the user taps Save on the result). */
     fun extract(context: Context, imageUri: Uri): kotlin.Result<Extraction> = runCatching {
-        // This call goes to Google: only ever send a Google key (never an OpenAI/OpenRouter key).
-        val apiKey = KVUtils.getApiKeyForProvider("GOOGLE").ifBlank {
-            if (KVUtils.getLlmProvider().equals("GOOGLE", ignoreCase = true)) KVUtils.getLlmApiKey()
-            else io.agents.pokeclaw.BuildConfig.GEMINI_API_KEY
-        }.trim()
-        require(apiKey.isNotBlank()) { "No Gemini API key set (Settings → Models)." }
+        val orKey = openRouterKey()
+        val gKey = if (orKey.isBlank()) geminiKey() else ""
+        require(orKey.isNotBlank() || gKey.isNotBlank()) { "Set your OpenRouter key in Settings." }
         val jpeg = loadScaledJpeg(context, imageUri)
         val prompt = """
             This is a photo of a medical prescription from India. Read it carefully, including handwriting.
@@ -59,7 +74,48 @@ object PrescriptionExtractor {
             Rules: frequency like "1-0-1" or "twice daily after food". Leave a field "" if you cannot read it;
             never guess a medicine name. Put anything unclear in warnings.
         """.trimIndent()
+        val text = if (orKey.isNotBlank()) readWithOpenRouter(orKey, jpeg, prompt) else readWithGemini(gKey, jpeg, prompt)
+        parse(text)
+    }.onFailure { XLog.w(TAG, "extract failed: ${it.message}") } // never logs the key
 
+    /** OpenRouter chat completions with the image as a data URL; JSON-object response. */
+    private fun readWithOpenRouter(apiKey: String, jpeg: ByteArray, prompt: String): String {
+        val dataUrl = "data:image/jpeg;base64," + Base64.encodeToString(jpeg, Base64.NO_WRAP)
+        val body = JSONObject().apply {
+            put("model", OPENROUTER_VISION_MODEL)
+            put("temperature", 0.1)
+            put("response_format", JSONObject().put("type", "json_object"))
+            put("messages", JSONArray()
+                .put(JSONObject().put("role", "system").put("content",
+                    "You read Indian medical prescriptions for an elderly user's care profile. Never guess; return only JSON."))
+                .put(JSONObject().put("role", "user").put("content", JSONArray()
+                    .put(JSONObject().put("type", "text").put("text", prompt))
+                    .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", dataUrl))))))
+        }
+        val request = Request.Builder()
+            .url(OPENROUTER_URL)
+            .addHeader("Authorization", "Bearer $apiKey")
+            .addHeader("HTTP-Referer", "https://pokeclaw.agents.io")
+            .addHeader("X-Title", "Saathi")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        XLog.i(TAG, "Reading prescription via OpenRouter ($OPENROUTER_VISION_MODEL, key ${mask(apiKey)})")
+        return http.newCall(request).execute().use { resp ->
+            val raw = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) error("OpenRouter HTTP ${resp.code}")
+            val content = JSONObject(raw).optJSONArray("choices")?.optJSONObject(0)
+                ?.optJSONObject("message")?.opt("content")
+            // content is normally a string; some providers return an array of text parts.
+            when (content) {
+                is String -> content
+                is JSONArray -> (0 until content.length()).joinToString("") { content.optJSONObject(it)?.optString("text").orEmpty() }
+                else -> ""
+            }
+        }
+    }
+
+    /** Fallback only when no OpenRouter key is saved and a Google key is. */
+    private fun readWithGemini(apiKey: String, jpeg: ByteArray, prompt: String): String {
         val body = JSONObject().apply {
             put("contents", JSONArray().put(JSONObject().put("parts", JSONArray()
                 .put(JSONObject().put("inline_data", JSONObject()
@@ -71,18 +127,20 @@ object PrescriptionExtractor {
                 .put("responseMimeType", "application/json"))
         }
         val request = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/$MODEL:generateContent")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$GEMINI_MODEL:generateContent")
             .addHeader("x-goog-api-key", apiKey)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        val text = http.newCall(request).execute().use { resp ->
+        XLog.i(TAG, "Reading prescription via Gemini fallback (key ${mask(apiKey)})")
+        return http.newCall(request).execute().use { resp ->
             val raw = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) error("Gemini HTTP ${resp.code}")
             JSONObject(raw).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")
                 ?.optJSONArray("parts")?.optJSONObject(0)?.optString("text").orEmpty()
         }
-        parse(text)
-    }.onFailure { XLog.w(TAG, "extract failed: ${it.message}") }
+    }
+
+    private fun mask(key: String): String = if (key.length <= 8) "****" else key.take(4) + "…" + key.takeLast(2)
 
     internal fun parse(text: String): Extraction {
         val start = text.indexOf('{'); val end = text.lastIndexOf('}')

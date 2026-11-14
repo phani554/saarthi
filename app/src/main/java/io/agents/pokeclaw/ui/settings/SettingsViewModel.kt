@@ -109,6 +109,8 @@ class SettingsViewModel : ViewModel() {
      * WeChat iLink QR code login flow
      */
     fun startWeChatQrLogin(context: Context) {
+        // WeChat QR pairing is part of the remote channels, which are switched off.
+        if (!io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) return
         viewModelScope.launch {
             val loadingDialog = io.agents.pokeclaw.widget.LoadingDialog.show(
                 context = context,

@@ -3,7 +3,6 @@
 
 package io.agents.pokeclaw.agent
 
-import android.accessibilityservice.AccessibilityService
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 import io.agents.pokeclaw.service.ClawAccessibilityService
@@ -25,60 +24,57 @@ object MessageToCartPipeline {
 
     private const val TAG = "MessageToCartPipeline"
 
-    fun execute(service: ClawAccessibilityService, contactName: String, storeApp: String): ToolResult {
-        XLog.i(TAG, "Starting MessageToCartPipeline for contact '$contactName' on store '$storeApp'")
+    /** Store package for a spoken / typed store name, or null when unknown (never a silent default). */
+    fun storePackageFor(storeApp: String): String? {
+        val s = storeApp.lowercase()
+        return when {
+            s.contains("flipkart") -> "com.flipkart.android"
+            s.contains("blinkit") -> "com.grofers.customerapp"
+            s.contains("zepto") -> "com.zeptoconsumerapp"
+            s.contains("amazon") -> "com.amazon.mShop.android.shopping"
+            else -> null
+        }
+    }
 
-        // Step 1: Open WhatsApp and navigate to contact chat
+    /** Item list as read from the chat, or an error result. Items stay verbatim (her contact's words). */
+    data class ReadResult(val items: List<String>, val error: ToolResult?)
+
+    /**
+     * Step 1 (before asking the user): open the contact's WhatsApp chat, read the latest incoming
+     * message and parse the list. Nothing is added to any cart here.
+     */
+    fun readItems(service: ClawAccessibilityService, contactName: String): ReadResult {
+        XLog.i(TAG, "Reading shopping list from a WhatsApp chat")
         val opened = ContactListUiUtils.prepareForContactLookup(service, "com.whatsapp", 3, 600L)
-        if (!opened) return ToolResult.error("Could not open WhatsApp chat list")
+        if (!opened) return ReadResult(emptyList(), ToolResult.error("Could not open WhatsApp chat list"))
 
         val normalized = ContactMatchUtils.buildNormalizedAliases(contactName)
         val digits = ContactMatchUtils.buildDigitAliases(contactName)
         val found = ContactListUiUtils.searchOrScrollAndFindAndClick(service, contactName, normalized, digits, 6, 400L)
+        if (!found) return ReadResult(emptyList(), ToolResult.error("Could not find contact '$contactName' in WhatsApp"))
 
-        if (!found) return ToolResult.error("Could not find contact '$contactName' in WhatsApp")
+        // 1.0s UI settle pause for the chat to render its message TextViews
+        try { Thread.sleep(1000L) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
 
-        // 1.0s UI Settle Pause for WhatsApp chatroom screen to open and render message TextViews
-        XLog.i(TAG, "Pausing 1.0s for WhatsApp chatroom screen to fully render message text")
-        try { Thread.sleep(1000L) } catch (_: Exception) {}
-
-        // Step 2: Read latest message text from chat screen
-        val root = service.rootInActiveWindow ?: return ToolResult.error("Screen unavailable after chat open")
+        val root = service.rootInActiveWindow
+            ?: return ReadResult(emptyList(), ToolResult.error("Screen unavailable after chat open"))
         val messageText = extractLatestChatMessage(root)
-        if (messageText.isBlank()) return ToolResult.error("No message found in chat with '$contactName'")
-
+        if (messageText.isBlank()) return ReadResult(emptyList(), ToolResult.error("No message found in chat with '$contactName'"))
         XLog.i(TAG, "Extracted latest incoming message (len=${messageText.length})")
 
-        // Step 3: Extract items from message text
         val items = parseShoppingItemsFromMessage(messageText)
-        if (items.isEmpty()) return ToolResult.error("Could not parse shopping items from message: '$messageText'")
-
+        if (items.isEmpty()) return ReadResult(emptyList(), ToolResult.error("Could not parse shopping items from the latest message"))
         XLog.i(TAG, "Parsed ${items.size} shopping items")
+        return ReadResult(items, null)
+    }
 
-        // Close WhatsApp completely by pressing Back twice before opening target store
-        service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-        try { Thread.sleep(300L) } catch (_: Exception) {}
-        service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-        try { Thread.sleep(300L) } catch (_: Exception) {}
-
-        // Step 4: Execute fast multi-product order on target store
-        val storePackage = when {
-            storeApp.lowercase().contains("flipkart") -> "com.flipkart.android"
-            storeApp.lowercase().contains("blinkit") -> "com.grofers.customerapp"
-            storeApp.lowercase().contains("zepto") -> "com.zeptoconsumerapp"
-            storeApp.lowercase().contains("amazon") -> "com.amazon.mShop.android.shopping"
-            // Never silently order on a store the user did not name.
-            else -> return ToolResult.error("I don't know the store '$storeApp'. Please say Blinkit, Zepto, Flipkart or Amazon.")
-        }
-
+    /** Step 2 (only after the user said yes to the read-back): add the items on the store. */
+    fun addToCart(service: ClawAccessibilityService, storePackage: String, items: List<String>): ToolResult {
+        XLog.i(TAG, "Adding ${items.size} confirmed items on $storePackage")
         service.openApp(storePackage)
-        try { Thread.sleep(600L) } catch (_: Exception) {}
-
-        val cartResult = EcommerceAutomationHelper.processMultiProductOrderList(service, items)
-
-        // Step 5 removed: it auto-sent a WhatsApp message to the contact without asking the user.
-
-        return cartResult
+        try { Thread.sleep(600L) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+        // No message is sent back to the contact (it used to be, without asking the user).
+        return EcommerceAutomationHelper.processMultiProductOrderList(service, items)
     }
 
     private fun extractLatestChatMessage(root: AccessibilityNodeInfo): String {

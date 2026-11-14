@@ -22,14 +22,15 @@ import okio.Buffer;
 
 /**
  * Adapts OkHttp's builder to LangChain4j's HttpClientBuilder SPI.
- * Enforces fast 5s connect and 12s read timeouts to prevent tasks from hanging on network stalls.
+ * Enforces a 5s connect and 25s read timeout (was 12s, raised 2026-11-14: slow first tokens on big
+ * prompts timed out and retried) so tasks still cannot hang forever on network stalls.
  */
 public class OkHttpClientBuilderAdapter implements HttpClientBuilder {
 
     private static final String TAG = "OkHttp";
 
     private Duration connectTimeout = Duration.ofSeconds(5);
-    private Duration readTimeout = Duration.ofSeconds(12);
+    private Duration readTimeout = Duration.ofSeconds(25);
 
     /**
      * Whether to write raw request/response data to a file (sandbox cache directory)

@@ -105,7 +105,7 @@ class ComposeChatActivity : ComponentActivity() {
         }
 
         val hasSarvamKey = KVUtils.getSarvamApiKey().trim().isNotEmpty()
-        val hasGeminiKey = KVUtils.getLlmApiKey().trim().isNotEmpty()
+        val hasGeminiKey = KVUtils.getVoiceGeminiKey().trim().isNotEmpty()
 
         if (hasSarvamKey || hasGeminiKey) {
             // "Listening" is shown in the chat's status area (VoiceEngineState.Recording), not a toast.
@@ -361,6 +361,8 @@ class ComposeChatActivity : ComponentActivity() {
     // ==================== CHAT ====================
 
     private fun sendChat(text: String) {
+        // "haan" / "na" to a parked message or call (asked at the end of a task) is not a chat turn.
+        if (taskFlowController.handleConfirmationReply(text)) return
         chatSessionController.sendChat(text)
     }
 

@@ -261,19 +261,19 @@ class SettingsActivity : BaseActivity() {
         val channelGroup = findViewById<MenuGroup>(R.id.channelGroup)
         channelGroup.setTitle(getString(R.string.settings_group_channel))
 
-        menuItems[SettingsViewModel.MenuAction.DISCORD.name] = channelGroup.addMenuItem(
+        if (io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) menuItems[SettingsViewModel.MenuAction.DISCORD.name] = channelGroup.addMenuItem(
             leadingIcon = R.drawable.ic_channel_discord,
             title = getString(R.string.menu_discord),
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.DISCORD) },
             showDivider = true
         )
-        menuItems[SettingsViewModel.MenuAction.TELEGRAM.name] = channelGroup.addMenuItem(
+        if (io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) menuItems[SettingsViewModel.MenuAction.TELEGRAM.name] = channelGroup.addMenuItem(
             leadingIcon = R.drawable.ic_channel_telegram,
             title = getString(R.string.menu_telegram),
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.TELEGRAM) },
             showDivider = true
         )
-        menuItems[SettingsViewModel.MenuAction.WECHAT.name] = channelGroup.addMenuItem(
+        if (io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) menuItems[SettingsViewModel.MenuAction.WECHAT.name] = channelGroup.addMenuItem(
             leadingIcon = R.drawable.ic_channel_wechat,
             title = getString(R.string.menu_wechat),
             onClick = { viewModel.onMenuItemClick(SettingsViewModel.MenuAction.WECHAT) },
@@ -411,11 +411,15 @@ class SettingsActivity : BaseActivity() {
             setTrailingText("12 enabled")
         }
 
-        // Remote Control
+        // Remote Control (Telegram / Discord / WeChat bots). Switched off by product scope:
+        // the whole group is hidden while ChannelFeatures.REMOTE_CHANNELS_ENABLED is false.
         val remoteGroup = findViewById<MenuGroup>(R.id.remoteGroup)
         remoteGroup.setTitle("Remote Control")
+        if (!io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) {
+            remoteGroup.visibility = android.view.View.GONE
+        }
 
-        remoteGroup.addMenuItem(
+        if (io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) remoteGroup.addMenuItem(
             leadingIcon = android.R.drawable.ic_menu_send,
             title = "Telegram Bot",
             onClick = {
@@ -553,6 +557,13 @@ class SettingsActivity : BaseActivity() {
                 // Observe menu click events
                 launch {
                     viewModel.menuClickEvent.collect { action ->
+                        val remoteOff = !io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED
+                        if (remoteOff && (action == SettingsViewModel.MenuAction.WECHAT ||
+                                action == SettingsViewModel.MenuAction.DISCORD ||
+                                action == SettingsViewModel.MenuAction.TELEGRAM)) {
+                            viewModel.clearMenuClickEvent()
+                            return@collect
+                        }
                         when (action) {
                             SettingsViewModel.MenuAction.WECHAT -> {
                                 if (viewModel.isWechatBound()) {

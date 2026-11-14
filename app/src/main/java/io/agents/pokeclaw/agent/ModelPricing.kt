@@ -42,7 +42,8 @@ object ModelPricing {
         "gemini-3.1-flash-live-preview" to Price(0.10, 0.40),
 
         // Open-source via OpenRouter/Groq
-        "glm-5.3-flash" to Price(0.06, 0.06),
+        "glm-5.3-flash" to Price(0.04, 0.078),
+        "deepseek-v4.1-flash" to Price(0.051, 0.203),
         "glm-4-flash" to Price(0.06, 0.06),
         "qwen3.8-flash" to Price(0.05, 0.15),
         "qwen3.8-max" to Price(0.40, 1.20),

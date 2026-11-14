@@ -54,6 +54,9 @@ public class TapTool extends BaseTool {
         int y = requireInt(params, "y");
         String boundsError = validateCoordinates(x, y);
         if (boundsError != null) return ToolResult.error(boundsError);
+        if (io.agents.pokeclaw.agent.OutboundConfirmGate.isDirectOutboundAt(service.getRootInActiveWindow(), x, y)) {
+            return ToolResult.error(io.agents.pokeclaw.agent.OutboundConfirmGate.DIRECT_SEND_BLOCKED);
+        }
         service.dismissKeyboard();
         boolean success = service.performTap(x, y);
         return success ? ToolResult.success("Tapped at (" + x + ", " + y + ")")

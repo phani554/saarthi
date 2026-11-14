@@ -461,7 +461,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
     private fun processVoiceInputAutoKey(audioBytes: ByteArray, mimeType: String, onTranscript: (String) -> Unit) {
         val sarvamKey = KVUtils.getSarvamApiKey().trim()
-        val geminiKey = KVUtils.getLlmApiKey().trim()
+        val geminiKey = KVUtils.getVoiceGeminiKey().trim()
 
         if (sarvamKey.isNotEmpty()) {
             processSarvamVoiceInput(audioBytes, mimeType, sarvamKey, onTranscript)

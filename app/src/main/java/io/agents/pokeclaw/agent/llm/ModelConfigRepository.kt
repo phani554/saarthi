@@ -216,15 +216,42 @@ object ModelConfigRepository {
         modelName: String,
         baseUrl: String
     ): CloudModelConfig {
-        val normalizedProvider = normalizeCloudProvider(providerName)
-        val apiKey = KVUtils.getApiKeyForProvider(normalizedProvider)
-            .ifEmpty { KVUtils.getLlmApiKey() }
+        val normalizedProvider = normalizedProviderWithMigration(providerName)
+        // Only the selected provider's own key: no fallback to another provider's key or the
+        // generic / built-in key (owner decision 2026-11-14). Blank key -> "AI is not set up".
+        val apiKey = KVUtils.getApiKeyForProvider(normalizedProvider).trim()
+        val resolvedModel = modelName.ifBlank {
+            if (normalizedProvider == CloudProvider.OPENROUTER.name) io.agents.pokeclaw.agent.OPENROUTER_DEFAULT_MODEL else ""
+        }
         return CloudModelConfig(
             providerName = normalizedProvider,
-            modelName = modelName,
+            modelName = resolvedModel,
             baseUrl = resolveCloudBaseUrl(normalizedProvider, baseUrl),
             apiKey = apiKey
         )
+    }
+
+    @Volatile
+    private var legacyKeyMigrated = false
+
+    /**
+     * One-time move of a key saved before per-provider keys existed (only the generic slot was set)
+     * to the provider that was active when it was saved. After this the generic slot is never read
+     * for AI calls. Returns the normalized provider.
+     */
+    private fun normalizedProviderWithMigration(providerName: String): String {
+        val normalized = normalizeCloudProvider(providerName)
+        if (!legacyKeyMigrated) {
+            legacyKeyMigrated = true
+            try {
+                val active = KVUtils.getLlmProvider().uppercase()
+                val legacy = KVUtils.getSavedLlmApiKey().trim()
+                if (active != "LOCAL" && legacy.isNotEmpty() && KVUtils.getApiKeyForProvider(active).isBlank()) {
+                    KVUtils.setApiKeyForProvider(active, legacy)
+                }
+            } catch (_: Exception) { }
+        }
+        return normalized
     }
 
     private fun normalizeCloudProvider(providerName: String): String {

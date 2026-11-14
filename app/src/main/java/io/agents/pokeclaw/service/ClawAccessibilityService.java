@@ -349,7 +349,12 @@ public class ClawAccessibilityService extends AccessibilityService {
      * window other than the focused one).
      */
     private boolean isPaymentAtPoint(int x, int y) {
-        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(getRootInActiveWindow(), x, y)) {
+        AccessibilityNodeInfo activeRoot = getRootInActiveWindow();
+        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(activeRoot, x, y)) {
+            return true;
+        }
+        // UPI / bank apps: any gesture on a payment-looking screen is refused.
+        if (io.agents.pokeclaw.agent.PaymentGate.isStrictBlockedScreen(activeRoot)) {
             return true;
         }
         try {
@@ -361,7 +366,8 @@ public class ClawAccessibilityService extends AccessibilityService {
                     window.getBoundsInScreen(wb);
                     if (!wb.contains(x, y)) continue;
                     AccessibilityNodeInfo wRoot = window.getRoot();
-                    if (wRoot != null && io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(wRoot, x, y)) {
+                    if (wRoot != null && (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(wRoot, x, y)
+                            || io.agents.pokeclaw.agent.PaymentGate.isStrictBlockedScreen(wRoot))) {
                         return true;
                     }
                 }
@@ -458,6 +464,10 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (io.agents.pokeclaw.agent.PaymentGate.isPaymentNodeOrAncestor(node)) {
             return false; // hard stop at checkout: the user pays, never the agent
         }
+        if (io.agents.pokeclaw.agent.PaymentGate.isStrictBlockedNode(node, getRootInActiveWindow())) {
+            XLog.w(TAG, "clickNode blocked: payment screen in a UPI/bank app");
+            return false;
+        }
         if (node.isClickable()) {
             boolean clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
             if (clicked) {
@@ -494,6 +504,10 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (node == null) {
             return false;
         }
+        // Never type a PIN, and never type on a payment screen of a UPI / bank app.
+        if (io.agents.pokeclaw.agent.PaymentGate.blocksTextInput(node, getRootInActiveWindow())) {
+            return false;
+        }
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
@@ -503,8 +517,13 @@ public class ClawAccessibilityService extends AccessibilityService {
      * Triggers IME action or clicks search submit button to execute search.
      */
     public boolean performImeAction(AccessibilityNodeInfo node) {
-        if (node != null && io.agents.pokeclaw.agent.PaymentGate.isPaymentNode(node)) {
+        if (node != null && (io.agents.pokeclaw.agent.PaymentGate.isPaymentNode(node)
+                || io.agents.pokeclaw.agent.PaymentGate.isStrictBlockedNode(node, getRootInActiveWindow()))) {
             XLog.w(TAG, "performImeAction blocked by PaymentGate");
+            return false;
+        }
+        if (node == null && io.agents.pokeclaw.agent.PaymentGate.isStrictBlockedScreen(getRootInActiveWindow())) {
+            XLog.w(TAG, "performImeAction blocked: payment screen in a UPI/bank app");
             return false;
         }
         if (node != null) {

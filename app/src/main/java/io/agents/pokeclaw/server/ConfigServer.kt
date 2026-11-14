@@ -144,9 +144,11 @@ class ConfigServer(
     }
 
     private fun handleGetChannels(): Response {
+        val remoteOn = io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED
         val data = JsonObject().apply {
-            addProperty("discordBotToken", maskSecret(KVUtils.getDiscordBotToken()))
-            addProperty("telegramBotToken", maskSecret(KVUtils.getTelegramBotToken()))
+            // Remote bot channels switched off: report nothing for them.
+            addProperty("discordBotToken", if (remoteOn) maskSecret(KVUtils.getDiscordBotToken()) else "")
+            addProperty("telegramBotToken", if (remoteOn) maskSecret(KVUtils.getTelegramBotToken()) else "")
         }
         val result = JsonObject().apply {
             addProperty("code", 0)
@@ -175,6 +177,15 @@ class ConfigServer(
 
         var reinitDiscord = false
         var reinitTelegram = false
+
+        if (!io.agents.pokeclaw.channel.ChannelFeatures.REMOTE_CHANNELS_ENABLED) {
+            // Remote bot channels switched off: bot tokens are not accepted.
+            val ok = JsonObject().apply {
+                addProperty("code", 0)
+                addProperty("message", "remote channels disabled")
+            }
+            return corsResponse(newFixedLengthResponse(Response.Status.OK, MIME_JSON, ok.toString()))
+        }
 
         // Discord config
         if (json.has("discordBotToken")) {
@@ -249,6 +260,9 @@ class ConfigServer(
             val value = json.get("llmApiKey").asString
             if (!isMaskedValue(value)) {
                 KVUtils.setLlmApiKey(value)
+                // AI calls read only the selected provider's own key, so store it there too.
+                val provider = KVUtils.getLlmProvider().uppercase()
+                if (provider != "LOCAL") KVUtils.setApiKeyForProvider(provider, value)
             }
         }
         if (json.has("llmBaseUrl")) {

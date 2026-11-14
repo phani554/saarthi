@@ -8,6 +8,9 @@ package io.agents.pokeclaw.agent
  * Used by LlmConfigActivity to render the provider tabs + model cards.
  */
 
+/** Default OpenRouter model: the agent model when OpenRouter has no model chosen, and the voice-turn model. */
+const val OPENROUTER_DEFAULT_MODEL = "z-ai/glm-5.3-flash"
+
 data class CloudModel(
     val id: String,
     val displayName: String,
@@ -54,7 +57,10 @@ enum class CloudProvider(
         defaultBaseUrl = "https://openrouter.ai/api/v1",
         models = listOf(
             // GLM Series
-            CloudModel("z-ai/glm-5.3-flash", "GLM 5.3 Flash", 0.06, 0.06, ModelTier.FAST, 128_000, recommended = true),
+            // Default agent model (owner decision 2026-11-14). Prices per M tokens from OpenRouter's API, 2026-11-14.
+            CloudModel(OPENROUTER_DEFAULT_MODEL, "GLM 5.3 Flash", 0.04, 0.078, ModelTier.FAST, 128_000, recommended = true),
+            // Listed backup.
+            CloudModel("deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash (backup)", 0.051, 0.203, ModelTier.FAST, 128_000),
             CloudModel("zhipu/glm-4-flash", "GLM 4 Flash", 0.06, 0.06, ModelTier.FAST, 128_000),
 
             // Qwen Series
@@ -64,7 +70,7 @@ enum class CloudProvider(
 
             // Gemini Series
             CloudModel("google/gemini-3.8-flash", "Gemini 3.8 Flash", 0.075, 0.30, ModelTier.FAST, 1_000_000),
-            CloudModel("google/gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite", 0.25, 1.50, ModelTier.LITE, 1_000_000, recommended = true),
+            CloudModel("google/gemini-3.5-flash-lite", "Gemini 3.5 Flash Lite", 0.25, 1.50, ModelTier.LITE, 1_000_000),
             CloudModel("google/gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", 0.25, 1.50, ModelTier.LITE, 1_000_000),
 
             // Flagship Reasoning & UI Agents

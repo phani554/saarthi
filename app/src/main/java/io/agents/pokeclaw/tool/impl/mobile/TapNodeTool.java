@@ -82,6 +82,10 @@ public class TapNodeTool extends BaseTool {
         if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(service.getRootInActiveWindow(), x, y)) {
             return ToolResult.error("Blocked: node " + nodeId + " is a payment / place-order control. The user must complete payment themselves.");
         }
+        if ((meta != null && io.agents.pokeclaw.agent.OutboundConfirmGate.isDirectOutboundControl(meta.node))
+                || io.agents.pokeclaw.agent.OutboundConfirmGate.isDirectOutboundAt(service.getRootInActiveWindow(), x, y)) {
+            return ToolResult.error(io.agents.pokeclaw.agent.OutboundConfirmGate.DIRECT_SEND_BLOCKED);
+        }
 
         service.dismissKeyboard();
         boolean success = service.clickNodeById(nodeId);
