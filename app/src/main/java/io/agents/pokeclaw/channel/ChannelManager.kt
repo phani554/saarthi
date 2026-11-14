@@ -26,7 +26,8 @@ object ChannelManager {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val httpClient = OkHttpClient()
 
-    private val handlers = mutableMapOf<Channel, ChannelHandler>()
+    // Filled on the async-init thread, iterated on main by the network callback: must be thread-safe.
+    private val handlers: MutableMap<Channel, ChannelHandler> = java.util.concurrent.ConcurrentHashMap()
     private var messageListener: OnMessageReceivedListener? = null
 
     /**
@@ -52,6 +53,11 @@ object ChannelManager {
         wechatBotToken: String? = null,
         wechatApiBaseUrl: String? = null
     ) {
+        // init() can run again (afterInit after the LLM is configured): stop the old handlers first
+        // so two pollers / gateways never run side by side.
+        handlers.values.forEach {
+            try { it.disconnect() } catch (e: Exception) { XLog.w(TAG, "Disconnect before re-init failed: ${e.message}") }
+        }
         handlers[Channel.DISCORD] = DiscordChannelHandler(
             scope,
             discordBotToken?.takeIf { it.isNotEmpty() } ?: "",

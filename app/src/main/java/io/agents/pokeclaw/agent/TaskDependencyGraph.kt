@@ -62,11 +62,8 @@ object TaskDependencyGraph {
                 val contact = contactMatch?.groupValues?.get(1)?.trim() ?: return originalPrompt
                 "Send message to $contact: 'Done: $prereqSummary.'"
             }
-            lower.contains("order") || lower.contains("buy") || lower.contains("add") -> {
-                val storeMatch = Regex("""(?i)\b(?:on|from|using)\s+([a-zA-Z0-9\s]+)$""").find(originalPrompt)
-                val store = storeMatch?.groupValues?.get(1)?.trim() ?: "Flipkart Minutes"
-                "Order $prereqSummary on $store"
-            }
+            // Order tasks keep the user's own wording: the prerequisite's summary is a tool result
+            // ("✓ send_message executed ..."), not a product, and no store may be invented.
             else -> originalPrompt
         }
     }

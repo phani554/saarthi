@@ -23,27 +23,15 @@ object TaskQueueDecomposer {
         val clean = taskPrompt.trim()
         if (clean.isBlank()) return emptyList()
 
-        val lower = clean.lowercase()
-
-        // Check if prompt is a unified message-to-cart request
-        val isMessageToCartPattern = lower.contains("message") &&
-                (lower.contains("order") || lower.contains("buy") || lower.contains("add")) &&
-                (lower.contains("on ") || lower.contains("from ") || lower.contains("using "))
-
-        // Split on major sequential clauses (", then ", " then ", " after that ", " and then ")
-        val parts = if (isMessageToCartPattern) {
-            clean.split(Regex("""(?i),\s*then\s+|\s+then\s+|\s+after\s+that\s+|\s+and\s+then\s+"""))
-                .map { it.trim() }
-                .filter { it.length > 3 }
-        } else {
-            clean.split(Regex("""(?i)\s+(?:then|after\s+that|and\s+then|,)\s+"""))
-                .map { it.trim() }
-                .filter { it.length > 3 }
-        }
+        // Only explicit sequencing words split a task. Commas never do: "milk, bread and eggs on blinkit"
+        // is one order, not verb-less sub-tasks.
+        val parts = clean.split(Regex("""(?i),?\s*\b(?:and\s+then|after\s+that|then)\b\s+"""))
+            .map { it.trim().trimEnd(',').trim() }
+            .filter { it.length > 3 }
 
         if (parts.size <= 1) return emptyList()
 
-        XLog.i(TAG, "Decomposed compound prompt '$clean' into ${parts.size} atomic sub-tasks: $parts")
+        XLog.i(TAG, "Decomposed compound prompt (len=${clean.length}) into ${parts.size} atomic sub-tasks")
         return parts
     }
 

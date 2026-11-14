@@ -36,6 +36,6 @@ class SendDistressSignalTool : BaseTool() {
         KVUtils.setEmergencyContactMissing(order.isEmpty())
         val summary = io.agents.pokeclaw.care.DistressEscalator.trigger(ClawApplication.instance, customMsg.ifBlank { "SOS" })
         XLog.w("SendDistressSignalTool", summary)
-        return if (order.isEmpty()) ToolResult.error(summary) else ToolResult.success(summary)
+        return if (order.isEmpty() || !io.agents.pokeclaw.care.DistressEscalator.lastTriggerPlacedCall) ToolResult.error(summary) else ToolResult.success(summary)
     }
 }

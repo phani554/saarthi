@@ -130,8 +130,7 @@ object DebugReportManager {
                 "LocalBackendHealth:V",
                 "EngineHolder:V",
                 "LocalModelRuntime:V",
-                "InputTextTool:V",
-                "SendMessageTool:V",
+                // InputTextTool / SendMessageTool left out: their logs contain typed text and message content.
                 "*:S",
             ).redirectErrorStream(true).start()
             process.inputStream.bufferedReader().use { it.readText() }

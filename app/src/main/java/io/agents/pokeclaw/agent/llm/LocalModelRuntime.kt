@@ -42,17 +42,19 @@ object LocalModelRuntime {
     ): LocalEngineLease {
         XLog.i(
             TAG,
-            "acquireSharedEngine: initializing GPU backend for $modelPath (preferCpu=$preferCpu)",
+            "acquireSharedEngine: initializing local backend for $modelPath (preferCpu=$preferCpu)",
         )
 
         try {
-            val engine = EngineHolder.getOrCreate(modelPath, context.cacheDir.path)
+            val engine = EngineHolder.getOrCreate(modelPath, context.cacheDir.path, preferCpu)
             return LocalEngineLease(
                 engine = engine,
                 backendLabel = EngineHolder.getBackendLabel(modelPath) ?: "GPU",
             )
-        } catch (e: Exception) {
-            XLog.e(TAG, "acquireSharedEngine: GPU initialization failed for $modelPath", e)
+        } catch (e: VirtualMachineError) {
+            throw e
+        } catch (e: Throwable) {
+            XLog.e(TAG, "acquireSharedEngine: backend initialization failed for $modelPath", e)
             throw IllegalStateException("Local model could not start on NPU, GPU or CPU", e)
         }
     }
@@ -103,17 +105,24 @@ object LocalModelRuntime {
         temperature: Double = 0.3,
         preferCpu: Boolean = false,
     ): LocalSingleShotResult {
-        val lease = openConversation(
-            context = context,
-            modelPath = modelPath,
-            conversationConfig = ConversationConfig(
+        // NPU bundles reject a custom sampler, so leave it default there (same rule as LocalLlmClient).
+        val backendLabel = acquireSharedEngine(context, modelPath, preferCpu = preferCpu).backendLabel
+        val conversationConfig = if (backendLabel == "NPU") {
+            ConversationConfig(systemInstruction = Contents.of(systemPrompt))
+        } else {
+            ConversationConfig(
                 systemInstruction = Contents.of(systemPrompt),
                 samplerConfig = SamplerConfig(
                     topK = 64,
                     topP = 0.95,
                     temperature = temperature,
                 )
-            ),
+            )
+        }
+        val lease = openConversation(
+            context = context,
+            modelPath = modelPath,
+            conversationConfig = conversationConfig,
             preferCpu = preferCpu,
         )
 

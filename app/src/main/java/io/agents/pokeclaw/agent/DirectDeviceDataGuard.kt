@@ -88,13 +88,15 @@ internal class DirectDeviceDataGuard private constructor(
                 isClipboardDataRequest(normalized) ->
                     DeterministicToolCall("clipboard", mapOf("action" to "get"))
 
-                normalized.contains("notif") || normalized.contains("notification") ->
-                    DeterministicToolCall("get_notifications", emptyMap())
-
                 normalized.contains("what apps do i have") ||
                     normalized.contains("installed apps") ||
                     normalized.contains("apps do i have") ->
                     DeterministicToolCall("get_installed_apps", emptyMap())
+
+                !isDeviceDataQuestion(normalized) -> null
+
+                normalized.contains("notif") ->
+                    DeterministicToolCall("get_notifications", emptyMap())
 
                 normalized.contains("battery") ->
                     DeterministicToolCall("get_device_info", mapOf("category" to "battery"))
@@ -110,7 +112,8 @@ internal class DirectDeviceDataGuard private constructor(
 
                 normalized.contains("android version") ||
                     normalized.contains("phone temp") ||
-                    normalized.contains("temperature") ->
+                    normalized.contains("battery temp") ||
+                    normalized.contains("device temp") ->
                     DeterministicToolCall("get_device_info", mapOf("category" to if (normalized.contains("android version")) "device" else "battery"))
 
                 else -> null
@@ -128,7 +131,7 @@ internal class DirectDeviceDataGuard private constructor(
                         requiredAction = "Call clipboard(action=\"get\") before you answer.",
                     )
 
-                normalized.contains("notif") || normalized.contains("notification") ->
+                (normalized.contains("notif")) && isDeviceDataQuestion(normalized) ->
                     Match(
                         taskText = task.trim(),
                         taskLabel = "notification",
@@ -136,13 +139,14 @@ internal class DirectDeviceDataGuard private constructor(
                         requiredAction = "Call get_notifications() before you answer.",
                     )
 
-                normalized.contains("battery") ||
+                (normalized.contains("battery") ||
                     normalized.contains("wifi") ||
                     normalized.contains("bluetooth") ||
                     normalized.contains("storage") ||
                     normalized.contains("android version") ||
                     normalized.contains("phone temp") ||
-                    normalized.contains("temperature") ->
+                    normalized.contains("battery temp") ||
+                    normalized.contains("device temp")) && isDeviceDataQuestion(normalized) ->
                     Match(
                         taskText = task.trim(),
                         taskLabel = "device info",
@@ -174,6 +178,22 @@ internal class DirectDeviceDataGuard private constructor(
 
                 else -> null
             }
+        }
+
+        private val DATA_QUESTION_CUE = Regex(
+            """\b(how much|how many|what|whats|what's|which|show|tell me|check|read|is my|is the|any|do i have|status|level|left)\b"""
+        )
+        private val ACTION_REQUEST_CUE = Regex(
+            """\b(turn on|turn off|switch on|switch off|enable|disable|open|order|buy|settings?|connect|disconnect)\b"""
+        )
+
+        /**
+         * Device-data guard/shortcut only for questions about the phone ("how much battery", "what's my wifi"),
+         * never for actions that merely mention the word ("turn on wifi", "order storage boxes",
+         * "open notification settings").
+         */
+        private fun isDeviceDataQuestion(normalized: String): Boolean {
+            return DATA_QUESTION_CUE.containsMatchIn(normalized) && !ACTION_REQUEST_CUE.containsMatchIn(normalized)
         }
 
         private fun normalize(value: String): String {

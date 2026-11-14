@@ -252,7 +252,8 @@ public final class ContactListUiUtils {
         String viewId = node.getViewIdResourceName() != null ? node.getViewIdResourceName().toLowerCase() : "";
         if (viewId.contains("title") || viewId.contains("contact_name") || viewId.contains("name") || viewId.contains("entry_name")) {
             score += 100; // Primary contact title
-        } else if (viewId.contains("snippet") || viewId.contains("status") || viewId.contains("last_msg") || viewId.contains("subtitle")) {
+        } else if (viewId.contains("snippet") || viewId.contains("status") || viewId.contains("msg")
+                || viewId.contains("message") || viewId.contains("subtitle")) {
             score -= 100; // Subtitle / message body snippet (penalize)
         }
 
@@ -313,7 +314,8 @@ public final class ContactListUiUtils {
     ) {
         if (node == null) return;
 
-        if (!isAvatarOrProfilePhoto(node)) {
+        // Skip the search box itself: after typing, its text equals the alias.
+        if (!isAvatarOrProfilePhoto(node) && !isEditableField(node)) {
             CharSequence text = node.getText();
             CharSequence desc = node.getContentDescription();
             if (ContactMatchUtils.matchesTarget(text, desc, normalizedAliases, digitAliases)) {
@@ -327,6 +329,13 @@ public final class ContactListUiUtils {
                 collectNodesWithText(child, normalizedAliases, digitAliases, results);
             }
         }
+    }
+
+    private static boolean isEditableField(AccessibilityNodeInfo node) {
+        if (node.isEditable()) return true;
+        CharSequence className = node.getClassName();
+        String classStr = className != null ? className.toString() : "";
+        return classStr.contains("EditText") || classStr.contains("AutoComplete");
     }
 
     public static String cleanSearchQuery(String raw) {
@@ -470,17 +479,22 @@ public final class ContactListUiUtils {
     public static boolean isOpenChatroom(AccessibilityNodeInfo root) {
         if (root == null) return false;
 
+        // "back" as a substring matched "Feedback"/"Callback"; only accept ids or an exact description.
         boolean hasBackButton = NodeFinder.INSTANCE.findNodeByIdOrText(root,
-            "com.whatsapp:id/back", "action_bar_back", "navigate up", "back"
-        ) != null;
+            "com.whatsapp:id/back", "action_bar_back", "navigate up"
+        ) != null || hasExactDescription(root, "back", 0);
 
+        // Message box sits in the lower half of the screen (relative, not a fixed pixel value).
+        Rect rootBounds = new Rect();
+        root.getBoundsInScreen(rootBounds);
+        int lowerHalfTop = rootBounds.top + rootBounds.height() / 2;
         boolean hasMessageEntry = false;
         List<AccessibilityNodeInfo> editables = new ArrayList<>();
         collectEditTexts(root, editables);
         for (AccessibilityNodeInfo edit : editables) {
             Rect bounds = new Rect();
             edit.getBoundsInScreen(bounds);
-            if (bounds.top > 1000) {
+            if (rootBounds.height() > 0 && bounds.top > lowerHalfTop) {
                 hasMessageEntry = true;
                 break;
             }
@@ -491,6 +505,16 @@ public final class ContactListUiUtils {
         ) != null;
 
         return hasBackButton && (hasMessageEntry || hasCallButtons);
+    }
+
+    private static boolean hasExactDescription(AccessibilityNodeInfo node, String expected, int depth) {
+        if (node == null || depth > 40) return false;
+        CharSequence desc = node.getContentDescription();
+        if (desc != null && desc.toString().trim().equalsIgnoreCase(expected)) return true;
+        for (int i = 0; i < node.getChildCount(); i++) {
+            if (hasExactDescription(node.getChild(i), expected, depth + 1)) return true;
+        }
+        return false;
     }
 
     private static void collectEditTexts(AccessibilityNodeInfo node, List<AccessibilityNodeInfo> results) {

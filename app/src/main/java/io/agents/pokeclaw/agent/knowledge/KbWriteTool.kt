@@ -53,6 +53,9 @@ class KbWriteTool : BaseTool() {
         return try {
             val path = requireString(params, "path")
             val content = requireString(params, "content")
+            if (KBManager.isProtectedPath(path)) {
+                return ToolResult.error("kb_write: that file holds the user's saved memory and can't be changed by tools")
+            }
             val type = optionalString(params, "type", "note")
             val date = optionalString(params, "date", today())
             val tags = optionalString(params, "tags", "")
@@ -67,6 +70,7 @@ class KbWriteTool : BaseTool() {
             }
 
             val result = KBManager.write(path, frontmatter, content)
+            MemoryManager.invalidateCache()
             result.fold(
                 onSuccess = { ToolResult.success(it) },
                 onFailure = { ToolResult.error(it.message ?: "kb_write failed") }

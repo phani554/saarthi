@@ -31,13 +31,20 @@ public class OpenAppTool extends BaseTool {
     private static final List<String> ALLOW_KEYWORDS = Arrays.asList(
             "允许", "允许打开", "打开", "Allow", "ALLOW"
     );
+    // Runtime-permission "Allow" buttons are deliberately NOT here: open_app must never grant
+    // permissions or confirm arbitrary dialogs ("Delete chat?", "Call?") on the user's behalf.
     private static final List<String> POSITIVE_BUTTON_IDS = Arrays.asList(
             "android:id/button1",
-            "miuix.appcompat:id/button1",
-            "com.android.permissioncontroller:id/permission_allow_button",
-            "com.android.permissioncontroller:id/permission_allow_foreground_only_button",
-            "com.android.permissioncontroller:id/permission_allow_one_time_button"
+            "miuix.appcompat:id/button1"
     );
+    /** Windows that show "app X wants to open app Y" chain-launch prompts. */
+    private static final List<String> CHAIN_LAUNCH_PACKAGES = Arrays.asList(
+            "android", "com.miui.securitycenter", "com.lbe.security.miui",
+            "com.coloros.securitypermission", "com.huawei.systemmanager"
+    );
+    private static final String[] OPEN_PROMPT_WORDS = {
+            "wants to open", "want to open", "open ", "打开", "启动", "跳转"
+    };
 
     @Override
     public String getName() {
@@ -93,21 +100,67 @@ public class OpenAppTool extends BaseTool {
     }
 
     public static String resolveAppNameStatic(String appName) {
+        if (appName == null) return null;
+        String q = appName.trim().toLowerCase();
+        if (q.isEmpty()) return null;
         try {
-            PackageManager pm = ClawApplication.Companion.getInstance().getPackageManager();
+            android.content.Context ctx = ClawApplication.Companion.getInstance();
+            PackageManager pm = ctx.getPackageManager();
+
+            // Known names first, so "Phone" can never become "PhonePe" and "Pay" no payment app.
+            String known = knownPackage(ctx, pm, q);
+            if (known != null) return known;
+
             Intent mainIntent = new Intent(Intent.ACTION_MAIN, null);
             mainIntent.addCategory(Intent.CATEGORY_LAUNCHER);
             List<ResolveInfo> infos = pm.queryIntentActivities(mainIntent, 0);
-            if (infos != null) {
-                for (ResolveInfo info : infos) {
-                    String label = info.loadLabel(pm).toString();
-                    if (label.equalsIgnoreCase(appName) || label.toLowerCase().contains(appName.toLowerCase())) {
-                        return info.activityInfo.packageName;
-                    }
+            if (infos == null) return null;
+            // Pass 1: exact label. Pass 2: label starts with the query as a whole word.
+            for (ResolveInfo info : infos) {
+                if (info.loadLabel(pm).toString().trim().equalsIgnoreCase(q)) return info.activityInfo.packageName;
+            }
+            for (ResolveInfo info : infos) {
+                String label = info.loadLabel(pm).toString().trim().toLowerCase();
+                if (label.startsWith(q + " ")) return info.activityInfo.packageName;
+            }
+            // Pass 3: substring, only when exactly one app matches.
+            String only = null;
+            for (ResolveInfo info : infos) {
+                String label = info.loadLabel(pm).toString().toLowerCase();
+                if (label.contains(q)) {
+                    if (only != null && !only.equals(info.activityInfo.packageName)) return null;
+                    only = info.activityInfo.packageName;
                 }
             }
+            return only;
         } catch (Exception ignored) {}
         return null;
+    }
+
+    private static String knownPackage(android.content.Context ctx, PackageManager pm, String q) {
+        String pkg = null;
+        switch (q) {
+            case "whatsapp": pkg = "com.whatsapp"; break;
+            case "whatsapp business": pkg = "com.whatsapp.w4b"; break;
+            case "blinkit": case "grofers": pkg = "com.grofers.customerapp"; break;
+            case "zepto": pkg = "com.zeptoconsumerapp"; break;
+            case "flipkart": pkg = "com.flipkart.android"; break;
+            case "amazon": pkg = "com.amazon.mShop.android.shopping"; break;
+            case "phone": case "dialer": case "phone app": {
+                android.content.pm.ResolveInfo ri = pm.resolveActivity(new Intent(Intent.ACTION_DIAL), 0);
+                if (ri != null && ri.activityInfo != null && !"android".equals(ri.activityInfo.packageName)) {
+                    pkg = ri.activityInfo.packageName;
+                }
+                break;
+            }
+            case "messages": case "sms": {
+                pkg = android.provider.Telephony.Sms.getDefaultSmsPackage(ctx);
+                break;
+            }
+            default: return null;
+        }
+        if (pkg == null) return null;
+        return pm.getLaunchIntentForPackage(pkg) != null ? pkg : null;
     }
 
     /**
@@ -156,7 +209,12 @@ public class OpenAppTool extends BaseTool {
                 if (isSubScreen) {
                     XLog.w(TAG, "ensureCleanAppHomeScreen: " + packageName + " is on a mounted sub-screen! Pressing Back to return to clean Home page (back " + (backCount + 1) + "/4).");
                     service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK);
-                    Thread.sleep(150L);
+                    try {
+                        Thread.sleep(150L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
                 } else {
                     break;
                 }
@@ -169,11 +227,17 @@ public class OpenAppTool extends BaseTool {
     private static void dismissChainLaunchDialog(ClawAccessibilityService service) {
         for (int attempt = 0; attempt < 3; attempt++) {
             AccessibilityNodeInfo root = service.getRootInActiveWindow();
-            if (root != null && root.getPackageName() != null) {
-                String pkg = root.getPackageName().toString();
-                if (pkg.contains("whatsapp") || pkg.contains("flipkart") || pkg.contains("grofers") || pkg.contains("amazon") || pkg.contains("zepto")) {
-                    return;
-                }
+            if (root == null || root.getPackageName() == null) {
+                try { Thread.sleep(80L); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+                continue;
+            }
+            String pkg = root.getPackageName().toString();
+            // Only a system / security-center chain-launch prompt that is about opening an app.
+            if (!CHAIN_LAUNCH_PACKAGES.contains(pkg)) {
+                return;
+            }
+            if (NodeFinder.INSTANCE.findNodeByTextContains(root, OPEN_PROMPT_WORDS) == null) {
+                return;
             }
 
             if (tapPositiveDialogButton(service)) {
@@ -183,13 +247,14 @@ public class OpenAppTool extends BaseTool {
             for (String keyword : ALLOW_KEYWORDS) {
                 List<AccessibilityNodeInfo> nodes = service.findNodesByText(keyword);
                 for (AccessibilityNodeInfo node : nodes) {
-                    if (node.isVisibleToUser() && node.isClickable()) {
+                    CharSequence np = node.getPackageName();
+                    if (node.isVisibleToUser() && node.isClickable() && np != null && pkg.equals(np.toString())) {
                         service.clickNode(node);
                         return;
                     }
                 }
             }
-            try { Thread.sleep(80L); } catch (InterruptedException ignored) { break; }
+            try { Thread.sleep(80L); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
         }
     }
 

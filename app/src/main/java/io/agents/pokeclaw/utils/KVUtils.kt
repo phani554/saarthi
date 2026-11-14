@@ -175,6 +175,21 @@ object KVUtils {
     fun getTelegramBotToken(): String = getString(KEY_TELEGRAM_BOT_TOKEN, "")
     fun setTelegramBotToken(value: String) = putString(KEY_TELEGRAM_BOT_TOKEN, value)
 
+    // Sender allow-list: only the paired owner may drive the phone over Telegram/Discord.
+    // 0 / "" = not paired yet; the first sender is paired and stored.
+    private const val KEY_TELEGRAM_OWNER_USER_ID = "KEY_TELEGRAM_OWNER_USER_ID"
+    private const val KEY_TELEGRAM_OWNER_CHAT_ID = "KEY_TELEGRAM_OWNER_CHAT_ID"
+    private const val KEY_TELEGRAM_UPDATE_OFFSET = "KEY_TELEGRAM_UPDATE_OFFSET"
+    private const val KEY_DISCORD_OWNER_USER_ID = "KEY_DISCORD_OWNER_USER_ID"
+    fun getTelegramOwnerUserId(): Long = getLong(KEY_TELEGRAM_OWNER_USER_ID, 0L)
+    fun setTelegramOwnerUserId(value: Long) = putLong(KEY_TELEGRAM_OWNER_USER_ID, value)
+    fun getTelegramOwnerChatId(): Long = getLong(KEY_TELEGRAM_OWNER_CHAT_ID, 0L)
+    fun setTelegramOwnerChatId(value: Long) = putLong(KEY_TELEGRAM_OWNER_CHAT_ID, value)
+    fun getTelegramUpdateOffset(): Long = getLong(KEY_TELEGRAM_UPDATE_OFFSET, 0L)
+    fun setTelegramUpdateOffset(value: Long) = putLong(KEY_TELEGRAM_UPDATE_OFFSET, value)
+    fun getDiscordOwnerUserId(): String = getString(KEY_DISCORD_OWNER_USER_ID, "")
+    fun setDiscordOwnerUserId(value: String) = putString(KEY_DISCORD_OWNER_USER_ID, value)
+
     // ==================== WeChat iLink Bot Config ====================
     fun getWechatBotToken(): String = getString(KEY_WECHAT_BOT_TOKEN, "")
     fun setWechatBotToken(value: String) = putString(KEY_WECHAT_BOT_TOKEN, value)

@@ -16,6 +16,7 @@ import dev.langchain4j.model.openai.OpenAiChatModel
 import dev.langchain4j.model.openai.OpenAiStreamingChatModel
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 
 class OpenAiLlmClient(
@@ -72,27 +73,39 @@ class OpenAiLlmClient(
         val latch = CountDownLatch(1)
         val resultRef = AtomicReference<LlmResponse>()
         val errorRef = AtomicReference<Throwable>()
+        // Set when the caller stopped waiting: late callbacks must not reach the listener.
+        val abandoned = AtomicBoolean(false)
 
         streamingChatModel.chat(request, object : StreamingChatResponseHandler {
             override fun onPartialResponse(token: String) {
-                listener.onPartialText(token)
+                if (!abandoned.get()) listener.onPartialText(token)
             }
 
             override fun onCompleteResponse(response: ChatResponse) {
-                val llmResponse = response.toLlmResponse()
-                resultRef.set(llmResponse)
-                listener.onComplete(llmResponse)
-                latch.countDown()
+                // countDown in finally: a throwing listener used to leave the caller waiting 120 s.
+                try {
+                    val llmResponse = response.toLlmResponse()
+                    resultRef.set(llmResponse)
+                    if (!abandoned.get()) listener.onComplete(llmResponse)
+                } catch (e: Exception) {
+                    if (resultRef.get() == null) errorRef.compareAndSet(null, e)
+                } finally {
+                    latch.countDown()
+                }
             }
 
             override fun onError(error: Throwable) {
-                errorRef.set(error)
-                listener.onError(error)
-                latch.countDown()
+                try {
+                    errorRef.set(error)
+                    if (!abandoned.get()) listener.onError(error)
+                } finally {
+                    latch.countDown()
+                }
             }
         })
 
         if (!latch.await(120, TimeUnit.SECONDS)) {
+            abandoned.set(true)
             throw RuntimeException("OpenAI streaming response timed out after 120 seconds")
         }
         errorRef.get()?.let { throw RuntimeException("OpenAI streaming error", it) }

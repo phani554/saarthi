@@ -26,8 +26,8 @@ object ContactAliasResolver {
         if (clean.isBlank()) return clean
 
         // Care roles ("watchman", "chemist", "family doctor", "my emergency contact") -> saved number.
-        // Only when the phrase is basically the role itself ("call Dr Sharma" must stay a name lookup).
-        if (clean.split(Regex("\\s+")).size <= 3) io.agents.pokeclaw.care.CareRoles.fromWords(clean)?.let { role ->
+        // Only when the whole phrase is the role itself ("call Dr Sharma" / "Guard Ramesh" stay name lookups).
+        if (isRoleOnly(clean)) io.agents.pokeclaw.care.CareRoles.fromWords(clean)?.let { role ->
             io.agents.pokeclaw.care.CareProfileStore.get().first(role)?.takeIf { it.hasPhone }?.let {
                 XLog.i(TAG, "ContactAliasResolver care role: '$clean' -> $role")
                 return it.digits
@@ -44,14 +44,13 @@ object ContactAliasResolver {
         return try {
             val (memories, _) = runBlocking { HybridMemoryRepository.searchMemories("alias $clean") }
             if (memories.isNotBlank()) {
-                val lines = memories.split("\n")
-                val matched = lines.find { it.contains(clean, ignoreCase = true) }
-                if (matched != null) {
-                    val resolved = matched.substringAfter(":").substringAfter("=").trim()
-                    if (resolved.isNotBlank() && resolved.length < 50) {
-                        XLog.i(TAG, "ContactAliasResolver Mem0 match: '$clean' -> '$resolved'")
-                        return resolved
-                    }
+                val aliasCore = clean.lowercase().replace(FILLER_WORDS, " ").replace(Regex("\\s+"), " ").trim()
+                    .ifEmpty { clean.lowercase() }
+                for (line in memories.split("\n")) {
+                    if (!line.contains(aliasCore, ignoreCase = true)) continue
+                    val resolved = extractAliasTarget(line, aliasCore) ?: continue
+                    XLog.i(TAG, "ContactAliasResolver Mem0 match: '$clean' -> '$resolved'")
+                    return resolved
                 }
             }
             clean
@@ -59,6 +58,53 @@ object ContactAliasResolver {
             XLog.w(TAG, "ContactAliasResolver Mem0 check failed: ${e.message}")
             clean
         }
+    }
+
+    private val FILLER_WORDS = Regex("""(?i)\b(my|our|the|ka|ki|ke|apna|apni|apne|hamara|hamari|hamare|mera|meri|mere)\b""")
+    private val ROLE_ONLY = Regex(
+        """^(watchman|watchmen|chowkidar|security guard|guard|gatekeeper|darwan|family doctor|doctor|gharelu doctor|dr\.?|chemist|pharmacy|pharmacist|medical store|medical shop|dawai wala|dawa dukan|medicine shop|emergency contact|loved one|caretaker)$"""
+    )
+
+    /** "watchman", "my family doctor", "our doctor" -> true; "Dr Sharma", "Guard Ramesh" -> false. */
+    private fun isRoleOnly(phrase: String): Boolean {
+        val core = phrase.lowercase().replace(FILLER_WORDS, " ").replace(Regex("\\s+"), " ").trim()
+        return core.isNotEmpty() && ROLE_ONLY.matches(core)
+    }
+
+    /**
+     * Pull only the contact name out of a memory line such as
+     * "- [2026-11-14 10:30] My sister is Priya", "Priya is my sister" or "bhai = Rahul".
+     * Returns null when the line doesn't state a mapping for [aliasCore].
+     */
+    private fun extractAliasTarget(line: String, aliasCore: String): String? {
+        val body = line.trim()
+            .replace(Regex("""^[-*•]\s*"""), "")
+            .replace(Regex("""^\[[^\]]*]\s*"""), "")
+            .trim().trimEnd('.', '!', ',', ';')
+        fun roleMatches(role: String): Boolean {
+            val r = role.lowercase().replace(FILLER_WORDS, " ").replace(Regex("\\s+"), " ").trim()
+            return r.isNotEmpty() && (r == aliasCore || r.contains(aliasCore) || aliasCore.contains(r))
+        }
+        fun validName(n: String): String? {
+            val name = n.trim().trim('"', '\'').trimEnd('.', '!', ',', ';').trim()
+            if (name.isEmpty() || name.length >= 50) return null
+            if (Regex("""(?i)\b(is|my|number)\b""").containsMatchIn(name)) return null
+            return name
+        }
+        // "Priya is my sister"
+        Regex("""(?i)^(.+?)\s+is\s+my\s+(.+)$""").find(body)?.let { m ->
+            if (roleMatches(m.groupValues[2])) validName(m.groupValues[1])?.let { return it }
+        }
+        // "My sister is Priya" / "my sister's name is Priya"
+        Regex("""(?i)^my\s+(.+?)(?:'s\s+name)?\s+is\s+(?:called\s+|named\s+)?(.+)$""").find(body)?.let { m ->
+            if (roleMatches(m.groupValues[1])) validName(m.groupValues[2])?.let { return it }
+        }
+        // "bhai = Rahul" / "alias: bhai -> Rahul"
+        Regex("""^(.+?)\s*(?:=|->)\s*(.+)$""").find(body)?.let { m ->
+            val left = m.groupValues[1].substringAfterLast(':')
+            if (roleMatches(left)) validName(m.groupValues[2])?.let { return it }
+        }
+        return null
     }
 
     private fun isPlainNameOrNumber(name: String): Boolean {

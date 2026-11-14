@@ -42,6 +42,7 @@ object ConfigServerManager {
     /**
      * Start the configuration server. Requires a WiFi connection.
      */
+    @Synchronized
     fun start(context: Context): Boolean {
         val ctx = context.applicationContext
         appContext = ctx
@@ -69,6 +70,7 @@ object ConfigServerManager {
         return false
     }
 
+    @Synchronized
     fun stop() {
         unregisterNetworkCallback()
         try {
@@ -88,8 +90,10 @@ object ConfigServerManager {
      */
     fun getAddress(): String? {
         val ip = getWifiIpAddress(appContext ?: return null) ?: return null
-        val port = server?.listeningPort ?: return null
-        return "$ip:$port"
+        val s = server ?: return null
+        val port = s.listeningPort
+        // The server rejects every request without its per-start token, so the URL carries it.
+        return "$ip:$port/?token=${s.token}"
     }
 
     /**
@@ -157,8 +161,10 @@ object ConfigServerManager {
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onLost(network: Network) {
                 XLog.i(TAG, "WiFi lost, stopping ConfigServer")
-                try { server?.stop() } catch (_: Exception) {}
-                server = null
+                synchronized(this@ConfigServerManager) {
+                    try { server?.stop() } catch (_: Exception) {}
+                    server = null
+                }
                 // Do not clear enabled state; auto-restart when WiFi recovers
                 _configChanged.tryEmit(Unit)
             }
@@ -166,6 +172,7 @@ object ConfigServerManager {
             override fun onAvailable(network: Network) {
                 XLog.i(TAG, "WiFi available, restarting ConfigServer")
                 // IP may change after WiFi reconnect, restart the server
+                synchronized(this@ConfigServerManager) {
                 if (KVUtils.isConfigServerEnabled() && !isRunning()) {
                     val ctx = appContext ?: return
                     for (port in ConfigServer.PORT until ConfigServer.PORT + MAX_PORT_RETRY) {
@@ -180,6 +187,7 @@ object ConfigServerManager {
                         }
                     }
                     _configChanged.tryEmit(Unit)
+                }
                 }
             }
         }

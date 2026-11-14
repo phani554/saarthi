@@ -243,3 +243,8 @@
 # ============================================================
 -dontwarn jp.wasabeef.glide.**
 -keep class jp.wasabeef.glide.** { *; }
+
+# Reached by reflection from DefaultAgentService
+-keepclassmembers class io.agents.pokeclaw.utils.ContactListUiUtils {
+    static boolean dismissBlockingOverlay(io.agents.pokeclaw.service.ClawAccessibilityService, android.view.accessibility.AccessibilityNodeInfo, long);
+}

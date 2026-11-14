@@ -22,8 +22,15 @@ object VoiceRecorder {
 
     private const val TAG = "VoiceRecorder"
     private const val SAMPLE_RATE = 16000
+    /**
+     * Each recording is a session with its own AudioRecord, owned by its worker. A stop/start in
+     * quick succession bumps [sessionId]; the old worker then exits and releases only its own
+     * recorder, so it can never stop, release or read the new session's recorder.
+     */
+    @Volatile
     private var isRecordingActive = false
-    private var audioRecord: AudioRecord? = null
+    @Volatile
+    private var sessionId = 0L
     private val recordingExecutor = Executors.newSingleThreadExecutor()
 
     fun isRecording(): Boolean = isRecordingActive
@@ -52,80 +59,17 @@ object VoiceRecorder {
             AudioFormat.ENCODING_PCM_16BIT
         ).coerceAtLeast(2048)
 
+        val mySession = ++sessionId
+        isRecordingActive = true
         try {
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize
-            )
-
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                XLog.e(TAG, "AudioRecord failed to initialize")
-                cleanup()
-                onAudioCaptured(ByteArray(0))
-                return
-            }
-
-            audioRecord?.startRecording()
-            isRecordingActive = true
-            XLog.i(TAG, "AudioRecord started successfully (sampleRate=$SAMPLE_RATE)")
-
+            // The executor is single-threaded, so this session's recorder is only created and
+            // started after any previous worker has released the microphone.
             recordingExecutor.submit {
-                val pcmOutputStream = ByteArrayOutputStream()
-                val buffer = ByteArray(bufferSize)
-                val startTime = System.currentTimeMillis()
-                var silenceStartTime = -1L
-
-                try {
-                    while (isRecordingActive && ((System.currentTimeMillis() - startTime) < maxDurationMs)) {
-                        val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
-                        if (read > 0) {
-                            pcmOutputStream.write(buffer, 0, read)
-
-                            // Calculate RMS volume level for silence auto-stop
-                            var sum = 0.0
-                            for (i in 0 until read step 2) {
-                                if (i + 1 < read) {
-                                    val sample = ((buffer[i + 1].toInt() shl 8) or (buffer[i].toInt() and 0xFF)).toShort()
-                                    sum += sample * sample
-                                }
-                            }
-                            val rms = sqrt(sum / (read / 2))
-                            val isSilent = rms < 180.0 // threshold for soft speech vs quiet pause
-
-                            if (isSilent && pcmOutputStream.size() > SAMPLE_RATE * 3) { // At least 1.5s recorded
-                                if (silenceStartTime == -1L) {
-                                    silenceStartTime = System.currentTimeMillis()
-                                } else if ((System.currentTimeMillis() - silenceStartTime) > 1800L) { // 1.8s continuous quiet
-                                    XLog.i(TAG, "Auto-stopping recording due to quiet pause (1.8s)")
-                                    break
-                                }
-                            } else {
-                                silenceStartTime = -1L
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    XLog.e(TAG, "Error during AudioRecord read loop", e)
-                } finally {
-                    cleanup()
-                    val pcmBytes = pcmOutputStream.toByteArray()
-                    XLog.i(TAG, "Finished recording PCM bytes: size=${pcmBytes.size}")
-                    if (pcmBytes.size > 2000) {
-                        val wavBytes = addWavHeader(pcmBytes, SAMPLE_RATE, 1, 16)
-                        onAudioCaptured(wavBytes)
-                    } else {
-                        XLog.w(TAG, "Recorded audio too short (${pcmBytes.size} bytes)")
-                        onAudioCaptured(ByteArray(0))
-                    }
-                }
+                runSession(mySession, bufferSize, maxDurationMs, onAudioCaptured)
             }
-
         } catch (e: Exception) {
             XLog.e(TAG, "Exception starting AudioRecord", e)
-            cleanup()
+            isRecordingActive = false
             onAudioCaptured(ByteArray(0))
         }
     }
@@ -137,13 +81,97 @@ object VoiceRecorder {
         isRecordingActive = false
     }
 
-    private fun cleanup() {
+    private fun isCurrent(session: Long): Boolean = isRecordingActive && session == sessionId
+
+    @Synchronized
+    private fun endSession(session: Long) {
+        if (session == sessionId) {
+            isRecordingActive = false
+        }
+    }
+
+    private fun runSession(
+        session: Long,
+        bufferSize: Int,
+        maxDurationMs: Long,
+        onAudioCaptured: (ByteArray) -> Unit
+    ) {
+        val pcmOutputStream = ByteArrayOutputStream()
+        var rec: AudioRecord? = null
         try {
-            audioRecord?.stop()
-            audioRecord?.release()
-        } catch (_: Exception) {}
-        audioRecord = null
-        isRecordingActive = false
+            if (!isCurrent(session)) return
+            val r = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                bufferSize
+            )
+            rec = r
+            if (r.state != AudioRecord.STATE_INITIALIZED) {
+                XLog.e(TAG, "AudioRecord failed to initialize")
+                return
+            }
+            r.startRecording()
+            if (r.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                // Mic held by another app (call, other recorder): don't spin on failing reads.
+                XLog.e(TAG, "AudioRecord did not start recording (mic busy?)")
+                return
+            }
+            XLog.i(TAG, "AudioRecord started successfully (sampleRate=$SAMPLE_RATE)")
+
+            val buffer = ByteArray(bufferSize)
+            val startTime = System.currentTimeMillis()
+            var silenceStartTime = -1L
+
+            while (isCurrent(session) && ((System.currentTimeMillis() - startTime) < maxDurationMs)) {
+                val read = r.read(buffer, 0, buffer.size)
+                if (read < 0) {
+                    XLog.e(TAG, "AudioRecord read error $read; stopping")
+                    break
+                }
+                if (read > 0) {
+                    pcmOutputStream.write(buffer, 0, read)
+
+                    // Calculate RMS volume level for silence auto-stop
+                    var sum = 0.0
+                    for (i in 0 until read step 2) {
+                        if (i + 1 < read) {
+                            val sample = ((buffer[i + 1].toInt() shl 8) or (buffer[i].toInt() and 0xFF)).toShort()
+                            sum += sample * sample
+                        }
+                    }
+                    val rms = sqrt(sum / (read / 2))
+                    val isSilent = rms < 180.0 // threshold for soft speech vs quiet pause
+
+                    if (isSilent && pcmOutputStream.size() > SAMPLE_RATE * 3) { // At least 1.5s recorded
+                        if (silenceStartTime == -1L) {
+                            silenceStartTime = System.currentTimeMillis()
+                        } else if ((System.currentTimeMillis() - silenceStartTime) > 1800L) { // 1.8s continuous quiet
+                            XLog.i(TAG, "Auto-stopping recording due to quiet pause (1.8s)")
+                            break
+                        }
+                    } else {
+                        silenceStartTime = -1L
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            XLog.e(TAG, "Error during AudioRecord read loop", e)
+        } finally {
+            try { rec?.stop() } catch (_: Exception) {}
+            try { rec?.release() } catch (_: Exception) {}
+            endSession(session)
+            val pcmBytes = pcmOutputStream.toByteArray()
+            XLog.i(TAG, "Finished recording PCM bytes: size=${pcmBytes.size}")
+            if (pcmBytes.size > 2000) {
+                val wavBytes = addWavHeader(pcmBytes, SAMPLE_RATE, 1, 16)
+                onAudioCaptured(wavBytes)
+            } else {
+                XLog.w(TAG, "Recorded audio too short (${pcmBytes.size} bytes)")
+                onAudioCaptured(ByteArray(0))
+            }
+        }
     }
 
     private fun addWavHeader(

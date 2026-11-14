@@ -28,7 +28,14 @@ public class UpdateChecker {
     private static final String GITHUB_API = "https://api.github.com/repos/agents-io/PokeClaw/releases/latest";
     private static final long CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000; // Once per day
 
+    /**
+     * Disabled: GITHUB_API points at the upstream PokeClaw repo, so the prompt pushed users to
+     * install a different app. Re-enable only after pointing it at Saathi's own releases.
+     */
+    private static final boolean ENABLED = false;
+
     public static void checkForUpdate(Activity activity) {
+        if (!ENABLED) return;
         boolean debugBuild = (activity.getApplicationInfo().flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
         XLog.d(TAG, "Checking for updates on " + (debugBuild ? "debug" : "release") + " build");
 

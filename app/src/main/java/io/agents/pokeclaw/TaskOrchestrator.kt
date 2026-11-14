@@ -149,8 +149,9 @@ class TaskOrchestrator(
         val decomposedParts = TaskQueueDecomposer.decompose(task)
         if (decomposedParts.size > 1) {
             XLog.i(TAG, "TaskOrchestrator: decomposing compound task into ${decomposedParts.size} atomic sub-tasks: $decomposedParts")
-            taskSessionStore.release()
+            // Enqueue before releasing the lock so another message cannot slip in between.
             TaskQueueDecomposer.enqueueSubTasks(decomposedParts, channel, messageID)
+            taskSessionStore.release()
             TaskQueueManager.processNext(this)
             return
         }
@@ -160,29 +161,52 @@ class TaskOrchestrator(
         when (route) {
             is PipelineRouter.Route.DirectIntent -> {
                 XLog.i(TAG, "Pipeline Tier 1: DirectIntent — ${route.description}")
-                pipelineRouter.executeIntent(route.intent)
-                taskEventCallback?.invoke(TaskEvent.Completed(route.description))
-                ChannelManager.sendMessage(channel, "✓ ${route.description}", messageID)
+                // Report the real outcome: a failed startActivity is not "done".
+                val intentOk = try {
+                    route.intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    ClawApplication.instance.startActivity(route.intent)
+                    true
+                } catch (e: Exception) {
+                    XLog.e(TAG, "Tier 1 intent failed: ${route.intent.action}", e)
+                    false
+                }
+                if (intentOk) {
+                    taskEventCallback?.invoke(TaskEvent.Completed(route.description))
+                    ChannelManager.sendMessage(channel, "✓ ${route.description}", messageID)
+                } else {
+                    taskEventCallback?.invoke(TaskEvent.Failed("Could not do: ${route.description}"))
+                    ChannelManager.sendMessage(channel, "✗ ${route.description}: could not open it", messageID)
+                }
+                ChannelManager.flushMessages(channel)
                 releaseTask()
                 ForegroundService.resetToIdle(ClawApplication.instance)
-                FloatingCircleManager.setSuccessState()
+                if (intentOk) FloatingCircleManager.setSuccessState() else FloatingCircleManager.setErrorState()
                 onTaskFinished()
                 return
             }
             is PipelineRouter.Route.DirectTool -> {
                 XLog.i(TAG, "Pipeline Tier 1: DirectTool — ${route.toolName}")
-                val toolResult = pipelineRouter.executeTool(route.toolName, route.params)
-                if (toolResult.contains("Failed") || toolResult.contains("error") || toolResult.contains("Cannot")) {
-                    XLog.w(TAG, "Tier 1 tool failed: $toolResult")
-                    taskEventCallback?.invoke(TaskEvent.Completed("Failed: ${route.description}"))
-                    ChannelManager.sendMessage(channel, "✗ ${route.description}: $toolResult", messageID)
+                // Branch on ToolResult.isSuccess, not on words in the returned text.
+                val result: ToolResult = try {
+                    io.agents.pokeclaw.tool.ToolRegistry.getInstance().executeTool(route.toolName, route.params)
+                } catch (e: Exception) {
+                    XLog.e(TAG, "Tier 1 tool threw: ${route.toolName}", e)
+                    ToolResult.error(e.message ?: "Tool error")
+                }
+                val toolOk = result.isSuccess
+                if (!toolOk) {
+                    val err = result.error ?: result.data ?: "failed"
+                    XLog.w(TAG, "Tier 1 tool failed: $err")
+                    taskEventCallback?.invoke(TaskEvent.Failed("${route.description}: $err"))
+                    ChannelManager.sendMessage(channel, "✗ ${route.description}: $err", messageID)
                 } else {
                     taskEventCallback?.invoke(TaskEvent.Completed(route.description))
                     ChannelManager.sendMessage(channel, "✓ ${route.description}", messageID)
                 }
+                ChannelManager.flushMessages(channel)
                 releaseTask()
                 ForegroundService.resetToIdle(ClawApplication.instance)
-                FloatingCircleManager.setSuccessState()
+                if (toolOk) FloatingCircleManager.setSuccessState() else FloatingCircleManager.setErrorState()
                 onTaskFinished()
                 return
             }
@@ -195,13 +219,31 @@ class TaskOrchestrator(
                     if (skill != null) {
                         FloatingCircleManager.ensureShowing()
                         FloatingCircleManager.showTaskNotify(task, channel)
-                        Thread({
-                            val skillResult = skillExecutor.execute(skill, route.params) { step, total, desc ->
-                                taskEventCallback?.invoke(TaskEvent.Progress(step, "Step $step/$total: $desc"))
-                                ForegroundService.updateTaskStatus(ClawApplication.instance, desc)
+                        Thread(skillRun@{
+                            val skillResult = try {
+                                skillExecutor.execute(skill, route.params) { step, total, desc ->
+                                    taskEventCallback?.invoke(TaskEvent.Progress(step, "Step $step/$total: $desc"))
+                                    ForegroundService.updateTaskStatus(ClawApplication.instance, desc)
+                                }
+                            } catch (e: Exception) {
+                                // An uncaught exception here would kill the process and leak the task lock.
+                                XLog.e(TAG, "Skill ${skill.id} crashed", e)
+                                try {
+                                    releaseTask()
+                                    taskEventCallback?.invoke(TaskEvent.Failed("Skill failed: ${e.message ?: "error"}"))
+                                    ChannelManager.sendMessage(channel, "✗ ${route.description}: ${e.message ?: "error"}", messageID)
+                                    ChannelManager.flushMessages(channel)
+                                    ForegroundService.resetToIdle(ClawApplication.instance)
+                                    FloatingCircleManager.setErrorState()
+                                    onTaskFinished()
+                                } catch (cleanup: Exception) {
+                                    XLog.e(TAG, "Skill failure cleanup failed", cleanup)
+                                }
+                                return@skillRun
                             }
                             if (skillResult.success) {
                                 ChannelManager.sendMessage(channel, skillResult.message, messageID)
+                                ChannelManager.flushMessages(channel)
                                 taskEventCallback?.invoke(TaskEvent.Completed(skillResult.message))
                                 releaseTask()
                                 FloatingCircleManager.setSuccessState()
@@ -212,7 +254,7 @@ class TaskOrchestrator(
                                     .let { g -> route.params.entries.fold(g) { acc, (k, v) -> acc.replace("{$k}", v) } }
                                 XLog.i(TAG, "Skill ${skill.id} failed, falling back to agent loop: $fallbackGoal")
                                 taskEventCallback?.invoke(TaskEvent.ToolAction("Retrying with AI agent"))
-                                startNewTask(channel, fallbackGoal, messageID, isFallback = true)
+                                startNewTask(channel, "$task\n\n(Hint: $fallbackGoal)", messageID, isFallback = true)
                             }
                         }, "skill-executor").start()
                         return
@@ -320,7 +362,8 @@ class TaskOrchestrator(
                     ChannelManager.sendMessage(channel, result.data, messageID)
                 } else {
                     if (roundBuffer.isNotEmpty()) roundBuffer.append("\n")
-                    roundBuffer.append(app.getString(R.string.channel_msg_tool_execution, toolName + parameters,
+                    // Display name only: raw parameters (numbers, message text) are not echoed to the channel.
+                    roundBuffer.append(app.getString(R.string.channel_msg_tool_execution, displayName,
                         if (success) app.getString(R.string.channel_msg_tool_success) else app.getString(R.string.channel_msg_tool_failure)))
                 }
             }

@@ -82,14 +82,15 @@ object AmazonAutomationDriver {
             return ToolResult.error("Failed to search for '$cleanQuery' on Amazon")
         }
 
-        // Step 2: Responsive 30ms polling for search results page / Add to Cart CTA (up to 450ms max)
-        val deadline = System.currentTimeMillis() + 450L
+        // Step 2: Poll for search results page / Add to Cart CTA (up to 3 s; 450 ms was too short
+        // for the results page to load, so a stale CTA could be tapped)
+        val deadline = System.currentTimeMillis() + 3000L
         while (System.currentTimeMillis() < deadline) {
             val root = service.rootInActiveWindow
             if (root != null) {
                 if (hasAddToCartButton(service, root)) break
             }
-            try { Thread.sleep(30L) } catch (_: InterruptedException) { break }
+            try { Thread.sleep(100L) } catch (_: InterruptedException) { break }
         }
 
         // Step 3: Add product card to cart
@@ -194,12 +195,12 @@ object AmazonAutomationDriver {
         while (System.currentTimeMillis() < suggestDeadline) {
             val suggestRoot = service.rootInActiveWindow
             if (suggestRoot != null) {
-                suggestion = NodeFinder.findNodeByTextContains(suggestRoot, query.lowercase())
-                if (suggestion == null) {
-                    suggestion = NodeFinder.findNodeByIdOrText(suggestRoot,
-                        "iss_search_dropdown_item_text", "sac-suggestion-row", "iss_suggestion_text"
-                    )
-                }
+                // Only real suggestion rows: a text match on the query also hits the search EditText
+                // we just filled, and "clicking" it never submits the search.
+                val candidate = NodeFinder.findNodeByIdOrText(suggestRoot,
+                    "iss_search_dropdown_item_text", "sac-suggestion-row", "iss_suggestion_text"
+                )
+                suggestion = if (candidate != null && !candidate.isEditable) candidate else null
             }
             if (suggestion != null) break
             try { Thread.sleep(20L) } catch (_: InterruptedException) { break }
@@ -216,7 +217,7 @@ object AmazonAutomationDriver {
         val submitted = service.performImeAction(editNode)
         XLog.i(TAG, "Amazon: performImeAction fallback result=$submitted")
 
-        return true
+        return submitted
     }
 
     private fun hasAddToCartButton(service: ClawAccessibilityService, root: AccessibilityNodeInfo): Boolean {

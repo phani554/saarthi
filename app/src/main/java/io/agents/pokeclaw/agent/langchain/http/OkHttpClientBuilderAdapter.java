@@ -84,7 +84,7 @@ public class OkHttpClientBuilderAdapter implements HttpClientBuilder {
             Request request = chain.request();
             long startMs = System.nanoTime();
 
-            XLog.d(TAG, "--> " + request.method() + " " + request.url());
+            XLog.d(TAG, "--> " + request.method() + " " + FileLoggingInterceptor.maskUrl(request.url().toString()));
             if (logReqBody && request.body() != null) {
                 Buffer buf = new Buffer();
                 request.body().writeTo(buf);
@@ -101,7 +101,10 @@ public class OkHttpClientBuilderAdapter implements HttpClientBuilder {
 
             ResponseBody responseBody = response.body();
             String respStr = "";
-            if (responseBody != null) {
+            MediaType bodyType = responseBody != null ? responseBody.contentType() : null;
+            boolean streaming = bodyType != null && "event-stream".equalsIgnoreCase(bodyType.subtype());
+            // Never buffer an SSE stream: string() waits for the whole reply and breaks streaming.
+            if (responseBody != null && !streaming) {
                 MediaType contentType = responseBody.contentType();
                 respStr = responseBody.string();
                 response = response.newBuilder()
@@ -109,7 +112,7 @@ public class OkHttpClientBuilderAdapter implements HttpClientBuilder {
                         .build();
             }
 
-            XLog.d(TAG, "<-- " + response.code() + " " + request.url() + " (" + durationMs + "ms)");
+            XLog.d(TAG, "<-- " + response.code() + " " + FileLoggingInterceptor.maskUrl(request.url().toString()) + " (" + durationMs + "ms)");
             if (!respStr.isEmpty()) {
                 if (respStr.length() > 4000) {
                     XLog.d(TAG, "Response body: " + respStr.substring(0, 4000) + "...[truncated, total=" + respStr.length() + "]");

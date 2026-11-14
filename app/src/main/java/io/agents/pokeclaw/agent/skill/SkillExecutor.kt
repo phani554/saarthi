@@ -36,6 +36,11 @@ class SkillExecutor {
         XLog.i(TAG, "Executing skill: ${skill.id} with params: $params")
         val totalSteps = skill.steps.size
         var stepsUsed = 0
+        // Skills with real actions must report failure when none of them worked (all-optional
+        // dismiss/accept skills used to "succeed" with nothing tapped).
+        val hasActionSteps = skill.steps.any { it.toolName !in PASSIVE_TOOLS }
+        var actionSucceeded = false
+        val screenTexts = mutableListOf<String>()
 
         for ((index, step) in skill.steps.withIndex()) {
             stepsUsed = index + 1
@@ -56,6 +61,10 @@ class SkillExecutor {
                     if (result.isSuccess) {
                         XLog.d(TAG, "Step $stepNum OK: ${result.data?.take(100)}")
                         succeeded = true
+                        if (step.toolName !in PASSIVE_TOOLS) actionSucceeded = true
+                        if (step.toolName == "get_screen_info") {
+                            result.data?.takeIf { it.isNotBlank() }?.let { screenTexts += it }
+                        }
                         break
                     } else {
                         XLog.w(TAG, "Step $stepNum failed (attempt $attempt/${step.retries}): ${result.error}")
@@ -88,6 +97,33 @@ class SkillExecutor {
             }
         }
 
+        if (hasActionSteps && !actionSucceeded) {
+            XLog.w(TAG, "Skill ${skill.id} finished but no action step succeeded")
+            return SkillResult(
+                success = false,
+                stepsUsed = stepsUsed,
+                fallbackUsed = false,
+                message = "Nothing on screen matched. Fallback goal: ${resolveTemplate(skill.fallbackGoal, params)}"
+            )
+        }
+
+        // Read skills must return what they read, not just "completed".
+        if (skill.id in READ_SKILLS) {
+            if (screenTexts.isEmpty()) {
+                return SkillResult(
+                    success = false,
+                    stepsUsed = stepsUsed,
+                    message = "Could not read the screen. Fallback goal: ${resolveTemplate(skill.fallbackGoal, params)}"
+                )
+            }
+            XLog.i(TAG, "Skill ${skill.id} read ${screenTexts.size} screen(s)")
+            return SkillResult(
+                success = true,
+                stepsUsed = stepsUsed,
+                message = screenTexts.distinct().joinToString("\n\n").take(MAX_READ_CHARS)
+            )
+        }
+
         XLog.i(TAG, "Skill ${skill.id} completed in $stepsUsed steps")
         return SkillResult(
             success = true,
@@ -118,5 +154,8 @@ class SkillExecutor {
 
     companion object {
         private const val TAG = "SkillExecutor"
+        private val PASSIVE_TOOLS = setOf("get_screen_info", "wait")
+        private val READ_SKILLS = setOf("copy_screen_text", "scroll_and_read")
+        private const val MAX_READ_CHARS = 4000
     }
 }

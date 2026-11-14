@@ -238,8 +238,12 @@ public class GetDeviceInfoTool extends BaseTool {
         java.text.SimpleDateFormat sdf = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss z", java.util.Locale.getDefault());
         String localTime = sdf.format(new java.util.Date());
         java.util.TimeZone tz = java.util.TimeZone.getDefault();
+        // getOffset(now) includes DST and half-hour zones (IST is +05:30, not "5h").
+        int offsetMin = tz.getOffset(System.currentTimeMillis()) / 60000;
+        String offset = String.format(java.util.Locale.US, "%s%02d:%02d",
+                offsetMin < 0 ? "-" : "+", Math.abs(offsetMin) / 60, Math.abs(offsetMin) % 60);
         String result = "Current time: " + localTime + " (timezone: " + tz.getID()
-                + ", UTC offset: " + (tz.getRawOffset() / 3600000) + "h)";
+                + ", UTC offset: " + offset + ")";
         XLog.d(TAG, "Time info: " + result);
         return ToolResult.success(result);
     }

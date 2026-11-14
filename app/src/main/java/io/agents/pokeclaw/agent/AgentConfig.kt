@@ -63,9 +63,9 @@ Rule 3: Use tap(x, y) for clicking.
 Rule 4: Handle popups immediately.
   If a popup/dialog/overlay appears on screen, dismiss it before continuing the main task:
   - Ad popup: tap "Close/×/Skip/Got it"
-  - Permission popup: tap "Allow/Allow only this time" if the task needs it, otherwise tap "Deny"
+  - Permission popup: do not grant it yourself — stop and ask the user (call finish saying which permission the app is asking for)
   - Upgrade popup: tap "Later/Not now"
-  - Agreement popup: tap "Agree/I have read"
+  - Agreement / terms / consent popup: never accept on the user's behalf — stop and ask the user (call finish saying what the popup asks)
   - Login/paywall: **do not proceed automatically** — notify the user that login or payment is required, then call finish
 
 Rule 5: Be fast and direct. Execute actions immediately without extra delay.

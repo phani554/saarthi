@@ -184,9 +184,7 @@ class WeChatChannelHandler(
             item.imageItem?.let { img ->
                 XLog.i(TAG, "    image_item:")
                 XLog.i(TAG, "      media.encrypt_query_param=${img.media?.encryptQueryParam?.take(60)}...")
-                XLog.i(TAG, "      media.aes_key=${img.media?.aesKey?.take(30)}...")
                 XLog.i(TAG, "      media.encrypt_type=${img.media?.encryptType}")
-                XLog.i(TAG, "      aeskey(hex)=${img.aeskey?.take(30)}")
                 XLog.i(TAG, "      mid_size=${img.midSize}, hd_size=${img.hdSize}, thumb_size=${img.thumbSize}")
                 XLog.i(TAG, "      thumb_media.encrypt_query_param=${img.thumbMedia?.encryptQueryParam?.take(40)}...")
                 XLog.i(TAG, "      url=${img.url}")

@@ -78,15 +78,18 @@ class PipelineRouter(private val context: Context) {
     }
 
     /**
-     * Execute a Tier 1 direct intent.
+     * Execute a Tier 1 direct intent. Returns false when the intent could not be started,
+     * so callers never announce success for something that did not happen.
      */
-    fun executeIntent(intent: Intent) {
-        try {
+    fun executeIntent(intent: Intent): Boolean {
+        return try {
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             context.startActivity(intent)
             XLog.i(TAG, "Executed intent: ${intent.action}")
+            true
         } catch (e: Exception) {
             XLog.e(TAG, "Failed to execute intent: ${intent.action}", e)
+            false
         }
     }
 
@@ -100,12 +103,12 @@ class PipelineRouter(private val context: Context) {
     }
 
     private fun extractSkillParams(task: String, patterns: List<String>): Map<String, String> {
-        val lower = task.lowercase()
         for (pattern in patterns) {
             val paramNames = Regex("\\{(\\w+)\\}").findAll(pattern).map { it.groupValues[1] }.toList()
-            val regexStr = pattern.lowercase()
-                .replace(Regex("\\{\\w+\\}"), "(.+)")
-            val match = Regex(regexStr).find(lower)
+            // Escape the literal parts so "(", "?" or "." in a trigger cannot throw or mis-match,
+            // and match the original text case-insensitively so message/contact case is kept.
+            val regexStr = pattern.split(Regex("\\{\\w+\\}")).joinToString("(.+)") { Regex.escape(it) }
+            val match = Regex(regexStr, RegexOption.IGNORE_CASE).find(task)
             if (match != null && match.groupValues.size > 1) {
                 return paramNames.zip(match.groupValues.drop(1)).toMap()
             }

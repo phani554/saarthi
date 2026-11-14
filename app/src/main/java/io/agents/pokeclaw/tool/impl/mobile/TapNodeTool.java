@@ -69,6 +69,20 @@ public class TapNodeTool extends BaseTool {
         String boundsError = validateCoordinates(x, y);
         if (boundsError != null) return ToolResult.error(boundsError);
 
+        if (meta != null && meta.node != null) {
+            // Stale ID: the screen changed since get_screen_info; a coordinate fallback would hit whatever is there now.
+            if (!meta.node.refresh()) {
+                return ToolResult.error("Node " + nodeId + " is no longer on screen. Call get_screen_info first to refresh node IDs.");
+            }
+            // clickNode clicks the first clickable parent without re-checking it, so check ancestors here.
+            if (BaseTool.isPaymentNodeOrAncestor(meta.node)) {
+                return ToolResult.error("Blocked: node " + nodeId + " is (inside) a payment / place-order control. The user must complete payment themselves.");
+            }
+        }
+        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(service.getRootInActiveWindow(), x, y)) {
+            return ToolResult.error("Blocked: node " + nodeId + " is a payment / place-order control. The user must complete payment themselves.");
+        }
+
         service.dismissKeyboard();
         boolean success = service.clickNodeById(nodeId);
 

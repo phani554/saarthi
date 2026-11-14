@@ -14,7 +14,9 @@ import com.google.gson.Gson;
 import com.google.gson.reflect.TypeToken;
 
 import java.lang.reflect.Type;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -39,7 +41,11 @@ public class RepeatActionsTool extends BaseTool {
     private static final Gson GSON = new Gson();
     private static final Random RANDOM = new Random();
 
-    private static final int MAX_TOTAL_STEPS = 2000;
+    /** First few step errors of the current run (the agent runs tools one at a time). */
+    private final List<String> errors = new ArrayList<>();
+
+    private static final int MAX_TOTAL_STEPS = 300;
+    private static final int MAX_REPEAT_COUNT = 100;
     private static final long MAX_TOTAL_DURATION_MS = 30 * 60 * 1000L; // 30 min
 
     private static final int DEFAULT_INTERVAL_MIN_MS = 3000;
@@ -48,6 +54,15 @@ public class RepeatActionsTool extends BaseTool {
     private static final Set<String> BLOCKED_TOOLS = new HashSet<>(Arrays.asList(
             "repeat_actions", // prevent recursion
             "finish"          // should not be called inside a loop
+    ));
+
+    /**
+     * Only plain navigation/observation tools may be looped. Messaging, calls, SOS, cart, forward,
+     * auto-reply, input and app-launch tools have real-world side effects and must never repeat.
+     */
+    private static final Set<String> ALLOWED_TOOLS = new HashSet<>(Arrays.asList(
+            "swipe", "tap", "tap_node", "long_press", "wait", "scroll_to_find", "find_and_tap",
+            "system_key", "get_screen_info", "take_screenshot"
     ));
 
     @Override
@@ -69,7 +84,7 @@ public class RepeatActionsTool extends BaseTool {
                 + "ONLY set interval_min_ms=interval_max_ms to a fixed value when the user EXPLICITLY requests a specific interval (e.g. 'every 10 seconds'). "
                 + "Otherwise, always use the default random interval or customize the range via interval_min_ms/interval_max_ms. "
                 + "Example: actions=[{\"tool\":\"swipe\",\"params\":{\"start_x\":540,\"start_y\":1600,\"end_x\":540,\"end_y\":400}}], repeat_count=30. "
-                + "Cannot call 'repeat_actions' or 'finish' inside actions.";
+                + "Only swipe, tap, tap_node, long_press, wait, scroll_to_find, find_and_tap, system_key, get_screen_info and take_screenshot may be repeated (max 100 rounds, 300 steps); never messages, calls or cart actions.";
     }
 
     @Override
@@ -125,6 +140,9 @@ public class RepeatActionsTool extends BaseTool {
         if (repeatCount < 1) {
             return ToolResult.error("repeat_count must be at least 1");
         }
+        if (repeatCount > MAX_REPEAT_COUNT) {
+            return ToolResult.error("repeat_count must be at most " + MAX_REPEAT_COUNT);
+        }
 
         if (intervalMinMs < 0 || intervalMaxMs < 0) {
             return ToolResult.error("interval_min_ms and interval_max_ms must be >= 0");
@@ -145,14 +163,28 @@ public class RepeatActionsTool extends BaseTool {
             if (step.tool == null || step.tool.isEmpty()) {
                 return ToolResult.error("Action step " + i + " has no tool name");
             }
-            if (BLOCKED_TOOLS.contains(step.tool)) {
-                return ToolResult.error("Tool '" + step.tool + "' cannot be used inside repeat_actions");
+            if (BLOCKED_TOOLS.contains(step.tool) || !ALLOWED_TOOLS.contains(step.tool)) {
+                return ToolResult.error("Tool '" + step.tool + "' cannot be used inside repeat_actions. Allowed: " + ALLOWED_TOOLS);
             }
             if (ToolRegistry.getInstance().getTool(step.tool) == null) {
                 return ToolResult.error("Unknown tool '" + step.tool + "' in action step " + i);
             }
             if (step.params == null) {
                 step.params = Collections.emptyMap();
+            } else {
+                // Gson parses every JSON number as Double ("9876543210" -> "9.87654321E9" via toString()).
+                Map<String, Object> fixed = new HashMap<>();
+                for (Map.Entry<String, Object> e : step.params.entrySet()) {
+                    Object v = e.getValue();
+                    if (v instanceof Double) {
+                        double d = (Double) v;
+                        if (d == Math.rint(d) && !Double.isInfinite(d) && Math.abs(d) < 9.0e15) {
+                            v = (long) d;
+                        }
+                    }
+                    fixed.put(e.getKey(), v);
+                }
+                step.params = fixed;
             }
         }
 
@@ -174,6 +206,7 @@ public class RepeatActionsTool extends BaseTool {
         int totalSuccess = 0;
         int totalFail = 0;
         int completedRounds = 0;
+        errors.clear();
 
         for (int round = 0; round < repeatCount; round++) {
             if (Thread.currentThread().isInterrupted()) {
@@ -204,6 +237,17 @@ public class RepeatActionsTool extends BaseTool {
                     totalSuccess++;
                 } else {
                     totalFail++;
+                    if (errors.size() < 3) {
+                        errors.add(step.tool + ": " + result.getError());
+                    }
+                    // A payment block, or every action failing, means looping on is pointless.
+                    String err = result.getError() != null ? result.getError() : "";
+                    if (err.startsWith("Blocked:")) {
+                        return buildResult(completedRounds, repeatCount, totalSuccess, totalFail, "blocked");
+                    }
+                    if (totalSuccess == 0 && totalFail >= 5) {
+                        return buildResult(completedRounds, repeatCount, totalSuccess, totalFail, "every action failed");
+                    }
                     XLog.w(TAG, "Step failed: round=" + (round + 1)
                             + ", step=" + stepIdx + " (" + step.tool + "): " + result.getError());
                 }
@@ -242,8 +286,17 @@ public class RepeatActionsTool extends BaseTool {
             sb.append(", ").append(fail).append(" failed");
         }
         sb.append(".");
+        if (!errors.isEmpty()) {
+            sb.append(" Errors: ").append(String.join(" | ", errors));
+        }
         String msg = sb.toString();
         XLog.i(TAG, msg);
+        if (fail > 0 && success == 0) {
+            return ToolResult.error(msg);
+        }
+        if ("blocked".equals(status)) {
+            return ToolResult.error(msg);
+        }
         return ToolResult.success(msg);
     }
 

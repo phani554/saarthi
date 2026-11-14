@@ -20,6 +20,9 @@ class DiscordChannelHandler(
 
     @Volatile
     private var lastChannelId: String? = null
+    // Channel of the last message from the paired owner (the gateway drops all other senders).
+    @Volatile
+    private var ownerChannelId: String? = null
 
     private val callback = object : DiscordCallback<String> {
         override fun onSuccess(result: String) { XLog.i(TAG, "Discord reply succeeded: ${result.take(120)}") }
@@ -39,7 +42,8 @@ class DiscordChannelHandler(
             object : DiscordGatewayClient.OnDiscordMessageListener {
                 override fun onDiscordMessage(channelId: String, messageId: String, content: String) {
                     lastChannelId = channelId
-                    XLog.i(TAG, "[${channel.displayName}] Message received: $content, channelId=$channelId")
+                    ownerChannelId = channelId
+                    XLog.i(TAG, "[${channel.displayName}] Message received, channelId=$channelId")
                     ChannelManager.dispatchMessage(channel, content, messageId)
                 }
             }
@@ -92,6 +96,11 @@ class DiscordChannelHandler(
 
     override fun sendImage(imageBytes: ByteArray, messageID: String) {
         val channelId = lastChannelId ?: return
+        // Never send a screenshot anywhere but the paired owner's channel.
+        if (channelId != ownerChannelId) {
+            XLog.w(TAG, "Discord image not sent: channel is not the paired owner's")
+            return
+        }
         scope.launch {
             try {
                 DiscordApiClient.getInstance().sendImage(channelId, imageBytes, callback = callback)
@@ -103,6 +112,10 @@ class DiscordChannelHandler(
 
     override fun sendFile(file: java.io.File, messageID: String) {
         val channelId = lastChannelId ?: return
+        if (channelId != ownerChannelId) {
+            XLog.w(TAG, "Discord file not sent: channel is not the paired owner's")
+            return
+        }
         scope.launch {
             try {
                 DiscordApiClient.getInstance().sendFile(

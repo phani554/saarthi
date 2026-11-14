@@ -26,6 +26,7 @@ class DiscordApiClient private constructor() {
     companion object {
         private const val TAG = "DiscordApiClient"
         private const val MAX_RETRIES = 2
+        private const val MAX_MESSAGE_CHARS = 1900
 
         @Volatile
         private var instance: DiscordApiClient? = null
@@ -59,6 +60,11 @@ class DiscordApiClient private constructor() {
      * Send a text message to the specified channel
      */
     fun sendMessage(channelId: String, content: String, callback: DiscordCallback<String>?) {
+        // Discord rejects messages over 2000 characters (HTTP 400): split long replies.
+        if (content.length > MAX_MESSAGE_CHARS) {
+            content.chunked(MAX_MESSAGE_CHARS).forEach { sendMessage(channelId, it, callback) }
+            return
+        }
         val json = JsonObject().apply {
             addProperty("content", content)
         }

@@ -41,7 +41,11 @@ object PrescriptionExtractor {
 
     /** Blocking; call off the main thread. */
     fun extract(context: Context, imageUri: Uri): kotlin.Result<Extraction> = runCatching {
-        val apiKey = KVUtils.getLlmApiKey().trim()
+        // This call goes to Google: only ever send a Google key (never an OpenAI/OpenRouter key).
+        val apiKey = KVUtils.getApiKeyForProvider("GOOGLE").ifBlank {
+            if (KVUtils.getLlmProvider().equals("GOOGLE", ignoreCase = true)) KVUtils.getLlmApiKey()
+            else io.agents.pokeclaw.BuildConfig.GEMINI_API_KEY
+        }.trim()
         require(apiKey.isNotBlank()) { "No Gemini API key set (Settings → Models)." }
         val jpeg = loadScaledJpeg(context, imageUri)
         val prompt = """

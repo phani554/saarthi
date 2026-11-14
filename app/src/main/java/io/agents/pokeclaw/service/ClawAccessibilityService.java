@@ -19,6 +19,8 @@ import android.graphics.Rect;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.HandlerThread;
+import android.app.KeyguardManager;
 import android.os.Looper;
 import io.agents.pokeclaw.ClawApplication;
 import io.agents.pokeclaw.R;
@@ -57,6 +59,25 @@ import io.agents.pokeclaw.utils.UiTextMatchUtils;
 public class ClawAccessibilityService extends AccessibilityService {
 
     private static final String TAG = "ClawA11yService";
+    private static final long HEARTBEAT_MIN_INTERVAL_MS = 2000L;
+    private volatile long lastHeartbeatWriteMs = 0L;
+
+    // Gesture callbacks are delivered on this thread, so dispatchGestureSync can wait on the
+    // main thread without deadlocking (callbacks would otherwise need the blocked main looper).
+    private static HandlerThread gestureThread;
+    private static Handler gestureHandler;
+
+    private static synchronized Handler getGestureHandler() {
+        if (gestureHandler == null) {
+            gestureThread = new HandlerThread("ClawGestureCallbacks");
+            gestureThread.start();
+            gestureHandler = new Handler(gestureThread.getLooper());
+        }
+        return gestureHandler;
+    }
+
+    // One shared executor for screenshot callbacks (was a new, never-shut-down thread per call).
+    private static final Executor SCREENSHOT_EXECUTOR = Executors.newSingleThreadExecutor();
     private static volatile ClawAccessibilityService instance;
 
     public static ClawAccessibilityService getInstance() {
@@ -192,7 +213,12 @@ public class ClawAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        KVUtils.INSTANCE.noteAccessibilityHeartbeat();
+        // Throttle the MMKV heartbeat write: one per HEARTBEAT_MIN_INTERVAL_MS, not one per event.
+        long nowMs = System.currentTimeMillis();
+        if (nowMs - lastHeartbeatWriteMs >= HEARTBEAT_MIN_INTERVAL_MS) {
+            lastHeartbeatWriteMs = nowMs;
+            KVUtils.INSTANCE.noteAccessibilityHeartbeat();
+        }
         // Debug: log notification events from messaging apps
         if (event != null && event.getEventType() == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED) {
             XLog.d(TAG, "Notification event from: " + event.getPackageName());
@@ -265,7 +291,7 @@ public class ClawAccessibilityService extends AccessibilityService {
     }
 
     public boolean performTap(int x, int y, long durationMs) {
-        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(getRootInActiveWindow(), x, y)) {
+        if (isPaymentAtPoint(x, y)) {
             XLog.w(TAG, "performTap blocked by PaymentGate at (" + x + "," + y + ")");
             return false;
         }
@@ -283,6 +309,10 @@ public class ClawAccessibilityService extends AccessibilityService {
      * Performs a long press at the given screen coordinates.
      */
     public boolean performLongPress(int x, int y, long durationMs) {
+        if (isPaymentAtPoint(x, y)) {
+            XLog.w(TAG, "performLongPress blocked by PaymentGate at (" + x + "," + y + ")");
+            return false;
+        }
         Path path = new Path();
         path.moveTo(x, y);
         GestureDescription.StrokeDescription stroke =
@@ -297,6 +327,11 @@ public class ClawAccessibilityService extends AccessibilityService {
      * Performs a swipe gesture from (startX, startY) to (endX, endY).
      */
     public boolean performSwipe(int startX, int startY, int endX, int endY, long durationMs) {
+        // A swipe that starts on a pay control (e.g. "slide to pay") completes the payment.
+        if (isPaymentAtPoint(startX, startY)) {
+            XLog.w(TAG, "performSwipe blocked by PaymentGate at (" + startX + "," + startY + ")");
+            return false;
+        }
         Path path = new Path();
         path.moveTo(startX, startY);
         path.lineTo(endX, endY);
@@ -306,6 +341,35 @@ public class ClawAccessibilityService extends AccessibilityService {
                 .addStroke(stroke)
                 .build();
         return dispatchGestureSync(gesture);
+    }
+
+    /**
+     * PaymentGate check for a screen point: the active window, plus every other interactive
+     * window whose bounds contain the point (bottom sheets, dialogs and overlays can sit in a
+     * window other than the focused one).
+     */
+    private boolean isPaymentAtPoint(int x, int y) {
+        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(getRootInActiveWindow(), x, y)) {
+            return true;
+        }
+        try {
+            List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows != null) {
+                Rect wb = new Rect();
+                for (AccessibilityWindowInfo window : windows) {
+                    if (window == null) continue;
+                    window.getBoundsInScreen(wb);
+                    if (!wb.contains(x, y)) continue;
+                    AccessibilityNodeInfo wRoot = window.getRoot();
+                    if (wRoot != null && io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(wRoot, x, y)) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            XLog.w(TAG, "PaymentGate window scan failed", e);
+        }
+        return false;
     }
 
     /**
@@ -327,7 +391,7 @@ public class ClawAccessibilityService extends AccessibilityService {
                 result.set(false);
                 latch.countDown();
             }
-        }, null);
+        }, getGestureHandler());
 
         if (!dispatched) {
             return false;
@@ -391,7 +455,7 @@ public class ClawAccessibilityService extends AccessibilityService {
         if (node == null) {
             return false;
         }
-        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentNode(node)) {
+        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentNodeOrAncestor(node)) {
             return false; // hard stop at checkout: the user pays, never the agent
         }
         if (node.isClickable()) {
@@ -405,6 +469,11 @@ public class ClawAccessibilityService extends AccessibilityService {
         AccessibilityNodeInfo parent = node.getParent();
         while (parent != null) {
             if (parent.isClickable()) {
+                // The ancestor can carry the pay label on a sibling of node: re-check it.
+                if (io.agents.pokeclaw.agent.PaymentGate.isPaymentNode(parent)) {
+                    XLog.w(TAG, "clickNode blocked by PaymentGate on clickable ancestor");
+                    return false;
+                }
                 boolean clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK);
                 if (clicked) {
                     return true;
@@ -434,6 +503,10 @@ public class ClawAccessibilityService extends AccessibilityService {
      * Triggers IME action or clicks search submit button to execute search.
      */
     public boolean performImeAction(AccessibilityNodeInfo node) {
+        if (node != null && io.agents.pokeclaw.agent.PaymentGate.isPaymentNode(node)) {
+            XLog.w(TAG, "performImeAction blocked by PaymentGate");
+            return false;
+        }
         if (node != null) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 if (node.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId())) {
@@ -536,8 +609,18 @@ public class ClawAccessibilityService extends AccessibilityService {
     public boolean clickNodeById(String nodeId) {
         NodeMetadata meta = nodeMetaMap.get(nodeId);
         if (meta != null && meta.node != null) {
-            boolean clicked = clickNode(meta.node);
-            if (clicked) return true;
+            // Refresh the cached snapshot so the PaymentGate reads the node's current label;
+            // a node that can no longer be refreshed is stale, so fall back to the (gated) tap.
+            boolean fresh;
+            try {
+                fresh = meta.node.refresh();
+            } catch (Exception e) {
+                fresh = false;
+            }
+            if (fresh) {
+                boolean clicked = clickNode(meta.node);
+                if (clicked) return true;
+            }
         }
         int[] coords = nodeIdMap.get(nodeId);
         if (coords != null && coords.length >= 2) {
@@ -940,7 +1023,10 @@ public class ClawAccessibilityService extends AccessibilityService {
     }
 
     public boolean collapseNotifications() {
-        return performGlobalAction(GLOBAL_ACTION_QUICK_SETTINGS);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            return performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE);
+        }
+        return performGlobalAction(GLOBAL_ACTION_BACK);
     }
 
     public boolean lockScreen() {
@@ -976,7 +1062,15 @@ public class ClawAccessibilityService extends AccessibilityService {
             int centerX = dm.widthPixels / 2;
             int bottomY = (int) (dm.heightPixels * 0.8);
             int topY = (int) (dm.heightPixels * 0.2);
-            return performSwipe(centerX, bottomY, centerX, topY, 300);
+            boolean swiped = performSwipe(centerX, bottomY, centerX, topY, 300);
+            if (!swiped) return false;
+            // A PIN/pattern/password keyguard stays locked after the swipe: report that honestly.
+            KeyguardManager km = (KeyguardManager) getSystemService(KEYGUARD_SERVICE);
+            if (km == null) return true;
+            for (int i = 0; i < 6 && km.isKeyguardLocked(); i++) {
+                try { Thread.sleep(250); } catch (InterruptedException ignored) { break; }
+            }
+            return !km.isKeyguardLocked();
         } catch (Exception e) {
             XLog.e(TAG, "unlockScreen failed", e);
             return false;
@@ -998,8 +1092,7 @@ public class ClawAccessibilityService extends AccessibilityService {
 
         // Use a background executor for the callback to avoid deadlock
         // when takeScreenshot is called from the main thread (Tier 1 tools).
-        Executor bgExecutor = Executors.newSingleThreadExecutor();
-        takeScreenshot(Display.DEFAULT_DISPLAY, bgExecutor,
+        takeScreenshot(Display.DEFAULT_DISPLAY, SCREENSHOT_EXECUTOR,
                 new TakeScreenshotCallback() {
                     @Override
                     public void onSuccess(ScreenshotResult result) {
@@ -1032,6 +1125,10 @@ public class ClawAccessibilityService extends AccessibilityService {
      *
      * @param keyCode Android KeyEvent keycode (e.g. KeyEvent.KEYCODE_DPAD_UP = 19)
      * @return true if the command executed without error
+     *
+     * NOTE: shell "input keyevent" needs INJECT_EVENTS (adb shell / root / some TV builds).
+     * On a normal phone app it always fails and returns false; do not use it to submit text.
+     * Use performImeAction / ACTION_IME_ENTER instead.
      */
     public boolean sendKeyEvent(int keyCode) {
         try {

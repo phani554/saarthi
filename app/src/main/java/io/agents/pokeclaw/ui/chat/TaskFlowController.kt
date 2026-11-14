@@ -30,6 +30,9 @@ import io.agents.pokeclaw.ui.settings.SettingsActivity
 import io.agents.pokeclaw.utils.KVUtils
 import io.agents.pokeclaw.utils.XLog
 import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.atomic.AtomicInteger
 
 data class TaskFlowUiState(
     val messages: SnapshotStateList<ChatMessage>,
@@ -56,60 +59,132 @@ class TaskFlowController(
 
     companion object {
         private const val TAG = "TaskFlowController"
+        // Status text ChatSessionController shows when the selected tab has no model.
+        private const val NO_MODEL_STATUS = "No model selected"
+
+        private val CANCEL_WORDS = Regex(
+            """\b(stop|cancel|wait|rok do|ruko|bhai ruk|vaddu|halt)\b""",
+            RegexOption.IGNORE_CASE
+        )
+
+        // Progress narration goes through a lock in VoiceManager; never do that on the main thread.
+        private val narrationExecutor = Executors.newSingleThreadExecutor()
     }
 
     enum class VoiceInteractionState {
         IDLE,
         PRE_TASK_CONFIRMATION,
-        TASK_EXECUTING,
-        MID_TASK_CLARIFICATION
+        TASK_EXECUTING
     }
 
+    @Volatile
     var currentVoiceState = VoiceInteractionState.IDLE
         private set
 
+    // Guarded by synchronized(preTaskHistoryBuilder): written from the executor and from main.
     private val preTaskHistoryBuilder = StringBuilder()
     var onTriggerVoiceCapture: (() -> Unit)? = null
+
+    // Bumped when SOS starts or voice state is reset, so an in-flight rewriter turn is dropped.
+    private val voiceGeneration = AtomicInteger(0)
 
     private var sendTaskRetryCount = 0
     private var lastMonitorStatusNote: String? = null
     private val pipelineRouter = PipelineRouter(activity)
 
+    private fun clearPreTaskHistory() {
+        synchronized(preTaskHistoryBuilder) { preTaskHistoryBuilder.clear() }
+    }
+
+    /** Runs [block] on the controller executor, or on a fresh thread if the executor is shut down. */
+    private fun runOffMain(block: () -> Unit) {
+        try {
+            executor.execute { block() }
+        } catch (e: RejectedExecutionException) {
+            Thread { block() }.start()
+        }
+    }
+
+    /** Drops any pending voice turn and returns the voice loop to IDLE (e.g. after KILL TASK). */
+    fun resetVoiceState() {
+        voiceGeneration.incrementAndGet()
+        currentVoiceState = VoiceInteractionState.IDLE
+        isTaskExecutingLock = false
+        clearPreTaskHistory()
+        VoiceManager.onPlaybackFinished = null
+    }
+
     fun processVoiceTurn(userSpeech: String) {
         if (userSpeech.isBlank()) return
 
-        // Distress heard: skip the confirm turn and start the SOS call chain immediately.
+        // Distress heard: DistressEscalator decides whether this is a short distress phrase.
+        // Only then skip the confirm turn and start the SOS call chain immediately.
         if (io.agents.pokeclaw.care.DistressEscalator.isDistressUtterance(userSpeech)) {
+            voiceGeneration.incrementAndGet()
             if (appViewModel.isTaskRunning()) appViewModel.stopTask()
             currentVoiceState = VoiceInteractionState.IDLE
-            preTaskHistoryBuilder.clear()
-            val msg = io.agents.pokeclaw.care.DistressEscalator.trigger(activity, "voice")
-            activity.runOnUiThread { addUser(userSpeech); addSystem("SOS: $msg") }
+            VoiceManager.onPlaybackFinished = null
+            clearPreTaskHistory()
+            val appContext = activity.applicationContext
+            // trigger() speaks via VoiceManager (which can block on its speak lock), so keep it off main.
+            runOffMain {
+                val msg = try {
+                    io.agents.pokeclaw.care.DistressEscalator.trigger(appContext, "voice")
+                } catch (e: Exception) {
+                    XLog.e(TAG, "SOS trigger failed", e)
+                    "Could not start SOS: ${e.message}"
+                }
+                activity.runOnUiThread { addUser(userSpeech); addSystem("SOS: $msg") }
+            }
             return
         }
-        // "I'm fine / stop" while SOS is calling people.
+        // "I'm fine / stop" while SOS is calling people (Latin, Devanagari and Telugu phrases).
         if (io.agents.pokeclaw.care.DistressEscalator.isActive &&
-            Regex("""\b(stop|cancel|theek hoon|thik hu|i am fine|i'm fine|band karo|vaddu)\b""", RegexOption.IGNORE_CASE).containsMatchIn(userSpeech)) {
+            io.agents.pokeclaw.care.DistressEscalator.isCancelUtterance(userSpeech)) {
             io.agents.pokeclaw.care.DistressEscalator.cancel(activity, "user said stop")
             VoiceManager.speakAsync("Theek hai, SOS band kar diya.", flush = true)
             activity.runOnUiThread { addSystem("SOS stopped.") }
             return
         }
 
-        executor.submit {
+        // The selected tab has no model (input is disabled): don't quietly run a voice task on the other mode's model.
+        if (!appViewModel.isTaskRunning() && uiState.modelStatus.value == NO_MODEL_STATUS) {
+            activity.runOnUiThread {
+                Toast.makeText(activity, "No model selected. Pick a model first.", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+
+        // Speech while a typed task runs goes to the stop/redirect branch, not a new confirmation turn.
+        if (currentVoiceState == VoiceInteractionState.IDLE && appViewModel.isTaskRunning()) {
+            currentVoiceState = VoiceInteractionState.TASK_EXECUTING
+        }
+
+        val generation = voiceGeneration.get()
+        executor.execute {
             try {
                 when (currentVoiceState) {
                     VoiceInteractionState.IDLE, VoiceInteractionState.PRE_TASK_CONFIRMATION -> {
                         currentVoiceState = VoiceInteractionState.PRE_TASK_CONFIRMATION
-                        preTaskHistoryBuilder.append("User: ").append(userSpeech).append("\n")
+                        val history = synchronized(preTaskHistoryBuilder) {
+                            preTaskHistoryBuilder.append("User: ").append(userSpeech).append("\n")
+                            preTaskHistoryBuilder.toString()
+                        }
 
                         val result = io.agents.pokeclaw.agent.PromptRewriter.processTurn(
                             userSpeech = userSpeech,
-                            conversationHistory = preTaskHistoryBuilder.toString(),
+                            conversationHistory = history,
                             mode = io.agents.pokeclaw.agent.PromptRewriter.InteractionMode.PRE_TASK_CONFIRMATION
                         )
 
-                        preTaskHistoryBuilder.append("Saarthi: ").append(result.spokenResponse).append("\n")
+                        if (generation != voiceGeneration.get()) {
+                            XLog.i(TAG, "Dropping stale voice turn result (SOS or reset happened meanwhile)")
+                            return@execute
+                        }
+
+                        synchronized(preTaskHistoryBuilder) {
+                            preTaskHistoryBuilder.append("Saarthi: ").append(result.spokenResponse).append("\n")
+                        }
                         io.agents.pokeclaw.service.VoiceManager.speakAsync(result.spokenResponse, flush = true)
 
                         activity.runOnUiThread {
@@ -118,14 +193,18 @@ class TaskFlowController(
 
                         if (result.isCancelled) {
                             currentVoiceState = VoiceInteractionState.IDLE
-                            preTaskHistoryBuilder.clear()
+                            clearPreTaskHistory()
                             VoiceManager.onPlaybackFinished = null
                         } else if (result.isConfirmed && result.cleanedEnglishTask.isNotBlank()) {
                             currentVoiceState = VoiceInteractionState.TASK_EXECUTING
-                            preTaskHistoryBuilder.clear()
+                            clearPreTaskHistory()
                             VoiceManager.onPlaybackFinished = null
                             activity.runOnUiThread {
-                                sendTask(result.cleanedEnglishTask)
+                                // No task started (already running, no config, ...): don't stay in TASK_EXECUTING.
+                                if (!sendTask(result.cleanedEnglishTask) &&
+                                    currentVoiceState == VoiceInteractionState.TASK_EXECUTING) {
+                                    currentVoiceState = VoiceInteractionState.IDLE
+                                }
                             }
                         } else {
                             currentVoiceState = VoiceInteractionState.PRE_TASK_CONFIRMATION
@@ -138,33 +217,18 @@ class TaskFlowController(
                             }
                         }
                     }
-                    VoiceInteractionState.MID_TASK_CLARIFICATION -> {
-                        val result = io.agents.pokeclaw.agent.PromptRewriter.processTurn(
-                            userSpeech = userSpeech,
-                            conversationHistory = "Mid-task clarification",
-                            mode = io.agents.pokeclaw.agent.PromptRewriter.InteractionMode.MID_TASK_CLARIFICATION
-                        )
-
-                        io.agents.pokeclaw.service.VoiceManager.speakAsync(result.spokenResponse, flush = true)
-                        activity.runOnUiThread {
-                            addUser(userSpeech)
-                            addSystem("Clarification: ${result.cleanedEnglishTask}")
-                        }
-
-                        currentVoiceState = VoiceInteractionState.TASK_EXECUTING
-                    }
                     VoiceInteractionState.TASK_EXECUTING -> {
                         XLog.i(TAG, "Speech input received during active task execution: '$userSpeech'")
                         val lower = userSpeech.lowercase().trim()
-                        val isCancelCommand = lower.contains("stop") || lower.contains("cancel") ||
-                                lower.contains("wait") || lower.contains("rok do") || lower.contains("bhai ruk") ||
-                                lower.contains("vaddu") || lower.contains("nayi") || lower.contains("halt")
+                        // Whole words only, and only in a short utterance ("bus stop ke paas" is not a cancel).
+                        val isCancelCommand = CANCEL_WORDS.containsMatchIn(lower) &&
+                                lower.split(Regex("\\s+")).size <= 4
 
                         if (isCancelCommand) {
                             XLog.w(TAG, "Voice stop command received during task execution — cancelling task immediately")
                             appViewModel.stopTask()
                             currentVoiceState = VoiceInteractionState.IDLE
-                            preTaskHistoryBuilder.clear()
+                            clearPreTaskHistory()
                             VoiceManager.speak("Task stopped.")
                             activity.runOnUiThread {
                                 addSystem("Task cancelled via voice command.")
@@ -173,7 +237,7 @@ class TaskFlowController(
                             XLog.i(TAG, "Voice redirection command received during active task — updating task goal to: '$userSpeech'")
                             appViewModel.stopTask()
                             currentVoiceState = VoiceInteractionState.PRE_TASK_CONFIRMATION
-                            preTaskHistoryBuilder.clear()
+                            clearPreTaskHistory()
                             processVoiceTurn(userSpeech)
                         }
                     }
@@ -187,16 +251,20 @@ class TaskFlowController(
     @Volatile
     private var isTaskExecutingLock = false
 
-    fun sendTask(text: String) {
+    /**
+     * Returns true when a task was started (or a direct tool / Accessibility retry is under way),
+     * false when nothing was started, so the voice loop can leave TASK_EXECUTING.
+     */
+    fun sendTask(text: String): Boolean {
         if (appViewModel.isTaskRunning() || isTaskExecutingLock) {
             addSystem("A task is already running. Stop it first.")
-            return
+            return false
         }
 
         if (ModelConfigRepository.snapshot().isLocalActive() && isLikelyMonitorRequest(text)) {
             addUser(text)
             addSystem("Local mode starts monitoring from the Background card. Open Background, choose the app/contact, then tap Start Monitoring.")
-            return
+            return false
         }
 
         when (AppCapabilityCoordinator.accessibilityState(activity)) {
@@ -204,8 +272,7 @@ class TaskFlowController(
                 val directTool = DirectDeviceDataGuard.deterministicToolCall(text)
                 if (directTool != null) {
                     XLog.i(TAG, "sendTask: executing non-interactive direct tool without Accessibility")
-                    executeDirectToolTask(text, directTool)
-                    return
+                    return executeDirectToolTask(text, directTool)
                 }
                 if (canRunWithoutAccessibility(text)) {
                     XLog.i(TAG, "sendTask: allowing non-interactive task without Accessibility")
@@ -214,15 +281,14 @@ class TaskFlowController(
                 addSystem("⚠️ Task mode needs Accessibility Service enabled. Opening Settings...")
                 openSettings()
                 sendTaskRetryCount = 0
-                return
+                return false
                 }
             }
             ServiceBindingState.CONNECTING -> {
                 val directTool = DirectDeviceDataGuard.deterministicToolCall(text)
                 if (directTool != null) {
                     XLog.i(TAG, "sendTask: executing non-interactive direct tool while Accessibility connects")
-                    executeDirectToolTask(text, directTool)
-                    return
+                    return executeDirectToolTask(text, directTool)
                 }
                 if (canRunWithoutAccessibility(text)) {
                     XLog.i(TAG, "sendTask: allowing non-interactive task while Accessibility connects")
@@ -232,15 +298,17 @@ class TaskFlowController(
                     addSystem("Accessibility service didn't connect. Try toggling it off and on in Settings.")
                     openSettings()
                     sendTaskRetryCount = 0
-                    return
+                    return false
                 }
                 sendTaskRetryCount++
                 addSystem("Accessibility service connecting, please wait...")
-                executor.submit {
+                runOffMain {
                     val connected = ClawAccessibilityService.awaitRunning(5000)
                     activity.runOnUiThread {
                         if (connected) {
-                            sendTask(text)
+                            if (!sendTask(text) && currentVoiceState == VoiceInteractionState.TASK_EXECUTING) {
+                                currentVoiceState = VoiceInteractionState.IDLE
+                            }
                         } else {
                             Toast.makeText(activity, "Accessibility service didn't connect", Toast.LENGTH_LONG).show()
                             addSystem("Accessibility service didn't connect. Go to Settings and toggle it off then on.")
@@ -249,15 +317,14 @@ class TaskFlowController(
                         }
                     }
                 }
-                return
+                return true
                 }
             }
             ServiceBindingState.DEGRADED -> {
                 val directTool = DirectDeviceDataGuard.deterministicToolCall(text)
                 if (directTool != null) {
                     XLog.i(TAG, "sendTask: executing non-interactive direct tool while Accessibility is degraded")
-                    executeDirectToolTask(text, directTool)
-                    return
+                    return executeDirectToolTask(text, directTool)
                 }
                 if (canRunWithoutAccessibility(text)) {
                     XLog.i(TAG, "sendTask: allowing non-interactive task while Accessibility is degraded")
@@ -266,7 +333,7 @@ class TaskFlowController(
                     addSystem("Accessibility service disconnected. Open Settings and toggle it off then on.")
                     openSettings()
                     sendTaskRetryCount = 0
-                    return
+                    return false
                 }
             }
             ServiceBindingState.READY -> Unit
@@ -279,8 +346,12 @@ class TaskFlowController(
 
         if (!KVUtils.hasLlmConfig()) {
             Toast.makeText(activity, "Configure LLM in Settings first", Toast.LENGTH_LONG).show()
-            return
+            return false
         }
+
+        // Close the window between here and appViewModel.startTask (executor hop + main post),
+        // during which isTaskRunning() is still false and a second sendTask could slip through.
+        isTaskExecutingLock = true
 
         val agentPromptOverride = buildAgentPromptOverride(text)
         addUser(text)
@@ -291,36 +362,54 @@ class TaskFlowController(
 
         val taskId = "task_${System.currentTimeMillis()}"
 
-        executor.submit {
-            chatSessionController.prepareForTaskStart()
+        try {
+            executor.submit {
+                chatSessionController.prepareForTaskStart()
 
-            activity.runOnUiThread {
-                try {
-                    appViewModel.startTask(text, taskId, agentPromptOverride = agentPromptOverride) { event ->
-                        activity.runOnUiThread { handleTaskEvent(event) }
+                activity.runOnUiThread {
+                    try {
+                        appViewModel.startTask(text, taskId, agentPromptOverride = agentPromptOverride) { event ->
+                            activity.runOnUiThread { handleTaskEvent(event) }
+                        }
+                    } catch (e: Exception) {
+                        XLog.e(TAG, "sendTask failed: ${e.message}", e)
+                        addSystem("Error: ${e.message}")
+                        cleanupAfterTask()
+                    } finally {
+                        // From here on appViewModel.isTaskRunning() guards against a double start
+                        // (or the task already settled), so the short-window lock is no longer needed.
+                        isTaskExecutingLock = false
                     }
-                } catch (e: Exception) {
-                    XLog.e(TAG, "sendTask failed: ${e.message}", e)
-                    addSystem("Error: ${e.message}")
-                    cleanupAfterTask()
                 }
             }
+        } catch (e: RejectedExecutionException) {
+            XLog.e(TAG, "sendTask: executor shut down", e)
+            removeTypingIndicator()
+            cleanupAfterTask()
+            return false
         }
+        return true
     }
 
-    private fun executeDirectToolTask(text: String, toolCall: DirectDeviceDataGuard.DeterministicToolCall) {
+    private fun executeDirectToolTask(text: String, toolCall: DirectDeviceDataGuard.DeterministicToolCall): Boolean {
         ensureNotificationPermission()
         addUser(text)
+        isTaskExecutingLock = true // cleanupAfterTask clears it
         uiState.isAwaitingReply.value = true
         uiState.isTaskRunning.value = false
         uiState.messages.add(ChatMessage(ChatMessage.Role.ASSISTANT, "..."))
 
-        executor.submit {
+        runOffMain {
             try {
                 val result = ToolRegistry.getInstance().executeTool(toolCall.toolName, toolCall.params)
                 activity.runOnUiThread {
-                    val answer = result.data ?: result.error ?: "Done."
+                    val answer = if (result.isSuccess) {
+                        result.data ?: "Done."
+                    } else {
+                        "Failed: ${result.error ?: "unknown error"}"
+                    }
                     replaceTypingIndicator(answer)
+                    VoiceManager.speakAsync(answer, flush = true)
                     cleanupAfterTask()
                 }
             } catch (e: Exception) {
@@ -331,6 +420,7 @@ class TaskFlowController(
                 }
             }
         }
+        return true
     }
 
     private fun canRunWithoutAccessibility(text: String): Boolean {
@@ -392,8 +482,9 @@ class TaskFlowController(
         }, 1500)
     }
 
+    // "Done." is the orchestrator's placeholder when the agent gave no answer: don't claim success in words.
     private fun cleanSpokenAnswer(raw: String): String =
-        if (raw.contains("within time limit") || raw.trim() == "Done.") "Kaam poora ho gaya hai." else raw
+        if (raw.isBlank() || raw.trim() == "Done.") "Ho gaya, screen dekh lijiye." else raw
 
     private fun handleTaskEvent(event: TaskEvent) {
         try {
@@ -407,13 +498,9 @@ class TaskFlowController(
                 }
                 is TaskEvent.Failed -> {
                     val rawError = event.error
-                    executor.submit {
-                        val explanation = explainTaskErrorWithAi(rawError)
-                        activity.runOnUiThread {
-                            replaceTypingIndicator("Error: $rawError\n\n💡 $explanation")
-                            VoiceManager.speakAsync(explanation, flush = true)
-                        }
-                    }
+                    // Resolve the "..." now: a late replace could otherwise hit a newer request's indicator.
+                    replaceTypingIndicator("Error: $rawError")
+                    explainErrorLater(rawError)
                     cleanupAfterTask()
                 }
                 is TaskEvent.Cancelled -> {
@@ -422,13 +509,8 @@ class TaskFlowController(
                 }
                 is TaskEvent.Blocked -> {
                     val msg = "Blocked by system dialog."
-                    executor.submit {
-                        val explanation = explainTaskErrorWithAi(msg)
-                        activity.runOnUiThread {
-                            replaceTypingIndicator("$msg\n\n💡 $explanation")
-                            VoiceManager.speakAsync(explanation, flush = true)
-                        }
-                    }
+                    replaceTypingIndicator(msg)
+                    explainErrorLater(msg)
                     cleanupAfterTask()
                 }
                 is TaskEvent.ToolAction -> {
@@ -453,7 +535,8 @@ class TaskFlowController(
                     uiState.isAwaitingReply.value = false
                     uiState.isTaskRunning.value = true
                     addSystem(event.description)
-                    VoiceManager.speakNative(event.description)
+                    val description = event.description
+                    narrationExecutor.execute { VoiceManager.speakNative(description) }
                 }
                 is TaskEvent.LoopStart -> {
                     uiState.isAwaitingReply.value = false
@@ -463,6 +546,32 @@ class TaskFlowController(
             }
         } catch (e: Exception) {
             XLog.w(TAG, "handleTaskEvent error", e)
+        }
+    }
+
+    /**
+     * After the activity is recreated (rotation, dark mode, font size) while a chat-started task runs,
+     * route that task's events to this screen instead of the destroyed one.
+     */
+    fun reattachToRunningTask() {
+        if (!appViewModel.isTaskRunning()) return
+        if (appViewModel.inProgressTaskChannel != io.agents.pokeclaw.channel.Channel.LOCAL) return
+        uiState.isTaskRunning.value = true
+        appViewModel.taskOrchestrator.taskEventCallback = { event ->
+            activity.runOnUiThread { handleTaskEvent(event) }
+        }
+        XLog.i(TAG, "reattachToRunningTask: task events now go to the recreated screen")
+    }
+
+    /** Adds a plain-language explanation of [rawError] as its own message when the LLM returns. */
+    private fun explainErrorLater(rawError: String) {
+        runOffMain {
+            val explanation = explainTaskErrorWithAi(rawError)
+            activity.runOnUiThread {
+                uiState.messages.add(ChatMessage(ChatMessage.Role.ASSISTANT, "💡 $explanation"))
+                onPersistConversation()
+                VoiceManager.speakAsync(explanation, flush = true)
+            }
         }
     }
 
@@ -488,7 +597,7 @@ class TaskFlowController(
         XLog.i(TAG, "cleanupAfterTask: isProcessing=FALSE")
         isTaskExecutingLock = false
         currentVoiceState = VoiceInteractionState.IDLE
-        preTaskHistoryBuilder.clear()
+        clearPreTaskHistory()
         uiState.isAwaitingReply.value = false
         uiState.isTaskRunning.value = false
         appViewModel.clearTaskCallback()

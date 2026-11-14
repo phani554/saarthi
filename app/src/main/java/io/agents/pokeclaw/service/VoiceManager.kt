@@ -54,6 +54,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
     private const val TAG = "VoiceManager"
     private var appContext: Context? = null
     private var tts: TextToSpeech? = null
+    @Volatile
     private var isTtsInitialized = false
     var isVoiceOutputEnabled = true
     var onPlaybackFinished: (() -> Unit)? = null
@@ -62,6 +63,8 @@ object VoiceManager : TextToSpeech.OnInitListener {
     var lastDetectedLanguageCode: String = "hi-IN"
 
     private var mediaPlayer: MediaPlayer? = null
+    /** Temp WAV backing the current Sarvam clip; deleted on completion, error, failure or stop. */
+    private var currentTempFile: File? = null
     private val speechExecutor = Executors.newSingleThreadExecutor()
     private val mainHandler by lazy {
         try {
@@ -122,6 +125,15 @@ object VoiceManager : TextToSpeech.OnInitListener {
                     if (!isSarvamClipPlaying) {
                         isPlayingAudio = false
                         _engineState.value = VoiceEngineState.Idle
+                        // Re-arm the voice loop after native speech too (it was Sarvam-only).
+                        val doneGeneration = speechGeneration
+                        mainHandler.postDelayed({
+                            if (doneGeneration == speechGeneration && !isSarvamClipPlaying &&
+                                tts?.isSpeaking != true
+                            ) {
+                                onPlaybackFinished?.invoke()
+                            }
+                        }, 300L)
                     }
                 }
                 @Deprecated("Deprecated in Java")
@@ -187,9 +199,11 @@ object VoiceManager : TextToSpeech.OnInitListener {
         val cleanText = cleanTextForSpeech(text).take(400)
         if (cleanText.isBlank()) return
 
+        var myGeneration = 0L
+        var sarvamKey = ""
         synchronized(speakLock) {
             stopAudioPlayback()
-            val myGeneration = speechGeneration
+            myGeneration = speechGeneration
 
             val currentState = TaskExecutionState.instance.currentState.value
             val isExecutingState = currentState is AgentTaskState.Executing ||
@@ -203,15 +217,36 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 return
             }
 
-            val sarvamKey = KVUtils.getSarvamApiKey().trim()
-            if (sarvamKey.isNotEmpty()) {
-                val spokenSarvam = speakSarvamTts(cleanText, sarvamKey, myGeneration)
-                if (spokenSarvam) return
-                if (myGeneration != speechGeneration) return // superseded while waiting on Sarvam
+            sarvamKey = KVUtils.getSarvamApiKey().trim()
+            if (sarvamKey.isEmpty()) {
+                if (isTtsInitialized) {
+                    speakNativeInternal(cleanText, flush)
+                }
+                return
             }
+            isPlayingAudio = true
+            _engineState.value = VoiceEngineState.Speaking
+        }
 
+        // The Sarvam HTTP call (up to ~25 s) runs OUTSIDE speakLock, so stop(), voice capture
+        // and SOS speakNative(flush=true) never wait on the network. The generation check below
+        // drops the clip if anything newer started or a stop happened meanwhile.
+        val base64Audio = fetchSarvamTtsAudio(cleanText, sarvamKey)
+
+        synchronized(speakLock) {
+            if (myGeneration != speechGeneration) {
+                XLog.i(TAG, "Sarvam audio arrived after a newer utterance or a stop; discarding")
+                return
+            }
+            if (base64Audio != null) {
+                playBase64Audio(base64Audio, myGeneration)
+                return
+            }
+            isPlayingAudio = false
             if (isTtsInitialized) {
                 speakNativeInternal(cleanText, flush)
+            } else {
+                _engineState.value = VoiceEngineState.Error("Sarvam TTS failed")
             }
         }
     }
@@ -223,7 +258,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
         synchronized(speakLock) {
             if (isSarvamClipPlaying && !flush) {
                 // Low-priority progress narration: never talk over (or cut) a Sarvam reply.
-                XLog.d(TAG, "Skipping native narration while Sarvam clip plays: '$cleanText'")
+                XLog.d(TAG, "Skipping native narration while Sarvam clip plays (${cleanText.length} chars)")
                 return
             }
             stopAudioPlayback()
@@ -248,7 +283,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
         val myGeneration = speechGeneration
         mainHandler.post {
             if (myGeneration != speechGeneration || isSarvamClipPlaying) {
-                XLog.d(TAG, "Dropping stale native utterance: '$cleanText'")
+                XLog.d(TAG, "Dropping stale native utterance (${cleanText.length} chars)")
                 return@post
             }
             try {
@@ -256,7 +291,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
             } catch (_: Exception) {}
             val mode = if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
             tts?.speak(cleanText, mode, null, "saarthi_native_" + System.currentTimeMillis())
-            XLog.i(TAG, "Speaking via Native TTS: '$cleanText'")
+            XLog.i(TAG, "Speaking via Native TTS (${cleanText.length} chars)")
         }
     }
 
@@ -267,10 +302,12 @@ object VoiceManager : TextToSpeech.OnInitListener {
         }
     }
 
-    private fun speakSarvamTts(text: String, apiKey: String, generation: Long): Boolean {
+    /**
+     * Blocking Sarvam TTS request. Returns the base64 audio, or null on any failure.
+     * Must be called without holding speakLock.
+     */
+    private fun fetchSarvamTtsAudio(text: String, apiKey: String): String? {
         return try {
-            isPlayingAudio = true
-            _engineState.value = VoiceEngineState.Speaking
             val jsonBody = JSONObject().apply {
                 put("inputs", JSONArray().apply { put(text) })
                 val targetLang = if (lastDetectedLanguageCode.isNotBlank()) lastDetectedLanguageCode else KVUtils.getSarvamLanguageCode().ifBlank { "hi-IN" }
@@ -289,38 +326,32 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 .post(jsonBody.toString().toRequestBody("application/json".toMediaType()))
                 .build()
 
-            val response = httpClient.newCall(request).execute()
-            val responseStr = response.body?.string().orEmpty()
-
-            if (response.isSuccessful) {
-                val root = JSONObject(responseStr)
-                val audios = root.optJSONArray("audios")
-                val base64Audio = audios?.optString(0).orEmpty()
-                if (base64Audio.isNotEmpty()) {
-                    if (generation != speechGeneration) {
-                        XLog.i(TAG, "Sarvam audio arrived after a newer utterance; discarding")
-                        isPlayingAudio = false
-                        return true
+            httpClient.newCall(request).execute().use { response ->
+                val responseStr = response.body?.string().orEmpty()
+                if (response.isSuccessful) {
+                    val base64Audio = JSONObject(responseStr).optJSONArray("audios")?.optString(0).orEmpty()
+                    if (base64Audio.isNotEmpty()) {
+                        XLog.i(TAG, "Sarvam TTS audio received (${text.length} chars of text)")
+                        return base64Audio
                     }
-                    playBase64Audio(base64Audio)
-                    XLog.i(TAG, "Spoke via Sarvam TTS successfully: '$text'")
-                    return true
                 }
+                XLog.w(TAG, "Sarvam TTS request failed (${response.code}, ${responseStr.length} bytes), falling back to native TTS")
+                null
             }
-            isPlayingAudio = false
-            XLog.w(TAG, "Sarvam TTS request failed (${response.code}), falling back to native TTS: $responseStr")
-            _engineState.value = VoiceEngineState.Error("Sarvam TTS HTTP ${response.code}")
-            false
         } catch (e: Exception) {
-            isPlayingAudio = false
             XLog.e(TAG, "Error calling Sarvam TTS, falling back to native TTS", e)
-            _engineState.value = VoiceEngineState.Error("Sarvam TTS exception: ${e.message}")
-            false
+            null
         }
     }
 
-    private fun playBase64Audio(base64Audio: String) {
-        val ctx = appContext ?: return
+    /** Called with speakLock held. */
+    private fun playBase64Audio(base64Audio: String, generation: Long) {
+        val ctx = appContext ?: run {
+            isPlayingAudio = false
+            _engineState.value = VoiceEngineState.Idle
+            return
+        }
+        var tempFile: File? = null
         try {
             if (VoiceRecorder.isRecording()) {
                 VoiceRecorder.stopRecording()
@@ -329,17 +360,24 @@ object VoiceManager : TextToSpeech.OnInitListener {
             _engineState.value = VoiceEngineState.Speaking
 
             val audioBytes = Base64.decode(base64Audio, Base64.DEFAULT)
-            val tempFile = File.createTempFile("sarvam_tts_", ".wav", ctx.cacheDir)
-            FileOutputStream(tempFile).use { it.write(audioBytes) }
+            val file = File.createTempFile("sarvam_tts_", ".wav", ctx.cacheDir)
+            tempFile = file
+            FileOutputStream(file).use { it.write(audioBytes) }
 
+            if (generation != speechGeneration) {
+                file.delete()
+                isPlayingAudio = false
+                return
+            }
             // Make sure the phone's own TTS is silent before the Sarvam clip starts.
             try { tts?.stop() } catch (_: Exception) {}
             isSarvamClipPlaying = true
+            currentTempFile = file
             mediaPlayer = MediaPlayer().apply {
-                setDataSource(tempFile.absolutePath)
+                setDataSource(file.absolutePath)
                 prepare()
                 setOnCompletionListener {
-                    tempFile.delete()
+                    file.delete()
                     isSarvamClipPlaying = false
                     isPlayingAudio = false
                     _engineState.value = VoiceEngineState.Idle
@@ -348,7 +386,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
                     }, 300L)
                 }
                 setOnErrorListener { _, _, _ ->
-                    tempFile.delete()
+                    file.delete()
                     isSarvamClipPlaying = false
                     isPlayingAudio = false
                     _engineState.value = VoiceEngineState.Idle
@@ -358,6 +396,10 @@ object VoiceManager : TextToSpeech.OnInitListener {
             }
         } catch (e: Exception) {
             XLog.e(TAG, "Error playing Sarvam TTS base64 audio", e)
+            try { tempFile?.delete() } catch (_: Exception) {}
+            try { mediaPlayer?.release() } catch (_: Exception) {}
+            mediaPlayer = null
+            currentTempFile = null
             isSarvamClipPlaying = false
             isPlayingAudio = false
             _engineState.value = VoiceEngineState.Idle
@@ -365,6 +407,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
     }
 
     fun stopAudioPlayback() {
+      synchronized(speakLock) {
         speechGeneration++
         isSarvamClipPlaying = false
         try {
@@ -372,14 +415,19 @@ object VoiceManager : TextToSpeech.OnInitListener {
         } catch (_: Exception) {}
         try {
             mediaPlayer?.stop()
-            mediaPlayer?.release()
-            mediaPlayer = null
         } catch (_: Exception) {}
+        try {
+            mediaPlayer?.release()
+        } catch (_: Exception) {}
+        mediaPlayer = null
+        try { currentTempFile?.delete() } catch (_: Exception) {}
+        currentTempFile = null
         try {
             tts?.stop()
         } catch (_: Exception) {}
         isPlayingAudio = false
         _engineState.value = VoiceEngineState.Idle
+      }
     }
 
     fun cleanupAllResidualState() {
@@ -421,7 +469,8 @@ object VoiceManager : TextToSpeech.OnInitListener {
             processGeminiVoiceInput(audioBytes, mimeType, geminiKey, onTranscript)
         } else {
             XLog.e(TAG, "No API key configured for STT!")
-            onTranscript("No API key set for voice transcription.")
+            _engineState.value = VoiceEngineState.Error("No API key set for voice transcription")
+            onTranscript("")
         }
     }
 
@@ -449,20 +498,29 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 }
 
                 override fun onResponse(call: Call, response: Response) {
-                    val respStr = response.body?.string().orEmpty()
-                    if (response.isSuccessful && respStr.isNotEmpty()) {
-                        val jsonObj = JSONObject(respStr)
-                        val transcript = jsonObj.optString("transcript", "").trim()
-                        val detectedLang = jsonObj.optString("language_code", "").trim()
-                        if (detectedLang.isNotEmpty()) {
-                            lastDetectedLanguageCode = detectedLang
+                    // A throw here (e.g. HTML from a captive portal) would kill the process on
+                    // OkHttp's dispatcher thread and leave the state stuck at Transcribing.
+                    var transcript = ""
+                    try {
+                        response.use { resp ->
+                            val respStr = resp.body?.string().orEmpty()
+                            if (resp.isSuccessful && respStr.isNotEmpty()) {
+                                val jsonObj = JSONObject(respStr)
+                                transcript = jsonObj.optString("transcript", "").trim()
+                                val detectedLang = jsonObj.optString("language_code", "").trim()
+                                if (detectedLang.isNotEmpty()) {
+                                    lastDetectedLanguageCode = detectedLang
+                                }
+                                XLog.i(TAG, "Sarvam STT transcription successful (${transcript.length} chars)")
+                            } else {
+                                XLog.e(TAG, "Sarvam STT API error HTTP ${resp.code} (${respStr.length} bytes)")
+                            }
                         }
-                        XLog.i(TAG, "Sarvam STT transcription successful: '$transcript'")
-                        onTranscript(transcript)
-                    } else {
-                        XLog.e(TAG, "Sarvam STT API error HTTP ${response.code}: $respStr")
-                        onTranscript("")
+                    } catch (e: Exception) {
+                        XLog.e(TAG, "Sarvam STT response parse failed: ${e.message}")
+                        transcript = ""
                     }
+                    onTranscript(transcript)
                 }
             })
         } catch (e: Exception) {
@@ -505,20 +563,27 @@ object VoiceManager : TextToSpeech.OnInitListener {
             }
 
             override fun onResponse(call: Call, response: Response) {
-                val respStr = response.body?.string().orEmpty()
-                if (response.isSuccessful && respStr.isNotEmpty()) {
-                    val jsonObj = JSONObject(respStr)
-                    val candidates = jsonObj.optJSONArray("candidates")
-                    val firstCandidate = candidates?.optJSONObject(0)
-                    val content = firstCandidate?.optJSONObject("content")
-                    val parts = content?.optJSONArray("parts")
-                    val transcript = parts?.optJSONObject(0)?.optString("text", "")?.trim().orEmpty()
-                    XLog.i(TAG, "Gemini STT transcription successful: '$transcript'")
-                    onTranscript(transcript)
-                } else {
-                    XLog.e(TAG, "Gemini STT API error: $respStr")
-                    onTranscript("")
+                var transcript = ""
+                try {
+                    response.use { resp ->
+                        val respStr = resp.body?.string().orEmpty()
+                        if (resp.isSuccessful && respStr.isNotEmpty()) {
+                            val jsonObj = JSONObject(respStr)
+                            val candidates = jsonObj.optJSONArray("candidates")
+                            val firstCandidate = candidates?.optJSONObject(0)
+                            val content = firstCandidate?.optJSONObject("content")
+                            val parts = content?.optJSONArray("parts")
+                            transcript = parts?.optJSONObject(0)?.optString("text", "")?.trim().orEmpty()
+                            XLog.i(TAG, "Gemini STT transcription successful (${transcript.length} chars)")
+                        } else {
+                            XLog.e(TAG, "Gemini STT API error HTTP ${resp.code} (${respStr.length} bytes)")
+                        }
+                    }
+                } catch (e: Exception) {
+                    XLog.e(TAG, "Gemini STT response parse failed: ${e.message}")
+                    transcript = ""
                 }
+                onTranscript(transcript)
             }
         })
     }

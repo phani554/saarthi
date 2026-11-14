@@ -155,6 +155,11 @@ public final class UiActionMatchUtils {
         CharSequence desc = node.getContentDescription();
         CharSequence text = node.getText();
 
+        // Never pick a payment control ("Send money", "Pay", UPI, ₹) as the message send button.
+        if (looksLikePayment(viewId) || looksLikePayment(desc) || looksLikePayment(text)) {
+            return Integer.MIN_VALUE;
+        }
+
         int score = 0;
 
         if (actionable) score += 20;
@@ -327,6 +332,21 @@ public final class UiActionMatchUtils {
         if (value == null || value.isEmpty()) return false;
         String normalized = value.toLowerCase();
         for (String hint : SEARCH_ID_HINTS) {
+            if (normalized.contains(hint)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static final String[] PAYMENT_HINTS = {
+            "pay", "money", "payment", "upi", "\u20b9", "rupee", "paisa", "bhim", "\u092d\u0941\u0917\u0924\u093e\u0928"
+    };
+
+    private static boolean looksLikePayment(CharSequence value) {
+        if (value == null || value.length() == 0) return false;
+        String normalized = value.toString().toLowerCase();
+        for (String hint : PAYMENT_HINTS) {
             if (normalized.contains(hint)) {
                 return true;
             }

@@ -56,6 +56,8 @@ class ChannelSetup(
                     ChannelManager.flushMessages(channel)
                     return
                 }
+                // Remote task: turn the screen on for the accessibility actions; released when it finishes.
+                ClawApplication.appViewModelInstance.acquireTaskWakeLock(wakeScreen = true)
                 taskOrchestrator.startNewTask(channel, message, messageID)
             }
         })

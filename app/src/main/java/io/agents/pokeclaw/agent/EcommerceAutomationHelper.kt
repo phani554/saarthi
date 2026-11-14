@@ -19,6 +19,20 @@ import io.agents.pokeclaw.utils.XLog
 object EcommerceAutomationHelper {
 
     private const val TAG = "EcommerceHelper"
+    private const val RESULTS_WAIT_MS = 3000L
+
+    /** True if a visible, non-editable node (not the search box) shows [query]. */
+    private fun hasNonEditableText(node: android.view.accessibility.AccessibilityNodeInfo?, query: String, depth: Int): Boolean {
+        if (node == null || depth > 40) return false
+        if (!node.isEditable) {
+            val t = node.text?.toString()?.lowercase()
+            if (t != null && t.contains(query)) return true
+        }
+        for (i in 0 until node.childCount) {
+            if (hasNonEditableText(node.getChild(i), query, depth + 1)) return true
+        }
+        return false
+    }
 
     /**
      * Fast pure search without attempting Add to Cart.
@@ -71,15 +85,16 @@ object EcommerceAutomationHelper {
             return ToolResult.error("Search bar unavailable on active screen")
         }
 
-        // 3. Fast 50ms event-driven pause for search result cards
-        val deadline = System.currentTimeMillis() + 300L
+        // 3. Wait (up to RESULTS_WAIT_MS) for real results: an ADD button AND a non-editable node
+        //    showing the query. 300 ms was too short and let us tap an ADD left over from the previous screen.
+        val deadline = System.currentTimeMillis() + RESULTS_WAIT_MS
         while (System.currentTimeMillis() < deadline) {
             val currentRoot = service.rootInActiveWindow
             if (currentRoot != null) {
                 val addNode = NodeFinder.findNodeByIdOrText(currentRoot, "add", "+ add", "add to cart")
-                if (addNode != null) break
+                if (addNode != null && hasNonEditableText(currentRoot, cleanQuery.lowercase(), 0)) break
             }
-            try { Thread.sleep(30L) } catch (_: InterruptedException) { break }
+            try { Thread.sleep(100L) } catch (_: InterruptedException) { break }
         }
 
         // 4. Add matching product card to cart directly
@@ -102,14 +117,21 @@ object EcommerceAutomationHelper {
     fun processMultiProductOrderList(service: ClawAccessibilityService, items: List<String>): ToolResult {
         if (items.isEmpty()) return ToolResult.error("Item list is empty")
 
-        XLog.i(TAG, "processMultiProductOrderList: starting order for ${items.size} items: $items")
+        XLog.i(TAG, "processMultiProductOrderList: starting order for ${items.size} items")
 
-        val readCartTool = ReadCartTool()
-        val initialCartResult = readCartTool.execute(emptyMap())
-        val cartText = initialCartResult.data.orEmpty().lowercase()
+        // Only skip "already in cart" items when we are actually looking at a cart screen, and only
+        // match against the cart's item titles. A store home page showing a "Milk" category is not a cart.
+        val rootNow = service.rootInActiveWindow
+        val onCartScreen = rootNow != null && NodeFinder.findNodeByTextContains(
+            rootNow, "my cart", "your cart", "shopping cart", "review cart"
+        ) != null
+        val cartText = if (onCartScreen) {
+            val initialCartResult = ReadCartTool().execute(emptyMap())
+            if (initialCartResult.isSuccess) initialCartResult.data.orEmpty().substringAfter("Item List:", "").lowercase() else ""
+        } else ""
 
         val itemsToAdd = items.filter { item ->
-            val isAlreadyInCart = cartText.contains(item.lowercase())
+            val isAlreadyInCart = cartText.isNotBlank() && cartText.contains(item.lowercase())
             if (isAlreadyInCart) {
                 XLog.i(TAG, "Item '$item' is ALREADY in cart. Skipping duplicate addition!")
             }
@@ -149,6 +171,8 @@ object EcommerceAutomationHelper {
             }
         }
 
+        // Nothing added (all failed / out of stock): this is not a success.
+        if (successItems.isEmpty()) return ToolResult.error(summary)
         return ToolResult.success(summary)
     }
 
@@ -165,14 +189,19 @@ object EcommerceAutomationHelper {
      * Check if a task prompt requests multiple e-commerce products (e.g. "order milk, bread, pepsi").
      */
     fun extractMultiProducts(prompt: String): List<String> {
-        val lower = prompt.lowercase()
-        val isOrderTask = lower.contains("order") || lower.contains("buy") || lower.contains("add") || lower.contains("get")
+        // Whole words only: "address" is not "add", "forget" is not "get".
+        val isOrderTask = Regex("""(?i)\b(order|buy|add|get)\b""").containsMatchIn(prompt)
         if (!isOrderTask) return emptyList()
 
         val clean = prompt.replace(Regex("""(?i)\b(order|buy|add|get|to cart|from blinkit|from zepto|from flipkart|on amazon)\b"""), "")
             .trim()
 
-        val items = clean.split(",", " and ", " & ", " then ").map { it.trim() }.filter { it.length > 2 }
+        // Commas separate items; "and" only splits the last item of a comma list ("milk, bread and eggs"),
+        // so "bread and butter" stays one product.
+        val commaParts = clean.split(",").map { it.trim() }.filter { it.isNotEmpty() }
+        if (commaParts.size < 2) return emptyList()
+        val lastSplit = commaParts.last().removePrefix("and ").split(Regex("""\s+(?:and|&)\s+"""))
+        val items = (commaParts.dropLast(1) + lastSplit).map { it.trim() }.filter { it.length > 2 }
         return if (items.size > 1) items else emptyList()
     }
 }

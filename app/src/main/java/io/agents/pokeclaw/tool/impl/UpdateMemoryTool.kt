@@ -54,8 +54,13 @@ class UpdateMemoryTool : BaseTool() {
             val existing = KBManager.read(MEMORY_FILE_PATH).getOrNull().orEmpty()
             val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date())
 
-            val updatedContent = if (existing.contains(oldFact, ignoreCase = true)) {
-                existing.replace(Regex("""(?i)- \[[^]]+\] .*?\b""" + Pattern.quote(oldFact) + """\b.*"""), "- [$timestamp] $newFact")
+            // Replacement text is escaped ("$" in a fact used to throw), "[^\]]" is safe under ICU,
+            // and no word-boundary requirement, so facts with punctuation at the edges still match.
+            val lineRegex = Regex("""(?i)- \[[^\]]+\] [^\n]*?""" + Pattern.quote(oldFact) + """[^\n]*""")
+            val replacement = Regex.escapeReplacement("- [$timestamp] $newFact")
+            val replaced = lineRegex.containsMatchIn(existing)
+            val updatedContent = if (replaced) {
+                existing.replace(lineRegex, replacement)
             } else {
                 existing + "\n- [$timestamp] $newFact\n"
             }
@@ -75,7 +80,11 @@ class UpdateMemoryTool : BaseTool() {
             MemoryManager.recordFact(newFact)
 
             XLog.i("UpdateMemoryTool", "Successfully updated memory: '$oldFact' -> '$newFact'")
-            ToolResult.success("Successfully updated memory from '$oldFact' to '$newFact'")
+            if (replaced) {
+                ToolResult.success("Successfully updated memory from '$oldFact' to '$newFact'")
+            } else {
+                ToolResult.success("'$oldFact' was not found as a saved memory line, so nothing was replaced; '$newFact' was added as a new memory.")
+            }
         } catch (e: Exception) {
             XLog.e("UpdateMemoryTool", "Failed to update memory", e)
             ToolResult.error("Failed to update memory: ${e.message}")

@@ -66,6 +66,17 @@ public class TakeScreenshotTool extends BaseTool {
 
             File dir = new File(ClawApplication.Companion.getInstance().getCacheDir(), "screenshots");
             if (!dir.exists()) dir.mkdirs();
+            // Screenshots can show payment / UPI screens: keep only the last hour's.
+            File[] old = dir.listFiles();
+            if (old != null) {
+                long cutoff = System.currentTimeMillis() - 60L * 60L * 1000L;
+                for (File f : old) {
+                    if (f.isFile() && f.lastModified() < cutoff) {
+                        //noinspection ResultOfMethodCallIgnored
+                        f.delete();
+                    }
+                }
+            }
 
             String filename = System.currentTimeMillis() + ".png";
             File file = new File(dir, filename);

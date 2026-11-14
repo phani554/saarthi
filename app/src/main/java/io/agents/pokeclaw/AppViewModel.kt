@@ -31,7 +31,7 @@ class AppViewModel : ViewModel() {
 
     val taskOrchestrator = TaskOrchestrator(
         agentConfigProvider = { getAgentConfig() },
-        onTaskFinished = { /* refresh */ }
+        onTaskFinished = { releaseScreenWakeLock() }
     )
 
     private val channelSetup = ChannelSetup(taskOrchestrator = taskOrchestrator)
@@ -56,6 +56,7 @@ class AppViewModel : ViewModel() {
         onEvent: (TaskEvent) -> Unit,
     ) {
         onBeforeTask?.invoke()
+        acquireTaskWakeLock(wakeScreen = false)
         taskOrchestrator.taskEventCallback = onEvent
         if (!updateAgentConfig()) {
             onEvent(TaskEvent.Failed("AI service not ready"))
@@ -98,7 +99,8 @@ class AppViewModel : ViewModel() {
     fun updateAgentConfig(): Boolean = taskOrchestrator.updateAgentConfig()
 
     fun afterInit() {
-        acquireScreenWakeLock()
+        // No wake lock here: it used to light the screen on every (background) process start.
+        // The lock is now held only while a task runs (see acquireTaskWakeLock / onTaskFinished).
         KeepAliveJobService.cancel(ClawApplication.instance)
         ForegroundService.syncToBackgroundState(ClawApplication.instance)
         ConfigServerManager.autoStartIfNeeded(ClawApplication.instance)
@@ -107,29 +109,40 @@ class AppViewModel : ViewModel() {
 
 
     /**
-     * Acquire a wake lock to prevent the screen from turning off during accessibility operations
+     * Keep the screen on while a task runs (accessibility actions need it). [wakeScreen] turns the
+     * screen on, which only remote (channel) tasks need. Released in onTaskFinished.
      */
-    private fun acquireScreenWakeLock() {
+    @Synchronized
+    fun acquireTaskWakeLock(wakeScreen: Boolean) {
         if (wakeLock?.isHeld == true) return
         val pm = ClawApplication.instance.getSystemService(android.content.Context.POWER_SERVICE) as? PowerManager
             ?: return
-        wakeLock = pm.newWakeLock(
-            PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-            "PokeClaw::ScreenWakeLock"
-        ).apply {
-            acquire(10 * 60 * 1000L) // 10 minute timeout to prevent battery drain
+        @Suppress("DEPRECATION")
+        val flags = if (wakeScreen) PowerManager.SCREEN_DIM_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP
+            else PowerManager.SCREEN_DIM_WAKE_LOCK
+        try {
+            wakeLock = pm.newWakeLock(flags, "PokeClaw::ScreenWakeLock").apply {
+                acquire(10 * 60 * 1000L) // 10 minute timeout to prevent battery drain
+            }
+            XLog.i(TAG, "Wake lock acquired (wakeScreen=$wakeScreen)")
+        } catch (e: Exception) {
+            XLog.w(TAG, "Wake lock acquire failed: ${e.message}")
         }
-        XLog.i(TAG, "Wake lock acquired")
     }
 
     /**
      * Release the wake lock
      */
+    @Synchronized
     private fun releaseScreenWakeLock() {
         wakeLock?.let {
-            if (it.isHeld) {
-                it.release()
-                XLog.i(TAG, "Wake lock released")
+            try {
+                if (it.isHeld) {
+                    it.release()
+                    XLog.i(TAG, "Wake lock released")
+                }
+            } catch (e: Exception) {
+                XLog.w(TAG, "Wake lock release failed: ${e.message}")
             }
         }
         wakeLock = null

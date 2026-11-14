@@ -3,6 +3,7 @@
 package io.agents.pokeclaw.ui.care
 
 import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import android.widget.Toast
@@ -26,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import io.agents.pokeclaw.care.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -58,8 +60,13 @@ private fun CareProfileScreen(onBack: () -> Unit) {
         }
     }
     LaunchedEffect(Unit) {
-        perms.launch(arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_PHONE_STATE))
+        // Ask only for what is still missing, so the dialog doesn't reappear on every visit/rotation.
+        val missing = arrayOf(Manifest.permission.CALL_PHONE, Manifest.permission.SEND_SMS, Manifest.permission.READ_PHONE_STATE)
+            .filter { ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED }
+        if (missing.isNotEmpty()) perms.launch(missing.toTypedArray())
     }
+    // Two taps within 4 s (same guard as the chat screen), so a stray touch while editing never phones anyone.
+    var sosArmedAt by remember { mutableStateOf(0L) }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
         busy = true
@@ -79,7 +86,27 @@ private fun CareProfileScreen(onBack: () -> Unit) {
             item {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Button(
-                        onClick = { Toast.makeText(context, DistressEscalator.trigger(context, "button"), Toast.LENGTH_LONG).show() },
+                        onClick = {
+                            val now = System.currentTimeMillis()
+                            if (now - sosArmedAt < 4_000L) {
+                                sosArmedAt = 0L
+                                val appContext = context.applicationContext
+                                scope.launch {
+                                    // trigger() speaks through VoiceManager and may wait on it: not on main.
+                                    val msg = withContext(Dispatchers.IO) {
+                                        try {
+                                            DistressEscalator.trigger(appContext, "button")
+                                        } catch (e: Exception) {
+                                            "SOS could not start: ${e.message}"
+                                        }
+                                    }
+                                    Toast.makeText(appContext, msg, Toast.LENGTH_LONG).show()
+                                }
+                            } else {
+                                sosArmedAt = now
+                                Toast.makeText(context, "Tap SOS again to call for help", Toast.LENGTH_SHORT).show()
+                            }
+                        },
                         colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC62828)),
                         modifier = Modifier.weight(1f).height(64.dp)
                     ) { Text("SOS", fontSize = 24.sp, fontWeight = FontWeight.Bold) }
@@ -114,7 +141,16 @@ private fun CareProfileScreen(onBack: () -> Unit) {
             item { Section("Important contacts") }
             listOf(CareRoles.WATCHMAN, CareRoles.FAMILY_DOCTOR, CareRoles.CHEMIST).forEach { role ->
                 item(key = role) {
-                    ContactEditor(CareRoles.displayName(role), profile.first(role), showRelation = false) { name, phone, _ ->
+                    val existing = profile.first(role)
+                    ContactEditor(
+                        CareRoles.displayName(role), existing, showRelation = false,
+                        onDelete = existing?.let { c ->
+                            {
+                                CareProfileStore.update { p -> p.copy(contacts = p.contacts - c, distressPriority = p.distressPriority - CareProfile.keyOf(c)) }
+                                refresh()
+                            }
+                        }
+                    ) { name, phone, _ ->
                         CareProfileStore.upsertContact(CareContact(role, name, phone)); refresh()
                     }
                 }
@@ -197,7 +233,13 @@ private fun Section(title: String) {
 }
 
 @Composable
-private fun ContactEditor(title: String, existing: CareContact?, showRelation: Boolean, onSave: (String, String, String) -> Unit) {
+private fun ContactEditor(
+    title: String,
+    existing: CareContact?,
+    showRelation: Boolean,
+    onDelete: (() -> Unit)? = null,
+    onSave: (String, String, String) -> Unit,
+) {
     var name by remember(existing) { mutableStateOf(existing?.name.orEmpty()) }
     var phone by remember(existing) { mutableStateOf(existing?.phone.orEmpty()) }
     var relation by remember(existing) { mutableStateOf(existing?.relation.orEmpty()) }
@@ -208,10 +250,15 @@ private fun ContactEditor(title: String, existing: CareContact?, showRelation: B
             if (showRelation) OutlinedTextField(relation, { relation = it }, label = { Text("Relation (son, daughter…)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(phone, { phone = it }, label = { Text("Phone number") }, singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone), modifier = Modifier.fillMaxWidth())
-            Button(
-                onClick = { onSave(name.trim(), phone.trim(), relation.trim()); if (showRelation) { name = ""; phone = ""; relation = "" } },
-                enabled = phone.count { it.isDigit() } >= 7
-            ) { Text("Save") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { onSave(name.trim(), phone.trim(), relation.trim()); if (showRelation) { name = ""; phone = ""; relation = "" } },
+                    enabled = phone.count { it.isDigit() } >= 7
+                ) { Text("Save") }
+                if (onDelete != null) {
+                    OutlinedButton(onClick = onDelete) { Text("Remove") }
+                }
+            }
         }
     }
 }

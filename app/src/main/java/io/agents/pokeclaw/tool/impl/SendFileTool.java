@@ -62,6 +62,14 @@ public class SendFileTool extends BaseTool {
         String filePath = requireString(params, "file_path");
         File file = new File(filePath);
 
+        // The model picks the path, so never let it send the app's own private data out (MMKV with
+        // the care profile, medical history, phone numbers, API keys...). Only screenshots this app
+        // took, and files outside the app's private storage, are allowed.
+        String denied = privatePathDenial(ctx, file);
+        if (denied != null) {
+            return ToolResult.error(denied);
+        }
+
         if (!file.exists()) {
             return ToolResult.error(ctx.getString(R.string.tool_file_not_found, filePath));
         }
@@ -86,6 +94,40 @@ public class SendFileTool extends BaseTool {
         } catch (Exception e) {
             return ToolResult.error(ctx.getString(R.string.tool_file_send_failed, e.getMessage()));
         }
+    }
+
+    private static String privatePathDenial(android.content.Context ctx, File file) {
+        String canonical;
+        try {
+            canonical = file.getCanonicalPath();
+        } catch (Exception e) {
+            return "Cannot resolve file path: " + file.getPath();
+        }
+        try {
+            File screenshots = new File(ctx.getCacheDir(), "screenshots");
+            if (isUnder(canonical, screenshots.getCanonicalPath())) return null;
+            File[] privateRoots = {
+                    ctx.getDataDir(), ctx.getFilesDir(), ctx.getCacheDir(), ctx.getNoBackupFilesDir(),
+                    new File("/data/data/" + ctx.getPackageName()),
+                    new File("/data/user/0/" + ctx.getPackageName()),
+                    ctx.getExternalFilesDir(null) != null ? ctx.getExternalFilesDir(null).getParentFile() : null
+            };
+            for (File root : privateRoots) {
+                if (root != null && isUnder(canonical, root.getCanonicalPath())) {
+                    return "Blocked: files in the app's private storage cannot be sent.";
+                }
+            }
+            if (canonical.startsWith("/data/") || canonical.startsWith("/proc/") || canonical.startsWith("/sys/")) {
+                return "Blocked: only files in shared storage can be sent.";
+            }
+        } catch (Exception e) {
+            return "Cannot check file path: " + e.getMessage();
+        }
+        return null;
+    }
+
+    private static boolean isUnder(String path, String root) {
+        return path.equals(root) || path.startsWith(root.endsWith("/") ? root : root + "/");
     }
 
     private boolean hasStoragePermission() {

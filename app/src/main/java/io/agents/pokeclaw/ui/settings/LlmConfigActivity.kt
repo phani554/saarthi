@@ -41,8 +41,20 @@ import kotlin.math.max
 
 class LlmConfigActivity : BaseActivity() {
 
+    companion object {
+        // Model ids downloading right now. Static, so leaving and re-opening this screen mid-download
+        // can't start a second concurrent download of the same file.
+        private val downloadsInFlight: MutableSet<String> = java.util.Collections.synchronizedSet(mutableSetOf())
+    }
+
     private val executor = Executors.newSingleThreadExecutor()
     private var isDownloading = false
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Lets a running download finish (no interrupt) but stops the thread leaking with this screen.
+        executor.shutdown()
+    }
     private var selectedProvider: CloudProvider = CloudProvider.OPENAI
     private var selectedModelId: String = ""
 
@@ -346,9 +358,16 @@ class LlmConfigActivity : BaseActivity() {
                             setPadding(dp(8), dp(4), dp(4), dp(4))
                             alpha = 0.4f
                             setOnClickListener {
-                                LocalModelManager.deleteModel(this@LlmConfigActivity, model)
-                                Toast.makeText(this@LlmConfigActivity, "Deleted ${model.displayName}", Toast.LENGTH_SHORT).show()
-                                recreate()
+                                android.app.AlertDialog.Builder(this@LlmConfigActivity)
+                                    .setTitle("Delete ${model.displayName}?")
+                                    .setMessage("The model file is removed from this phone. You will need to download it again to use it.")
+                                    .setPositiveButton("Delete") { _, _ ->
+                                        LocalModelManager.deleteModel(this@LlmConfigActivity, model)
+                                        Toast.makeText(this@LlmConfigActivity, "Deleted ${model.displayName}", Toast.LENGTH_SHORT).show()
+                                        recreate()
+                                    }
+                                    .setNegativeButton("Cancel", null)
+                                    .show()
                             }
                         }
                         row.addView(delBtn)
@@ -362,7 +381,7 @@ class LlmConfigActivity : BaseActivity() {
                         setTextColor(getColor(R.color.colorInfoPrimary))
                         setPadding(dp(12), dp(6), dp(12), dp(6))
                         setOnClickListener {
-                            if (isDownloading) {
+                            if (isDownloading || !downloadsInFlight.add(model.id)) {
                                 Toast.makeText(this@LlmConfigActivity, "Already downloading", Toast.LENGTH_SHORT).show()
                                 return@setOnClickListener
                             }
@@ -383,14 +402,18 @@ class LlmConfigActivity : BaseActivity() {
                                                 modelId = model.id,
                                                 activateNow = false
                                             )
+                                            downloadsInFlight.remove(model.id)
                                             isDownloading = false
+                                            if (isFinishing || isDestroyed) return@runOnUiThread
                                             Toast.makeText(this@LlmConfigActivity, "Downloaded!", Toast.LENGTH_SHORT).show()
                                             recreate()
                                         }
                                     }
                                     override fun onError(error: String) {
+                                        downloadsInFlight.remove(model.id)
                                         runOnUiThread {
                                             isDownloading = false
+                                            if (isFinishing || isDestroyed) return@runOnUiThread
                                             text = "↓ Download"
                                             isEnabled = true
                                             Toast.makeText(this@LlmConfigActivity, error, Toast.LENGTH_LONG).show()
@@ -621,28 +644,21 @@ class LlmConfigActivity : BaseActivity() {
                 return@setOnClickListener
             }
             tvStatus.visibility = View.VISIBLE
-            tvStatus.text = "Testing..."
-            tvStatus.setTextColor(Color.parseColor("#8b949e"))
-
-            executor.submit {
-                try {
-                    val baseUrl = if (selectedProvider == CloudProvider.CUSTOM) etBaseUrl.text.toString().trim()
-                        else selectedProvider.defaultBaseUrl
-                    val modelId = if (selectedProvider == CloudProvider.CUSTOM) etModelName.text.toString().trim()
-                        else selectedModelId
-                    // Quick test: just validate the key format
-                    if (apiKey.length < 10) throw RuntimeException("API key too short")
-                    if (modelId.isEmpty()) throw RuntimeException("No model selected")
-                    runOnUiThread {
-                        tvStatus.text = "✓ Ready to save"
-                        tvStatus.setTextColor(getColor(R.color.colorSuccessPrimary))
-                    }
-                } catch (e: Exception) {
-                    runOnUiThread {
-                        tvStatus.text = "✗ ${e.message}"
-                        tvStatus.setTextColor(getColor(R.color.colorErrorPrimary))
-                    }
-                }
+            // Fields are read here on the main thread. This only checks the format; it does not
+            // contact the provider, so the label says exactly that.
+            val modelId = if (selectedProvider == CloudProvider.CUSTOM) etModelName.text.toString().trim()
+                else selectedModelId
+            val problem = when {
+                apiKey.length < 10 -> "API key too short"
+                modelId.isEmpty() -> "No model selected"
+                else -> null
+            }
+            if (problem == null) {
+                tvStatus.text = "✓ Key format looks OK (not checked online)"
+                tvStatus.setTextColor(getColor(R.color.colorSuccessPrimary))
+            } else {
+                tvStatus.text = "✗ $problem"
+                tvStatus.setTextColor(getColor(R.color.colorErrorPrimary))
             }
         }
 

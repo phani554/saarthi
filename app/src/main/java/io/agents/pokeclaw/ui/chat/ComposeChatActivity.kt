@@ -39,7 +39,10 @@ class ComposeChatActivity : ComponentActivity() {
         private const val TAG = "ComposeChatActivity"
         private const val EXTRA_TASK = "task"
         private const val EXTRA_CHAT = "chat"
+        private const val MAX_AUTOMATION_WAITS = 30
     }
+
+    private val automationHandler = Handler(Looper.getMainLooper())
 
     private val executor = Executors.newSingleThreadExecutor()
     private val conversationStore by lazy { ConversationStore(this) }
@@ -73,10 +76,9 @@ class ComposeChatActivity : ComponentActivity() {
     }
 
     private fun triggerVoiceCapture() {
-        if (appViewModel.isTaskRunning()) {
-            Toast.makeText(this, "Task is currently running", Toast.LENGTH_SHORT).show()
-            return
-        }
+        // Allowed while a task runs: that is how "stop" / a new instruction reaches the task.
+        // Also allowed with no model selected, so a spoken SOS still works; TaskFlowController
+        // refuses ordinary voice tasks in that state.
 
         if (androidx.core.content.ContextCompat.checkSelfPermission(
                 this,
@@ -92,8 +94,8 @@ class ComposeChatActivity : ComponentActivity() {
         }
 
         if (VoiceManager.isPlayingAudio()) {
-            Toast.makeText(this, "Voice output is currently playing", Toast.LENGTH_SHORT).show()
-            return
+            // Barge-in: stop the reply that is playing and listen.
+            VoiceManager.stopAudioPlayback()
         }
 
         if (VoiceManager.isRecordingInApp()) {
@@ -239,6 +241,11 @@ class ComposeChatActivity : ComponentActivity() {
                 onDeleteConversation = { conv ->
                     val deleted = conversationStore.deleteConversation(conv)
                     XLog.i(TAG, "Delete conversation: ${conv.file.absolutePath} deleted=$deleted")
+                    if (deleted && conv.id == conversationStore.currentConversationId) {
+                        // Clear first so newChat() doesn't save the deleted conversation back to disk.
+                        _messages.clear()
+                        newChat()
+                    }
                     refreshSidebarHistory()
                 },
                 onRenameConversation = { conv, newName ->
@@ -256,11 +263,18 @@ class ComposeChatActivity : ComponentActivity() {
                     ).show()
                 },
                 onStopAllTasks = {
+                    // Monitor bar "Stop All": stops the auto-reply monitors only.
+                    val stopMsg = activeTaskShellController.stopAllMonitors()
+                    Toast.makeText(this, stopMsg, Toast.LENGTH_SHORT).show()
+                },
+                onKillTask = {
+                    // KILL TASK banner / stop FAB: stops the running phone task, keeps the monitors.
                     _isAwaitingReply.value = false
                     _isTaskRunning.value = false
+                    val stopMsg = activeTaskShellController.killCurrentTask()
                     MultiModelAgentOrchestrator.killAllTasks()
-                    val stopMsg = activeTaskShellController.stopAllTasks()
-                    Toast.makeText(this, "Stopped all tasks and threads", Toast.LENGTH_SHORT).show()
+                    taskFlowController.resetVoiceState()
+                    Toast.makeText(this, stopMsg, Toast.LENGTH_SHORT).show()
                 },
                 onModelSwitch = { modelId, displayName -> switchModel(modelId, displayName) },
                 colors = composeColors,
@@ -291,6 +305,9 @@ class ComposeChatActivity : ComponentActivity() {
             )
         }
         _isLocalModelActive.value = ModelConfigRepository.isLocalActive()
+
+        // Recreated mid-task (rotation, theme, font size): pick the running task's events back up.
+        taskFlowController.reattachToRunningTask()
 
         appViewModel.onBeforeTask = {
             chatSessionController.releaseForTask()
@@ -333,6 +350,7 @@ class ComposeChatActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        automationHandler.removeCallbacksAndMessages(null)
         chatSessionController.onDestroy()
         executor.shutdown()
     }
@@ -355,9 +373,11 @@ class ComposeChatActivity : ComponentActivity() {
             if (isTask) "Auto-task from intent: $automationText" else "Auto-chat from intent: $automationText"
         )
 
-        val handler = Handler(Looper.getMainLooper())
+        val handler = automationHandler
         handler.postDelayed(object : Runnable {
+            private var attempts = 0
             override fun run() {
+                if (isFinishing || isDestroyed) return
                 if (isDeferredLocalTask) {
                     taskFlowController.sendTask(automationText)
                     return
@@ -368,8 +388,11 @@ class ComposeChatActivity : ComponentActivity() {
                     } else {
                         sendChat(automationText)
                     }
-                } else {
+                } else if (++attempts < MAX_AUTOMATION_WAITS) {
                     handler.postDelayed(this, 1000)
+                } else {
+                    XLog.w(TAG, "Auto-${if (isTask) "task" else "chat"} dropped: model never became ready")
+                    Toast.makeText(this@ComposeChatActivity, "Model not ready, request not sent", Toast.LENGTH_LONG).show()
                 }
             }
         }, initialDelayMs)

@@ -60,15 +60,31 @@ object ChatHistoryManager {
         val firstUserMsg = messages.firstOrNull { it.role == ChatMessage.Role.USER }
         val title = firstUserMsg?.content?.take(50)?.replace(Regex("[^a-zA-Z0-9\\s]"), "")?.trim()?.replace("\\s+".toRegex(), "-")?.lowercase() ?: "untitled"
         val dateStr = SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date(messages.first().timestamp))
-        val fileName = "$dateStr-$title.md"
+        // The conversation id is in the name, so Hindi/Telugu first messages (which strip to "") and
+        // two chats that start the same way no longer overwrite each other.
+        val safeId = conversationId.replace(Regex("[^A-Za-z0-9_-]"), "_")
+        val fileName = "$dateStr-${title.ifBlank { "chat" }}-$safeId.md"
 
-        val file = File(getChatDir(context), fileName)
+        val chatDir = getChatDir(context)
+        // Reuse this conversation's file even if its derived title changed (e.g. saved before the first user message).
+        val file = chatDir.listFiles()?.firstOrNull { it.name.endsWith("-$safeId.md") && !it.name.endsWith(".memory.md") }
+            ?: File(chatDir, fileName)
+        // Older builds named the file without the id; take it over (title included) if it is this conversation.
+        val legacyFile = File(chatDir, "$dateStr-$title.md")
+        val legacyIsThis = !file.exists() && legacyFile.exists() && readFrontmatterValue(legacyFile, "id") == conversationId
+        // Keep a title the user set via rename instead of re-deriving it from the first message.
+        val keptTitle = when {
+            file.exists() -> readFrontmatterValue(file, "title")
+            legacyIsThis -> readFrontmatterValue(legacyFile, "title")
+            else -> null
+        }
+        val indexTitle = keptTitle?.takeIf { it != "Untitled" } ?: firstUserMsg?.content?.take(80) ?: "Untitled"
 
         val sb = StringBuilder()
         // Frontmatter
         sb.appendLine("---")
         sb.appendLine("id: $conversationId")
-        sb.appendLine("title: ${firstUserMsg?.content?.take(80) ?: "Untitled"}")
+        sb.appendLine("title: $indexTitle")
         sb.appendLine("created: ${SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).format(Date(messages.first().timestamp))}")
         sb.appendLine("model: $model")
         sb.appendLine("---")
@@ -112,18 +128,40 @@ object ChatHistoryManager {
         }
 
         file.writeText(sb.toString())
+        if (legacyIsThis) legacyFile.delete()
 
         // Index in SQLite for fast search
+        var db: ChatDatabase? = null
         try {
-            ChatDatabase(context).indexConversation(
+            db = ChatDatabase(context)
+            db.indexConversation(
                 id = conversationId,
-                title = firstUserMsg?.content?.take(80) ?: "Untitled",
+                title = indexTitle,
                 created = messages.first().timestamp,
                 model = model,
                 filePath = file.absolutePath,
                 messages = messages
             )
-        } catch (_: Exception) { /* index failure is non-fatal */ }
+        } catch (_: Exception) { /* index failure is non-fatal */ } finally {
+            try { db?.close() } catch (_: Exception) {}
+        }
+    }
+
+    /** Reads `key: value` from a chat file's frontmatter, or null. */
+    private fun readFrontmatterValue(file: File, key: String): String? {
+        return try {
+            var result: String? = null
+            file.useLines { lines ->
+                var inFm = false
+                for (line in lines) {
+                    if (line == "---") { if (!inFm) { inFm = true; continue } else break }
+                    if (inFm && line.startsWith("$key: ")) { result = line.removePrefix("$key: "); break }
+                }
+            }
+            result?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /**
@@ -136,6 +174,7 @@ object ChatHistoryManager {
         val lines = file.readLines()
 
         var inFrontmatter = false
+        var frontmatterDone = false
         var fallbackConversationTimestamp = file.lastModified().takeIf { it > 0L } ?: System.currentTimeMillis()
         var currentRole: ChatMessage.Role? = null
         var currentModelName: String? = null
@@ -143,9 +182,10 @@ object ChatHistoryManager {
         val contentBuilder = StringBuilder()
 
         for (line in lines) {
-            if (line == "---") {
+            // Only the leading block is frontmatter; a "---" rule inside a message is content.
+            if (line == "---" && !frontmatterDone && currentRole == null) {
                 if (!inFrontmatter) { inFrontmatter = true; continue }
-                else { inFrontmatter = false; continue }
+                else { inFrontmatter = false; frontmatterDone = true; continue }
             }
             if (inFrontmatter) {
                 if (line.startsWith("created: ")) {
@@ -246,7 +286,12 @@ object ChatHistoryManager {
         try {
             val dir = getChatDir(context)
             dir.listFiles()?.forEach { it.delete() }
-            ChatDatabase(context).writableDatabase.execSQL("DELETE FROM conversations")
+            val db = ChatDatabase(context)
+            try {
+                db.writableDatabase.execSQL("DELETE FROM conversations")
+            } finally {
+                db.close()
+            }
         } catch (_: Exception) {}
     }
 
@@ -258,7 +303,7 @@ object ChatHistoryManager {
         if (!dir.exists()) return emptyList()
 
         return dir.listFiles()
-            ?.filter { it.extension == "md" }
+            ?.filter { it.extension == "md" && !it.name.endsWith(".memory.md") } // digests aren't chats
             ?.map { file ->
                 var title = file.nameWithoutExtension
                 var id = ""

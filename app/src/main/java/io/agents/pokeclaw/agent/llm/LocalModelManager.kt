@@ -222,7 +222,8 @@ object LocalModelManager {
      * Get the directory where models are stored.
      */
     fun getModelDir(context: Context): File {
-        val dir = File(context.getExternalFilesDir(null), "models")
+        // getExternalFilesDir() is null when shared storage is unavailable; never use a relative path.
+        val dir = File(context.getExternalFilesDir(null) ?: context.filesDir, "models")
         if (!dir.exists()) dir.mkdirs()
         return dir
     }
@@ -264,8 +265,8 @@ object LocalModelManager {
                 "gemma4_2b",
                 "gemma-4-2b",
                 "gemma 4 2b",
-                "qualcomm_qcs8275",
-                "qcs8275",
+                // "qcs8275" aliases removed: a QCS8275 NPU-AOT file can't load on GPU/CPU, so it must
+                // not show as the generic E2B model being ready.
             )
             "gemma4-e4b" -> listOf(
                 "gemma4-e4b",
@@ -328,74 +329,76 @@ object LocalModelManager {
                 XLog.i(TAG, "Resuming download from byte $existingBytes")
             }
 
-            val response = client.newCall(requestBuilder.build()).execute()
+            // use{}: the response (and its connection) was never closed on the error/early-return paths.
+            client.newCall(requestBuilder.build()).execute().use { response ->
 
-            if (!response.isSuccessful && response.code != 206) {
-                callback.onError("Download failed: HTTP ${response.code}")
-                return
-            }
+                if (!response.isSuccessful && response.code != 206) {
+                    callback.onError("Download failed: HTTP ${response.code}")
+                    return
+                }
 
-            val isResumedResponse = existingBytes > 0 && response.code == 206
-            if (existingBytes > 0 && !isResumedResponse) {
-                XLog.w(TAG, "Server ignored Range request for ${model.fileName}; restarting download from scratch")
-                tempFile.delete()
-            }
+                val isResumedResponse = existingBytes > 0 && response.code == 206
+                if (existingBytes > 0 && !isResumedResponse) {
+                    XLog.w(TAG, "Server ignored Range request for ${model.fileName}; restarting download from scratch")
+                    tempFile.delete()
+                }
 
-            val totalBytes = if (isResumedResponse) {
-                // Partial content — total size from Content-Range header
-                val contentRange = response.header("Content-Range")
-                contentRange?.substringAfterLast("/")?.toLongOrNull() ?: model.sizeBytes
-            } else {
-                response.body?.contentLength() ?: model.sizeBytes
-            }
+                val totalBytes = if (isResumedResponse) {
+                    // Partial content — total size from Content-Range header
+                    val contentRange = response.header("Content-Range")
+                    contentRange?.substringAfterLast("/")?.toLongOrNull() ?: model.sizeBytes
+                } else {
+                    response.body?.contentLength()?.takeIf { it > 0 } ?: model.sizeBytes
+                }
 
-            val body = response.body ?: run {
-                callback.onError("Empty response body")
-                return
-            }
+                val body = response.body ?: run {
+                    callback.onError("Empty response body")
+                    return
+                }
 
-            val startingBytes = if (isResumedResponse) existingBytes else 0L
-            val outputStream = FileOutputStream(tempFile, isResumedResponse)
-            val buffer = ByteArray(8192)
-            var downloadedBytes = startingBytes
-            var lastReportTime = System.currentTimeMillis()
-            var lastReportedBytes = startingBytes
+                val startingBytes = if (isResumedResponse) existingBytes else 0L
+                val outputStream = FileOutputStream(tempFile, isResumedResponse)
+                val buffer = ByteArray(8192)
+                var downloadedBytes = startingBytes
+                var lastReportTime = System.currentTimeMillis()
+                var lastReportedBytes = startingBytes
 
-            body.byteStream().use { input ->
-                outputStream.use { output ->
-                    while (true) {
-                        val bytesRead = input.read(buffer)
-                        if (bytesRead == -1) break
-                        output.write(buffer, 0, bytesRead)
-                        downloadedBytes += bytesRead
+                body.byteStream().use { input ->
+                    outputStream.use { output ->
+                        while (true) {
+                            val bytesRead = input.read(buffer)
+                            if (bytesRead == -1) break
+                            output.write(buffer, 0, bytesRead)
+                            downloadedBytes += bytesRead
 
-                        val now = System.currentTimeMillis()
-                        if (now - lastReportTime >= 200) {
-                            val elapsed = (now - lastReportTime) / 1000.0
-                            val speed = ((downloadedBytes - lastReportedBytes) / elapsed).toLong()
-                            callback.onProgress(downloadedBytes, totalBytes, speed)
-                            lastReportTime = now
-                            lastReportedBytes = downloadedBytes
+                            val now = System.currentTimeMillis()
+                            if (now - lastReportTime >= 200) {
+                                val elapsed = (now - lastReportTime) / 1000.0
+                                val speed = ((downloadedBytes - lastReportedBytes) / elapsed).toLong()
+                                callback.onProgress(downloadedBytes, totalBytes, speed)
+                                lastReportTime = now
+                                lastReportedBytes = downloadedBytes
+                            }
                         }
                     }
                 }
-            }
 
-            if (!isValidModelFile(tempFile, model)) {
-                tempFile.delete()
-                callback.onError("Downloaded file looks incomplete or corrupted. Please retry.")
-                return
-            }
+                if (!isValidModelFile(tempFile, model)) {
+                    tempFile.delete()
+                    callback.onError("Downloaded file looks incomplete or corrupted. Please retry.")
+                    return
+                }
 
-            // Rename temp to final
-            if (targetFile.exists()) targetFile.delete()
-            if (!tempFile.renameTo(targetFile)) {
-                callback.onError("Download finished but PokeClaw could not move the model into place")
-                return
-            }
+                // Rename temp to final
+                if (targetFile.exists()) targetFile.delete()
+                if (!tempFile.renameTo(targetFile)) {
+                    callback.onError("Download finished but PokeClaw could not move the model into place")
+                    return
+                }
 
-            XLog.i(TAG, "Model downloaded: ${targetFile.absolutePath} (${targetFile.length()} bytes)")
-            callback.onComplete(targetFile.absolutePath)
+                XLog.i(TAG, "Model downloaded: ${targetFile.absolutePath} (${targetFile.length()} bytes)")
+                callback.onComplete(targetFile.absolutePath)
+            }
 
         } catch (e: Exception) {
             XLog.e(TAG, "Download failed", e)

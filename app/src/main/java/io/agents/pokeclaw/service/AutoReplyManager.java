@@ -225,7 +225,7 @@ public class AutoReplyManager {
             setEnabled(true);
         }
 
-        XLog.i(TAG, "Debug-simulating incoming message from " + sender + " on " + normalizedApp + ": '" + message + "'");
+        XLog.i(TAG, "Debug-simulating incoming message from " + sender + " on " + normalizedApp + " (" + (message != null ? message.length() : 0) + " chars)");
         onNotificationReceived(packageName, sender, message);
     }
 
@@ -256,7 +256,7 @@ public class AutoReplyManager {
         if (title.isEmpty() || text.isEmpty()) return;
         if (!isAccessibilityHealthyForReply()) return;
 
-        XLog.d(TAG, "Notification from " + packageName + ": title='" + title + "' text='" + text + "'");
+        XLog.d(TAG, "Notification from " + packageName + ": title_len=" + title.length() + " text_len=" + text.length());
         handleIncomingMessage(packageName, title, text);
     }
 
@@ -281,12 +281,14 @@ public class AutoReplyManager {
         Notification notification = (Notification) parcelable;
         Bundle extras = notification.extras;
         if (extras == null) return;
-        String title = extras.getString(Notification.EXTRA_TITLE, "");
-        String text = extras.getString(Notification.EXTRA_TEXT, "");
+        CharSequence titleCs = extras.getCharSequence(Notification.EXTRA_TITLE);
+        String title = titleCs != null ? titleCs.toString() : "";
+        CharSequence textCs = extras.getCharSequence(Notification.EXTRA_TEXT);
+        String text = textCs != null ? textCs.toString() : "";
 
         if (title.isEmpty() || text.isEmpty()) return;
 
-        XLog.d(TAG, "[Fallback] Notification from " + packageName + ": title='" + title + "' text='" + text + "'");
+        XLog.d(TAG, "[Fallback] Notification from " + packageName + ": title_len=" + title.length() + " text_len=" + text.length());
         handleIncomingMessage(packageName, title, text);
     }
 
@@ -406,11 +408,11 @@ public class AutoReplyManager {
         String incomingMessage = text;
         String appName = finalTarget.getAppName();
 
-        XLog.i(TAG, "Auto-replying to " + finalTarget.getDisplayLabel() + ": '" + incomingMessage + "'");
+        XLog.i(TAG, "Auto-replying to " + finalTarget.getDisplayLabel() + " (" + (incomingMessage != null ? incomingMessage.length() : 0) + " chars incoming)");
 
         executor.submit(() -> {
             try {
-                logAutoReplyStep(finalTarget, "start", "incoming='" + incomingMessage + "'");
+                logAutoReplyStep(finalTarget, "start", "incoming_len=" + (incomingMessage != null ? incomingMessage.length() : 0));
                 if (!isAccessibilityHealthyForReply()) {
                     failAutoReply(finalTarget, incomingMessage, AutoReplyFailureStage.ACCESSIBILITY_UNAVAILABLE,
                         "Accessibility became unhealthy before auto-reply execution", null);
@@ -521,7 +523,7 @@ public class AutoReplyManager {
                         "LLM did not produce a safe auto-reply", null);
                     return;
                 }
-                logAutoReplyStep(finalTarget, "generation", "reply='" + reply + "'");
+                logAutoReplyStep(finalTarget, "generation", "reply_len=" + (reply != null ? reply.length() : 0));
 
                 // Track our own message to avoid loop
                 ownSentMessages.add(reply);
@@ -547,7 +549,7 @@ public class AutoReplyManager {
                 }
 
                 if (result.isSuccess()) {
-                    XLog.i(TAG, "Auto-reply sent to " + finalContact + ": '" + reply + "'");
+                    XLog.i(TAG, "Auto-reply sent to " + finalContact + " (" + (reply != null ? reply.length() : 0) + " chars)");
                     lastReplyTime.put(finalTarget.getKey(), System.currentTimeMillis());
                     logAutoReplyStep(finalTarget, "send-success", reply);
 
@@ -805,7 +807,7 @@ public class AutoReplyManager {
     private void failAutoReply(MonitorTarget target, String incomingMessage, AutoReplyFailureStage stage, String detail, Exception error) {
         String message = "[trace] " + target.getDisplayLabel() + " :: fail@" + stage.name() + " :: " + detail;
         if (error == null) {
-            XLog.w(TAG, message + " | incoming='" + incomingMessage + "'");
+            XLog.w(TAG, message + " | incoming_len=" + (incomingMessage != null ? incomingMessage.length() : 0));
         } else {
             XLog.w(TAG, message + " | incoming='" + incomingMessage + "'", error);
         }
@@ -849,7 +851,10 @@ public class AutoReplyManager {
             Thread.sleep(300);
             android.os.Bundle args = new android.os.Bundle();
             args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, message);
-            inputField.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+            boolean typed = inputField.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+            if (!typed) {
+                return ToolResult.error("Could not type the reply into the chat input field");
+            }
             Thread.sleep(500);
 
             // Step 3: Find send button — try multiple generic patterns
@@ -860,8 +865,10 @@ public class AutoReplyManager {
             AccessibilityNodeInfo sendBtn = UiActionMatchUtils.findBestSendAction(root, inputBounds);
 
             if (sendBtn != null) {
-                service.clickNode(sendBtn);
-                return ToolResult.success("Sent in open chat: " + message);
+                if (service.clickNode(sendBtn)) {
+                    return ToolResult.success("Sent in open chat: " + message);
+                }
+                XLog.w(TAG, "typeAndSend: send button click failed, asking LLM");
             }
 
             // Java send button search failed — ask LLM to find it
@@ -884,9 +891,8 @@ public class AutoReplyManager {
             io.agents.pokeclaw.tool.impl.GetScreenInfoTool screenTool = new io.agents.pokeclaw.tool.impl.GetScreenInfoTool();
             io.agents.pokeclaw.tool.ToolResult screenResult = screenTool.execute(java.util.Collections.emptyMap());
             if (!screenResult.isSuccess() || screenResult.getData() == null) {
-                // Last resort: press Enter
-                Runtime.getRuntime().exec(new String[]{"input", "keyevent", "66"}).waitFor();
-                return ToolResult.success("Sent via Enter (screen read failed): " + alreadyTypedMessage);
+                // Last resort: IME enter on the input field (shell "input keyevent" never works without INJECT_EVENTS)
+                return submitViaImeEnter(service, alreadyTypedMessage, "screen read failed");
             }
 
             String screenText = screenResult.getData();
@@ -898,8 +904,7 @@ public class AutoReplyManager {
 
             String response = singleLlmCall(prompt);
             if (response == null || response.isEmpty()) {
-                Runtime.getRuntime().exec(new String[]{"input", "keyevent", "66"}).waitFor();
-                return ToolResult.success("Sent via Enter (LLM empty): " + alreadyTypedMessage);
+                return submitViaImeEnter(service, alreadyTypedMessage, "LLM empty");
             }
 
             // Parse response — expect "n5" or "950,2100"
@@ -909,28 +914,59 @@ public class AutoReplyManager {
                 io.agents.pokeclaw.tool.ToolRegistry registry = io.agents.pokeclaw.tool.ToolRegistry.getInstance();
                 java.util.Map<String, Object> params = new java.util.HashMap<>();
                 params.put("node_id", response);
-                registry.executeTool("tap_node", params);
-                return ToolResult.success("Sent via LLM node tap: " + alreadyTypedMessage);
+                ToolResult tapResult = registry.executeTool("tap_node", params);
+                if (tapResult.isSuccess()) {
+                    return ToolResult.success("Sent via LLM node tap: " + alreadyTypedMessage);
+                }
+                return ToolResult.error("LLM node tap on send control failed: " + tapResult.getError());
             } else if (response.contains(",")) {
                 // Coordinates
                 String[] parts = response.split(",");
                 int x = Integer.parseInt(parts[0].trim());
                 int y = Integer.parseInt(parts[1].trim());
-                service.performTap(x, y);
-                return ToolResult.success("Sent via LLM coordinate tap: " + alreadyTypedMessage);
+                if (service.performTap(x, y)) {
+                    return ToolResult.success("Sent via LLM coordinate tap: " + alreadyTypedMessage);
+                }
+                return ToolResult.error("LLM coordinate tap on send control failed");
             }
 
-            // Can't parse — fallback Enter
-            Runtime.getRuntime().exec(new String[]{"input", "keyevent", "66"}).waitFor();
-            return ToolResult.success("Sent via Enter (LLM parse fail): " + alreadyTypedMessage);
+            // Can't parse — fallback IME enter
+            return submitViaImeEnter(service, alreadyTypedMessage, "LLM parse fail");
 
         } catch (Exception e) {
-            XLog.w(TAG, "tapSendViaLlm failed, pressing Enter", e);
+            XLog.w(TAG, "tapSendViaLlm failed, trying IME enter", e);
             try {
-                Runtime.getRuntime().exec(new String[]{"input", "keyevent", "66"}).waitFor();
-            } catch (Exception ignored) {}
-            return ToolResult.success("Sent via Enter (LLM exception): " + alreadyTypedMessage);
+                return submitViaImeEnter(service, alreadyTypedMessage, "LLM exception");
+            } catch (Exception ignored) {
+                return ToolResult.error("Send failed: " + e.getMessage());
+            }
         }
+    }
+
+    /**
+     * Submit the typed reply with ACTION_IME_ENTER on the bottom-most input field (API 30+).
+     * Reports the real result instead of assuming success.
+     */
+    private ToolResult submitViaImeEnter(ClawAccessibilityService service, String alreadyTypedMessage, String why) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) {
+            return ToolResult.error("Could not find the send control (" + why + ")");
+        }
+        AccessibilityNodeInfo root = service.getRootInActiveWindow();
+        if (root == null) {
+            return ToolResult.error("Could not read the screen to send (" + why + ")");
+        }
+        java.util.List<AccessibilityNodeInfo> editables = new java.util.ArrayList<>();
+        collectEditTexts(root, editables);
+        if (editables.isEmpty()) {
+            return ToolResult.error("No input field to submit (" + why + ")");
+        }
+        AccessibilityNodeInfo field = editables.get(editables.size() - 1);
+        boolean entered = field.performAction(
+                AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.getId());
+        if (entered) {
+            return ToolResult.success("Sent via IME enter (" + why + "): " + alreadyTypedMessage);
+        }
+        return ToolResult.error("IME enter was rejected (" + why + ")");
     }
 
     /**
@@ -996,10 +1032,17 @@ public class AutoReplyManager {
                         if (target.startsWith("n")) {
                             java.util.Map<String, Object> params = new java.util.HashMap<>();
                             params.put("node_id", target);
-                            registry.executeTool("tap_node", params);
+                            ToolResult tapResult = registry.executeTool("tap_node", params);
+                            if (!tapResult.isSuccess()) {
+                                return ToolResult.error("LLM action tap " + target + " failed: " + tapResult.getError());
+                            }
                         } else if (target.contains(",")) {
                             String[] parts = target.split(",");
-                            service.performTap(Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim()));
+                            if (!service.performTap(Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim()))) {
+                                return ToolResult.error("LLM action tap " + target + " failed");
+                            }
+                        } else {
+                            return ToolResult.error("LLM action tap has an unusable target: " + target);
                         }
                         break;
                     }
@@ -1007,6 +1050,7 @@ public class AutoReplyManager {
                         // Use the actual message, not what LLM echoed (could be truncated)
                         String text = action.has("text") ? action.get("text").getAsString() : message;
                         AccessibilityNodeInfo root = service.getRootInActiveWindow();
+                        boolean typed = false;
                         if (root != null) {
                             java.util.List<AccessibilityNodeInfo> editables = new java.util.ArrayList<>();
                             collectEditTexts(root, editables);
@@ -1014,8 +1058,11 @@ public class AutoReplyManager {
                                 AccessibilityNodeInfo field = editables.get(editables.size() - 1);
                                 android.os.Bundle args = new android.os.Bundle();
                                 args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text);
-                                field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+                                typed = field.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
                             }
+                        }
+                        if (!typed) {
+                            return ToolResult.error("LLM action type failed: no writable input field");
                         }
                         break;
                     }

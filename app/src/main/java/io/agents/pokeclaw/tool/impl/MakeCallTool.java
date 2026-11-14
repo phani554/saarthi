@@ -94,19 +94,44 @@ public class MakeCallTool extends BaseTool {
     }
 
     private String lookupContact(Context ctx, String name) {
+        // Exact name first (case-insensitive), then "starts with"; a bare substring ("%ma%")
+        // used to dial whoever came first.
+        String col = ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME;
+        String[][] passes = {
+                {col + " = ? COLLATE NOCASE", name},
+                {col + " LIKE ?", name + "%"},
+                {col + " LIKE ?", "% " + name + "%"}
+        };
+        for (String[] pass : passes) {
+            String found = queryUnique(ctx, pass[0], pass[1], name);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    /** First number of the query when it names one contact; null when none or several people match. */
+    private String queryUnique(Context ctx, String selection, String arg, String name) {
         try {
             ContentResolver resolver = ctx.getContentResolver();
             Uri uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI;
-            String[] projection = {ContactsContract.CommonDataKinds.Phone.NUMBER};
-            String selection = ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?";
-            String[] args = {"%" + name + "%"};
-
-            Cursor cursor = resolver.query(uri, projection, selection, args, null);
+            String[] projection = {ContactsContract.CommonDataKinds.Phone.NUMBER,
+                    ContactsContract.CommonDataKinds.Phone.CONTACT_ID};
+            Cursor cursor = resolver.query(uri, projection, selection, new String[]{arg}, null);
             if (cursor != null) {
                 try {
-                    if (cursor.moveToFirst()) {
-                        return cursor.getString(0);
+                    String number = null;
+                    String contactId = null;
+                    while (cursor.moveToNext()) {
+                        String id = cursor.getString(1);
+                        if (contactId == null) {
+                            contactId = id;
+                            number = cursor.getString(0);
+                        } else if (id != null && !id.equals(contactId)) {
+                            XLog.w(TAG, "Several contacts match '" + name + "'");
+                            return null;
+                        }
                     }
+                    return number;
                 } finally {
                     cursor.close();
                 }

@@ -15,30 +15,74 @@ object PaymentGate {
     private const val TAG = "PaymentGate"
 
     private val PAY_LABEL = Regex(
-        """^(pay\b.*|.*\bpay\s*(now|₹|rs\.?|inr)\b.*|.*\bplace\s+order\b.*|.*\bproceed\s+to\s+(pay|payment|checkout)\b.*|.*\bbuy\s+now\b.*|.*\bconfirm\s+(payment|order)\b.*|.*\bslide\s+to\s+pay\b.*|.*\bmake\s+payment\b.*|.*\bupi\s+pin\b.*)$""",
+        """^(pay\b.*|.*\bpay\s*(now|₹|rs\.?|inr)\b.*|.*\bplace\s+(your\s+)?order\b.*|.*\bproceed\s+to\s+(pay|payment|checkout|buy)\b.*|.*\bbuy\s+now\b.*|.*\border\s+now\b.*|.*\bconfirm\s+(payment|order)\b.*|.*\b(swipe|slide)\s+to\s+(pay|order|place\s+order)\b.*|.*\bmake\s+payment\b.*|.*\bupi\s+pin\b.*)$""",
         RegexOption.IGNORE_CASE
     )
 
     @JvmStatic
     fun isPaymentLabel(label: String?): Boolean {
         val clean = label?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
-        if (clean.isEmpty() || clean.length > 60) return false
-        return PAY_LABEL.matches(clean)
+        if (clean.isEmpty()) return false
+        // Long labels ("Place Order, total ₹1,234 incl. delivery ...") must not skip the gate:
+        // test only their head instead of returning false.
+        return PAY_LABEL.matches(clean.take(LABEL_HEAD))
     }
 
-    /** True if the node (or a direct child label of it) is a pay / place-order control. */
+    private const val LABEL_HEAD = 80
+    private const val SUBTREE_DEPTH = 3
+    private const val SUBTREE_MAX_NODES = 60
+    private const val ANCESTOR_DEPTH = 6
+
+    /** True if the node or any descendant (up to [SUBTREE_DEPTH] levels) is a pay / place-order control. */
     @JvmStatic
     fun isPaymentNode(node: AccessibilityNodeInfo?): Boolean {
         if (node == null) return false
-        val labels = mutableListOf(node.text?.toString(), node.contentDescription?.toString())
-        for (i in 0 until minOf(node.childCount, 6)) {
-            val c = node.getChild(i) ?: continue
-            labels += c.text?.toString()
-            labels += c.contentDescription?.toString()
-        }
-        val hit = labels.firstOrNull { isPaymentLabel(it) }
-        if (hit != null) XLog.w(TAG, "Blocked tap on payment control: '$hit'")
+        val hit = findPaymentLabel(node)
+        if (hit != null) XLog.w(TAG, "Blocked tap on payment control (label length ${hit.length})")
         return hit != null
+    }
+
+    /**
+     * True if the node, its subtree, or any ancestor up to and including the nearest clickable
+     * ancestor (with that ancestor's subtree) is a pay / place-order control. Use this before
+     * clicking a node whose click may be delegated to a clickable parent.
+     */
+    @JvmStatic
+    fun isPaymentNodeOrAncestor(node: AccessibilityNodeInfo?): Boolean {
+        if (node == null) return false
+        if (isPaymentNode(node)) return true
+        if (node.isClickable) return false
+        var p: AccessibilityNodeInfo? = node.parent
+        var depth = 0
+        while (p != null && depth < ANCESTOR_DEPTH) {
+            if (isPaymentNode(p)) return true
+            if (p.isClickable) return false
+            p = p.parent
+            depth++
+        }
+        return false
+    }
+
+    /** Breadth-first scan of the node and its descendants up to [SUBTREE_DEPTH] levels. */
+    private fun findPaymentLabel(root: AccessibilityNodeInfo): String? {
+        val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
+        queue.addLast(root to 0)
+        var visited = 0
+        while (queue.isNotEmpty() && visited < SUBTREE_MAX_NODES) {
+            val (n, d) = queue.removeFirst()
+            visited++
+            val text = n.text?.toString()
+            if (isPaymentLabel(text)) return text
+            val desc = n.contentDescription?.toString()
+            if (isPaymentLabel(desc)) return desc
+            if (d < SUBTREE_DEPTH) {
+                for (i in 0 until n.childCount) {
+                    val c = n.getChild(i) ?: continue
+                    queue.addLast(c to d + 1)
+                }
+            }
+        }
+        return null
     }
 
     /** Coordinate taps: check the smallest node containing (x, y) and its clickable ancestor. */
@@ -61,7 +105,8 @@ object PaymentGate {
         val r = Rect()
         node.getBoundsInScreen(r)
         if (!r.contains(x, y)) return null
-        for (i in 0 until node.childCount) {
+        // Last child is drawn on top, so it wins when siblings overlap.
+        for (i in node.childCount - 1 downTo 0) {
             val hit = deepestAt(node.getChild(i), x, y)
             if (hit != null) return hit
         }

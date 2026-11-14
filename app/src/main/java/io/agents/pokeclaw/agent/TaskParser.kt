@@ -72,17 +72,19 @@ object TaskParser {
         )
     }
 
+    // Anchored: only explicit "remember that ..." / "my favourite X is ..." statements.
+    // ("set my alarm ..." / "update my cart ..." are real actions, not memory.)
     private val MEMORY_STATEMENT_PATTERN = Regex(
-        """(?:remember\s+that\s+|note\s+that\s+|my\s+(?:favorite|preferred|project|address)\s+is\s+|set\s+my\s+|update\s+my\s+)(.+)""",
-        RegexOption.IGNORE_CASE
+        """^\s*(?:(?:remember|note)\s+that\s+(.+)|(my\s+(?:favou?rite|preferred|project|address)\b.*?\s+is\s+.+))$""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
     )
 
     private fun matchMemoryStatement(lower: String, original: String): ParseResult? {
-        val match = MEMORY_STATEMENT_PATTERN.find(original) ?: return null
-        val fact = match.groupValues[1].trim()
+        val match = MEMORY_STATEMENT_PATTERN.find(original.trim()) ?: return null
+        val fact = match.groupValues[1].ifBlank { match.groupValues[2] }.trim()
         if (fact.isBlank()) return null
 
-        XLog.i(TAG, "TaskParser matched Memory Statement: '$fact'")
+        XLog.i(TAG, "TaskParser matched Memory Statement (len=${fact.length})")
         return ParseResult(
             action = "update_memory",
             intent = null,
@@ -115,19 +117,26 @@ object TaskParser {
         )
     }
 
+    // Anchored at the start with an explicit separator (":", "saying", "that") so the contact can be
+    // several words ("Ravi Kumar") and "tell me a story" / "explain the context of" never match.
     private val SEND_MSG_PATTERN = Regex(
-        """(?:send\s+(?:a\s+)?message\s+(?:to\s+)?|send\s+hi\s+to\s+|tell\s+|text\s+)(.+?)\s+(?:saying|about|to|and\s+ask\s+her|and\s+ask\s+him|for)?\s+(.+)""",
-        RegexOption.IGNORE_CASE
+        """^\s*(?:send\s+(?:a\s+)?message\s+to|tell|text|message)\s+(.+?)\s*(?::|\s+saying\s+|\s+that\s+)(.+)$""",
+        setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
     )
 
+    private val NON_CONTACT_WORDS = setOf("me", "us", "my", "him", "her", "them", "it", "you", "i")
+
     private fun matchSendMessage(lower: String, original: String): ParseResult? {
-        val match = SEND_MSG_PATTERN.find(original) ?: return null
+        val match = SEND_MSG_PATTERN.find(original.trim()) ?: return null
         val contact = match.groupValues[1].trim()
         val msgText = match.groupValues[2].trim()
+            .removeSurrounding("\"").removeSurrounding("'").trim()
 
         if (contact.isBlank() || msgText.isBlank()) return null
+        val contactWords = contact.split(Regex("\\s+"))
+        if (contactWords.size > 4 || contactWords.first().lowercase() in NON_CONTACT_WORDS) return null
 
-        XLog.i(TAG, "TaskParser matched Send Message: contact='$contact', msg='$msgText'")
+        XLog.i(TAG, "TaskParser matched Send Message: contactLen=${contact.length}, msgLen=${msgText.length}")
 
         return ParseResult(
             action = "send_message",
@@ -299,12 +308,13 @@ object TaskParser {
     }
 
     private val OPEN_APP_PATTERN = Regex(
-        """(?:open|launch|start|打開|開)\s+(?:the\s+)?(.+?)(?:\s+app)?$""", RegexOption.IGNORE_CASE
+        """^\s*(?:open|launch|start|打開|開)\s+(?:the\s+)?(.+?)(?:\s+app)?[\s.!?。]*$""", RegexOption.IGNORE_CASE
     )
 
     private fun matchOpenApp(lower: String, original: String, installedPackages: List<String>): ParseResult? {
         val match = OPEN_APP_PATTERN.find(lower) ?: return null
-        val appName = match.groupValues[1].trim()
+        val appName = match.groupValues[1].trim().trimEnd('.', '!', '?', ',')
+        if (appName.isBlank()) return null
 
         val lowerApp = appName.lowercase()
         if (lowerApp.contains("call") || lowerApp.contains("video") || lowerApp.contains("message") ||

@@ -62,6 +62,10 @@ public class SwipeTool extends BaseTool {
         boundsError = validateCoordinates(endX, endY);
         if (boundsError != null) return ToolResult.error(boundsError);
         long duration = optionalLong(params, "duration_ms", 500);
+        duration = Math.max(50, Math.min(duration, 3000));
+        // Swipes bypass the tap PaymentGate, and some checkouts are "slide/swipe to pay".
+        String payBlock = BaseTool.paymentGestureBlock(service.getRootInActiveWindow(), startX, startY, endX, endY);
+        if (payBlock != null) return ToolResult.error(payBlock);
         boolean success = service.performSwipe(startX, startY, endX, endY, duration);
         return success ? ToolResult.success("Swiped from (" + startX + ", " + startY + ") to (" + endX + ", " + endY + ")")
                 : ToolResult.error("Failed to swipe");

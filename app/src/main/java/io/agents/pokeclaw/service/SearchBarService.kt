@@ -192,6 +192,11 @@ object SearchBarService {
                     val freshRoot = service.rootInActiveWindow
                     if (freshRoot != null) {
                         suggestion = NodeFinder.findNodeByTextContains(freshRoot, query.lowercase())
+                        // The search field itself now contains the query: never treat an
+                        // editable node as a suggestion (clicking it "succeeds" without submitting).
+                        if (suggestion != null && isNodeEditable(suggestion)) {
+                            suggestion = null
+                        }
                         if (suggestion == null) {
                             suggestion = NodeFinder.findNodeByIdOrText(freshRoot,
                                 "iss_search_dropdown_item_text", "sac-suggestion-row", "iss_suggestion_text"
@@ -211,16 +216,15 @@ object SearchBarService {
 
                 val submitted = service.performImeAction(searchNode)
                 XLog.i(TAG, "navigateAndType Amazon: performImeAction fallback result=$submitted")
-                return true
+                return submitted
             }
 
-            try {
-                service.sendKeyEvent(KeyEvent.KEYCODE_ENTER)
-            } catch (_: Exception) {}
-            if (!pkg.contains("amazon")) {
-                service.dismissKeyboard()
-            }
-            return true
+            // Submit with ACTION_IME_ENTER / a submit button. The old shell "input keyevent"
+            // ENTER always failed without INJECT_EVENTS, so the query was typed but never searched.
+            val submitted = service.performImeAction(searchNode)
+            XLog.i(TAG, "navigateAndType: performImeAction result=$submitted")
+            service.dismissKeyboard()
+            return submitted
         }
 
         // Clipboard paste fallback if ACTION_SET_TEXT returned false

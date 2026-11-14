@@ -75,12 +75,14 @@ public class ClawNotificationListener extends NotificationListenerService {
         if (notification == null || notification.extras == null) return;
 
         Bundle extras = notification.extras;
-        String title = extras.getString(Notification.EXTRA_TITLE, "");
-        String text = extras.getString(Notification.EXTRA_TEXT, "");
+        CharSequence titleCs = extras.getCharSequence(Notification.EXTRA_TITLE);
+        String title = titleCs != null ? titleCs.toString() : "";
+        CharSequence textCs = extras.getCharSequence(Notification.EXTRA_TEXT);
+        String text = textCs != null ? textCs.toString() : "";
 
         if (title.isEmpty() || text.isEmpty()) return;
 
-        XLog.d(TAG, "Notification from " + pkg + ": title='" + title + "' text='" + text + "'");
+        XLog.d(TAG, "Notification from " + pkg + ": title_len=" + title.length() + " text_len=" + text.length());
 
         // Route to AutoReplyManager
         AutoReplyManager.getInstance().onNotificationReceived(pkg, title, text);

@@ -44,10 +44,14 @@ object BuiltInSkills {
         category = SkillCategory.INPUT,
         estimatedStepsSaved = 4,
         parameters = emptyList(),
-        triggerPatterns = listOf("submit", "send message", "press send"),
+        // "send message" / "submit" matched real tasks ("Send message to Rahul ...") and dropped the
+        // recipient and text; only an explicit "press send" uses this skill now.
+        triggerPatterns = listOf("press send"),
         steps = listOf(
             SkillStep("get_screen_info", description = "Look for submit button"),
-            SkillStep("find_and_tap", mapOf("text" to "Send|Submit|Save|Post|Done"), description = "Tap submit button"),
+            // find_and_tap is a plain text search, not a regex: one step per label.
+            SkillStep("find_and_tap", mapOf("text" to "Send"), description = "Tap Send", optional = true),
+            SkillStep("find_and_tap", mapOf("text" to "Submit"), description = "Tap Submit", optional = true),
             SkillStep("wait", mapOf("duration_ms" to "2000"), description = "Wait for submission"),
         ),
         fallbackGoal = "Find and tap the Send, Submit, or Save button on screen."
@@ -63,7 +67,6 @@ object BuiltInSkills {
         triggerPatterns = listOf("dismiss", "close popup", "close dialog"),
         steps = listOf(
             SkillStep("get_screen_info", description = "Identify popup type"),
-            SkillStep("find_and_tap", mapOf("text" to "OK"), description = "Tap OK", optional = true),
             SkillStep("find_and_tap", mapOf("text" to "Got it"), description = "Tap Got it", optional = true),
             SkillStep("find_and_tap", mapOf("text" to "Close"), description = "Tap Close", optional = true),
             SkillStep("find_and_tap", mapOf("text" to "Close app"), description = "Tap Close app", optional = true),
@@ -124,7 +127,6 @@ object BuiltInSkills {
             SkillStep("find_and_tap", mapOf("text" to "While using the app"), description = "Tap While using", optional = true),
             SkillStep("find_and_tap", mapOf("text" to "Accept"), description = "Tap Accept", optional = true),
             SkillStep("find_and_tap", mapOf("text" to "Agree"), description = "Tap Agree", optional = true),
-            SkillStep("find_and_tap", mapOf("text" to "Continue"), description = "Tap Continue", optional = true),
             SkillStep("find_and_tap", mapOf("text" to "I agree"), description = "Tap I agree", optional = true),
             SkillStep("find_and_tap", mapOf("text" to "ALLOW"), description = "Tap ALLOW caps", optional = true),
         ),

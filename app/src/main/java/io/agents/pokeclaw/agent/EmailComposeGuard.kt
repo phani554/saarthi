@@ -58,7 +58,9 @@ internal class EmailComposeGuard private constructor(
 
     fun recordToolAttempt(toolName: String) {
         if (match == null) return
-        if (toolName in UI_COMPOSE_TOOLS) {
+        // Only typing into the draft counts. open_app / system_key (e.g. pressing back) used to count
+        // as "attempted compose" and unblocked finish without any draft being written.
+        if (toolName == "input_text" || toolName == "type_text") {
             attemptedComposeFlow = true
         }
     }

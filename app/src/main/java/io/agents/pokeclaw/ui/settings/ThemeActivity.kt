@@ -115,14 +115,15 @@ class ThemeActivity : BaseActivity() {
             KVUtils.putString("THEME_ID", theme.id)
 
             // Use system uimode command (works on MIUI where AppCompatDelegate doesn't)
+            // The shell command usually fails silently for a normal app (no exception), so always
+            // set AppCompat's night mode too instead of only in the catch.
             try {
                 val mode = if (theme.isDark) "yes" else "no"
                 Runtime.getRuntime().exec(arrayOf("cmd", "uimode", "night", mode))
             } catch (_: Exception) {
-                // Fallback to AppCompatDelegate
-                val newMode = if (theme.isDark) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
-                AppCompatDelegate.setDefaultNightMode(newMode)
             }
+            val newMode = if (theme.isDark) AppCompatDelegate.MODE_NIGHT_YES else AppCompatDelegate.MODE_NIGHT_NO
+            AppCompatDelegate.setDefaultNightMode(newMode)
 
             // Restart app to apply theme everywhere
             val intent = packageManager.getLaunchIntentForPackage(packageName)

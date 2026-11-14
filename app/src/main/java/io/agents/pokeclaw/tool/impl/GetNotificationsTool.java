@@ -72,7 +72,9 @@ public class GetNotificationsTool extends BaseTool {
                 if (notif == null || notif.extras == null) continue;
 
                 Bundle extras = notif.extras;
-                String title = extras.getString(Notification.EXTRA_TITLE, "");
+                // EXTRA_TITLE is often a SpannableString (WhatsApp), which getString() drops.
+                CharSequence titleCs = extras.getCharSequence(Notification.EXTRA_TITLE);
+                String title = titleCs != null ? titleCs.toString() : "";
                 CharSequence textCs = extras.getCharSequence(Notification.EXTRA_TEXT);
                 String text = textCs != null ? textCs.toString() : "";
                 CharSequence bigTextCs = extras.getCharSequence(Notification.EXTRA_BIG_TEXT);

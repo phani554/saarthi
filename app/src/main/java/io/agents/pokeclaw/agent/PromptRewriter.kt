@@ -22,6 +22,17 @@ object PromptRewriter {
 
     /** In-memory decision cache to eliminate repetitive analysis on identical requests */
     private val decisionCache = ConcurrentHashMap<String, String>()
+    private const val DECISION_CACHE_MAX = 100
+
+    /** Whole-word confirmation at the start of the utterance (fallback path only). */
+    private val CONFIRM_PATTERN = Regex(
+        """^\s*(yes|ok|okay|haa?n?|ha+n?\s*ji|proceed|go\s+ahead|start|sahi\s+hai|theek\s+hai|thik\s+hai|avunu|cheyyi|seri|sare)\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** Cleaned task from the last proposal turn, used when the user only says "haan"/"yes". */
+    @Volatile
+    private var pendingCleanedTask: String = ""
 
     enum class InteractionMode {
         PRE_TASK_CONFIRMATION,
@@ -53,6 +64,10 @@ object PromptRewriter {
                 isCancelled = false
             )
         }
+
+        // A confirmation is only valid after Saarthi has proposed something in this conversation.
+        val hasPriorProposal = conversationHistory.contains("Saarthi:")
+        if (!hasPriorProposal) pendingCleanedTask = ""
 
         val memorySection = MemoryManager.getMemoryPromptSection()
 
@@ -87,43 +102,55 @@ Return JSON object:"""
                 if (jsonStart >= 0 && jsonEnd > jsonStart) {
                     val jsonObj = JSONObject(resultStr.substring(jsonStart, jsonEnd + 1))
                     val spoken = jsonObj.optString("spokenResponse", "").trim()
-                    val confirmed = jsonObj.optBoolean("isConfirmed", false)
                     val cancelled = jsonObj.optBoolean("isCancelled", false)
+                    // Never trust the model's isConfirmed on the very first utterance.
+                    val confirmed = !cancelled && hasPriorProposal && jsonObj.optBoolean("isConfirmed", false)
                     val cleanedTask = jsonObj.optString("cleanedEnglishTask", "").trim()
 
                     HybridMemoryRepository.recordTurnAsync(raw, spoken)
-                    io.agents.pokeclaw.agent.knowledge.MemoryManager.learnFromMessage(raw) // spoken facts get remembered
 
-                    XLog.i(TAG, "Interaction turn: spoken='$spoken', confirmed=$confirmed, cancelled=$cancelled, cleanedTask='$cleanedTask'")
+                    val finalTask = when {
+                        cancelled -> ""
+                        // On "haan"/"yes" keep the proposed task; never run the confirmation word itself.
+                        confirmed -> cleanedTask.ifBlank { pendingCleanedTask }
+                        else -> cleanedTask.ifBlank { optimize(raw) }
+                    }
+                    pendingCleanedTask = if (cancelled || confirmed) "" else finalTask
+
+                    XLog.i(TAG, "Interaction turn: confirmed=$confirmed, cancelled=$cancelled, taskLen=${finalTask.length}")
                     return InteractionResult(
-                        spokenResponse = spoken.ifBlank { "Task start kar raha hoon." },
+                        spokenResponse = spoken.ifBlank { if (confirmed) "Task start kar raha hoon." else "Kya main yeh karoon? Haan ya nahi boliye." },
                         isConfirmed = confirmed,
-                        cleanedEnglishTask = cleanedTask.ifBlank { if (cancelled) "" else optimize(raw) },
+                        cleanedEnglishTask = finalTask,
                         isCancelled = cancelled
                     )
                 }
             }
 
-            fallbackResult(raw)
+            fallbackResult(raw, hasPriorProposal)
         } catch (e: Exception) {
             XLog.w(TAG, "processTurn failed, using fallback", e)
-            fallbackResult(raw)
+            fallbackResult(raw, hasPriorProposal)
         }
     }
 
-    private fun fallbackResult(raw: String): InteractionResult {
+    private fun fallbackResult(raw: String, hasPriorProposal: Boolean): InteractionResult {
         val lower = raw.lowercase()
         val isCancelled = lower.contains("no thanks") || lower.contains("nothing else") ||
                 lower.contains("cancel") || lower.contains("stop") ||
                 lower.contains("nahi") || lower.contains("nayi") || lower.contains("vaddu") ||
                 lower.contains("exit") || lower.contains("kuch nahi")
 
-        val isConfirmed = !isCancelled && (lower.contains("proceed") || lower.contains("go ahead") ||
-                lower.contains("start") || lower.contains("yes") || lower.contains("ok") ||
-                lower.contains("ha") || lower.contains("sahi") || lower.contains("theek") ||
-                lower.contains("sare") || lower.contains("avunu") || lower.contains("cheyyi"))
+        // Whole-word yes/haan/ok at the start, only after a proposal, and only with a task to run.
+        val isConfirmed = !isCancelled && hasPriorProposal && pendingCleanedTask.isNotBlank() &&
+                CONFIRM_PATTERN.containsMatchIn(lower)
 
-        val optimized = if (isCancelled) "" else optimize(raw)
+        val optimized = when {
+            isCancelled -> ""
+            isConfirmed -> pendingCleanedTask
+            else -> optimize(raw)
+        }
+        pendingCleanedTask = if (isCancelled || isConfirmed) "" else optimized
         val spoken = when {
             isCancelled -> "Okay, no problem! Let me know if you need anything else."
             isConfirmed -> "Task start kar raha hoon."
@@ -150,7 +177,7 @@ Return JSON object:"""
         // Fast decision cache check (0ms)
         val cached = decisionCache[raw.lowercase()]
         if (cached != null) {
-            XLog.i(TAG, "PromptRewriter Decision Cache HIT (0ms): '$raw' -> '$cached'")
+            XLog.i(TAG, "PromptRewriter Decision Cache HIT (0ms), len=${cached.length}")
             return cached
         }
 
@@ -180,9 +207,14 @@ Rules:
                 ?: LlmSessionManager.singleShotLocal(systemPrompt, prompt, 0.2)
 
             val cleaned = result?.trim()?.removeSurrounding("\"")?.removeSurrounding("'")
-            val finalTask = if (!cleaned.isNullOrBlank() && cleaned.length > 3) cleaned else raw
-            decisionCache[raw.lowercase()] = finalTask
-            XLog.i(TAG, "AI Prompt Rewritten & Cached: '$raw' -> '$finalTask'")
+            val llmOk = !cleaned.isNullOrBlank() && cleaned.length > 3
+            val finalTask = if (llmOk) cleaned!! else raw
+            // Only cache real rewrites (a failed LLM call must not pin the raw text forever); keep it bounded.
+            if (llmOk) {
+                if (decisionCache.size >= DECISION_CACHE_MAX) decisionCache.clear()
+                decisionCache[raw.lowercase()] = finalTask
+            }
+            XLog.i(TAG, "AI Prompt Rewritten (cached=$llmOk): ${raw.length} -> ${finalTask.length} chars")
             finalTask
         } catch (e: Exception) {
             XLog.w(TAG, "PromptRewriter AI call failed, using original prompt", e)

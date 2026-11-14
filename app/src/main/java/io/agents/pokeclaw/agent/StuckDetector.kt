@@ -67,13 +67,6 @@ class StuckDetector(private val windowSize: Int = 8) {
             errors.addLast(error)
             if (errors.size > windowSize) errors.removeFirst()
         } else {
-            val fp = pendingFingerprint
-            val act = pendingRecoveryAction
-            if (fp != null && act != null) {
-                confirmAndSaveRecovery(fp, act)
-                pendingFingerprint = null
-                pendingRecoveryAction = null
-            }
             errors.clear()
         }
 
@@ -109,6 +102,16 @@ class StuckDetector(private val windowSize: Int = 8) {
             return detection
         }
 
+        // Only a round that is no longer stuck (and had no error) confirms the pending recovery worked.
+        if (error == null) {
+            val fp = pendingFingerprint
+            val act = pendingRecoveryAction
+            if (fp != null && act != null) {
+                confirmAndSaveRecovery(fp, act)
+            }
+        }
+        pendingFingerprint = null
+        pendingRecoveryAction = null
         consecutiveStuckSteps = 0
         return null
     }

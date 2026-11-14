@@ -99,6 +99,8 @@ public class ScrollToFindTool extends BaseTool {
         // Loop: scroll → find
         String lastScreenContent = getScreenSnapshot(service);
         for (int i = 0; i < maxScrolls; i++) {
+            String payBlock = BaseTool.paymentGestureBlock(service.getRootInActiveWindow(), centerX, scrollStartY, centerX, scrollEndY);
+            if (payBlock != null) return ToolResult.error(payBlock);
             // Perform swipe
             boolean swiped = service.performSwipe(centerX, scrollStartY, centerX, scrollEndY, 400);
             if (!swiped) {

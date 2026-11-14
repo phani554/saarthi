@@ -29,6 +29,9 @@ class TelegramChannelHandler(
     private var lastChatId: Long? = null
     @Volatile
     private var pollingActive = false
+    // Each init() gets a new generation; an old poller exits as soon as it sees a newer one.
+    @Volatile
+    private var pollGeneration = 0
     private var pollingThread: Thread? = null
 
     private val pollingHttpClient: OkHttpClient by lazy {
@@ -51,10 +54,12 @@ class TelegramChannelHandler(
         }
 
         pollingActive = true
+        val gen = ++pollGeneration
         pollingThread = Thread({
-            var offset = 0L
+            // Persisted so updates already handled are not replayed after a restart.
+            var offset = KVUtils.getTelegramUpdateOffset()
             XLog.i(TAG, "Telegram polling thread started")
-            while (pollingActive) {
+            while (pollingActive && gen == pollGeneration) {
                 try {
                     val reqBody = JSONObject().apply {
                         put("offset", offset)
@@ -77,7 +82,7 @@ class TelegramChannelHandler(
 
                     val json = JSONObject(body)
                     if (!json.optBoolean("ok", false)) {
-                        XLog.e(TAG, "Telegram getUpdates failed: code=$code, body=$body")
+                        XLog.e(TAG, "Telegram getUpdates failed: code=$code")
                         if (code == 401 || code == 404) {
                             XLog.e(TAG, "Telegram Bot Token invalid, stopping polling")
                             break
@@ -87,10 +92,14 @@ class TelegramChannelHandler(
                     }
 
                     val result = json.optJSONArray("result") ?: continue
+                    if (gen != pollGeneration) break
                     for (i in 0 until result.length()) {
                         val update = result.getJSONObject(i)
                         val updateId = update.getLong("update_id")
-                        if (updateId >= offset) offset = updateId + 1
+                        if (updateId >= offset) {
+                            offset = updateId + 1
+                            KVUtils.setTelegramUpdateOffset(offset)
+                        }
 
                         val message = update.optJSONObject("message") ?: continue
                         val text = message.optString("text", "")
@@ -98,9 +107,18 @@ class TelegramChannelHandler(
 
                         val chatId = message.getJSONObject("chat").getLong("id")
                         val messageId = message.getInt("message_id")
+                        val fromId = message.optJSONObject("from")?.optLong("id", 0L) ?: 0L
+                        if (!isAllowedSender(fromId, chatId)) continue
+
+                        // Skip stale commands queued while the phone was off/offline.
+                        val sentAtSec = message.optLong("date", 0L)
+                        if (sentAtSec > 0L && System.currentTimeMillis() / 1000L - sentAtSec > MAX_MESSAGE_AGE_SEC) {
+                            XLog.w(TAG, "Telegram skipping stale message (age > ${MAX_MESSAGE_AGE_SEC}s)")
+                            continue
+                        }
                         lastChatId = chatId
 
-                        XLog.i(TAG, "[${channel.displayName}] Message received: $text, chatId=$chatId")
+                        XLog.i(TAG, "[${channel.displayName}] Message received, chatId=$chatId")
                         ChannelManager.dispatchMessage(channel, text, messageId.toString())
                     }
                 } catch (_: java.net.SocketTimeoutException) {
@@ -120,6 +138,7 @@ class TelegramChannelHandler(
 
     override fun disconnect() {
         pollingActive = false
+        pollGeneration++
         pollingThread?.interrupt()
         pollingThread = null
         lastChatId = null
@@ -140,13 +159,7 @@ class TelegramChannelHandler(
         }
         scope.launch {
             try {
-                if (TelegramMarkdownUtils.containsMarkdown(content)) {
-                    val v2 = TelegramMarkdownUtils.markdownToTelegramV2(content)
-                    val ok = sendText(chatId, v2, "MarkdownV2")
-                    if (!ok) sendText(chatId, content, null)
-                } else {
-                    sendText(chatId, TelegramMarkdownUtils.escapePlain(content), "MarkdownV2")
-                }
+                sendChunked(chatId, content)
             } catch (e: Exception) {
                 XLog.e(TAG, "Telegram reply failed", e)
             }
@@ -155,6 +168,11 @@ class TelegramChannelHandler(
 
     override fun sendImage(imageBytes: ByteArray, messageID: String) {
         val chatId = lastChatId ?: return
+        // Never send a screenshot anywhere but the paired owner's chat.
+        if (!isOwnerChat(chatId)) {
+            XLog.w(TAG, "Telegram image not sent: chat is not the paired owner's")
+            return
+        }
         scope.launch {
             try {
                 val body = MultipartBody.Builder()
@@ -180,6 +198,10 @@ class TelegramChannelHandler(
 
     override fun sendFile(file: java.io.File, messageID: String) {
         val chatId = lastChatId ?: return
+        if (!isOwnerChat(chatId)) {
+            XLog.w(TAG, "Telegram file not sent: chat is not the paired owner's")
+            return
+        }
         scope.launch {
             try {
                 val mimeType = when (file.extension.lowercase()) {
@@ -221,13 +243,7 @@ class TelegramChannelHandler(
         }
         scope.launch {
             try {
-                if (TelegramMarkdownUtils.containsMarkdown(content)) {
-                    val v2 = TelegramMarkdownUtils.markdownToTelegramV2(content)
-                    val ok = sendText(chatId, v2, "MarkdownV2")
-                    if (!ok) sendText(chatId, content, null)
-                } else {
-                    sendText(chatId, TelegramMarkdownUtils.escapePlain(content), "MarkdownV2")
-                }
+                sendChunked(chatId, content)
             } catch (e: Exception) {
                 XLog.e(TAG, "Telegram sendMessageToUser failed", e)
             }
@@ -235,6 +251,49 @@ class TelegramChannelHandler(
     }
 
     // ---------- Internal helper methods ----------
+
+    /**
+     * Sender allow-list. Only the paired owner (Telegram user id) may send commands.
+     * If nobody is paired yet, the first sender becomes the owner and is stored.
+     */
+    @Synchronized
+    private fun isAllowedSender(fromId: Long, chatId: Long): Boolean {
+        if (fromId == 0L) {
+            XLog.w(TAG, "Telegram message without sender id ignored")
+            return false
+        }
+        val owner = KVUtils.getTelegramOwnerUserId()
+        if (owner == 0L) {
+            KVUtils.setTelegramOwnerUserId(fromId)
+            KVUtils.setTelegramOwnerChatId(chatId)
+            XLog.i(TAG, "Telegram owner paired: userId=$fromId")
+            return true
+        }
+        if (owner != fromId) {
+            XLog.w(TAG, "Telegram message from unpaired sender ignored: userId=$fromId")
+            return false
+        }
+        if (KVUtils.getTelegramOwnerChatId() != chatId) KVUtils.setTelegramOwnerChatId(chatId)
+        return true
+    }
+
+    private fun isOwnerChat(chatId: Long): Boolean {
+        val ownerChat = KVUtils.getTelegramOwnerChatId()
+        return ownerChat != 0L && ownerChat == chatId
+    }
+
+    /** Splits long text (Telegram limit 4096) and falls back to plain text if MarkdownV2 fails. */
+    private fun sendChunked(chatId: Long, content: String) {
+        val chunks = if (content.length <= MAX_CHUNK) listOf(content) else content.chunked(MAX_CHUNK)
+        for (chunk in chunks) {
+            val ok = if (TelegramMarkdownUtils.containsMarkdown(chunk)) {
+                sendText(chatId, TelegramMarkdownUtils.markdownToTelegramV2(chunk), "MarkdownV2")
+            } else {
+                sendText(chatId, TelegramMarkdownUtils.escapePlain(chunk), "MarkdownV2")
+            }
+            if (!ok) sendText(chatId, chunk, null)
+        }
+    }
 
     private fun sendText(chatId: Long, text: String, parseMode: String?): Boolean {
         val json = JSONObject().apply {
@@ -251,7 +310,7 @@ class TelegramChannelHandler(
         val code = response.code
         if (code !in 200..299) {
             val respBody = response.body?.string()
-            XLog.w(TAG, "Telegram sendMessage failed: code=$code, parseMode=$parseMode, resp=$respBody")
+            XLog.w(TAG, "Telegram sendMessage failed: code=$code, parseMode=$parseMode, resp=${respBody?.take(200)}")
         } else {
             XLog.i(TAG, "Telegram reply succeeded: code=$code, parseMode=$parseMode")
         }
@@ -261,5 +320,7 @@ class TelegramChannelHandler(
 
     companion object {
         private const val TAG = "TelegramHandler"
+        private const val MAX_CHUNK = 3500
+        private const val MAX_MESSAGE_AGE_SEC = 120L
     }
 }

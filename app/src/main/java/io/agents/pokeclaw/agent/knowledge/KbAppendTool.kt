@@ -35,6 +35,9 @@ class KbAppendTool : BaseTool() {
         return try {
             val path = requireString(params, "path")
             val content = requireString(params, "content")
+            if (KBManager.isProtectedPath(path)) {
+                return ToolResult.error("kb_append: that file holds the user's saved memory and can't be changed by tools")
+            }
             val result = KBManager.append(path, content)
             result.fold(
                 onSuccess = { ToolResult.success(it) },

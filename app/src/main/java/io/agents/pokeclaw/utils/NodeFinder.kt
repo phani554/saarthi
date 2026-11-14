@@ -116,7 +116,7 @@ object NodeFinder {
 
             val isMinutesTarget = desc.contains("minutes") || text.contains("minutes") ||
                     desc.contains("grocery") || text.contains("grocery") ||
-                    resId.contains("minutes") || (bounds.left in 280..480 && bounds.top in 120..380)
+                    resId.contains("minutes")
 
             if (isMinutesTarget && bounds.height() > 20) {
                 val clickable = findClickableAncestor(node) ?: node
@@ -126,15 +126,13 @@ object NodeFinder {
                     clicked = service.performTap(bounds.centerX(), bounds.centerY())
                 }
                 try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
-                return true
+                return clicked
             }
         }
 
-        // 3. Resilient Fallback: Perform top banner gesture tap at center coordinates (370, 300)
-        XLog.i(TAG, "ensureFlipkartMinutesMode: tapping top banner center coordinates (370, 300) to force switch to Minutes mode")
-        val fallbackClicked = service.performTap(370, 300)
-        try { Thread.sleep(500) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
-        return fallbackClicked
+        // No Minutes tab found. No blind coordinate tap: (370,300) hit arbitrary UI on other screens/densities.
+        XLog.w(TAG, "ensureFlipkartMinutesMode: Minutes tab not found")
+        return false
     }
 
     private fun collectTopNodes(node: AccessibilityNodeInfo?, results: MutableList<AccessibilityNodeInfo>, maxY: Int) {

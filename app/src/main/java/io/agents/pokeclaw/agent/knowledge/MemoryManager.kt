@@ -30,10 +30,24 @@ object MemoryManager {
     private val PREFERENCE_PATTERNS = listOf(
         Pattern.compile("""(?i)\b(?:i\s+(?:prefer|like|love|hate|dislike)|my\s+(?:favorite|preferred|address|phone|email|number|mom|dad|wife|husband|home|office|friend|sister|brother|contact)|always\s+(?:order|buy|use|pick)|never\s+(?:order|buy|use)|i\s+am\s+(?:vegetarian|vegan|allergic|gluten-free))\b.*"""),
         Pattern.compile("""(?i)\b(?:remember\s+that|note\s+that|keep\s+in\s+mind\s+that)\s+(.+)"""),
-        Pattern.compile("""(?i)\b[a-z0-9_\s]+\s+is\s+my\s+[a-z0-9_\s]+\b.*""")
+        // Bounded word count: the old [a-z0-9_\s]+ form backtracked badly on long voice transcripts.
+        Pattern.compile("""(?i)\b(\w+(?:\s+\w+){0,4})\s+is\s+my\s+\w+.*""")
         // Removed: "order/buy/text/message ..." and "tell mom/in the group ..." patterns saved
         // almost every task command as a "preference", flooding the prompt with noise.
     )
+
+    /**
+     * Secrets that must never reach the memory file, Mem0 cloud or the system prompt:
+     * PIN/OTP/CVV/passwords, card/Aadhaar/PAN/account numbers, and long digit runs (card-like).
+     * "pin code" (postal code) is allowed.
+     */
+    private val SENSITIVE_PATTERN = Regex(
+        """(?i)\b(?:pin\b(?!\s*code)|m-?pin|upi\s*pin|otp|one[\s-]*time\s*(?:password|code)|cvv|cvc|password|passcode|passwd|card\s*(?:number|no)|debit\s*card|credit\s*card|aadhaa?r|pan\s*(?:card|number|no)|account\s*(?:number|no)|net\s*banking|security\s*code|verification\s*code)"""
+    )
+    private val LONG_DIGIT_RUN = Regex("""\d(?:[\s-]?\d){12,}""")
+
+    internal fun isSensitive(text: String): Boolean =
+        SENSITIVE_PATTERN.containsMatchIn(text) || LONG_DIGIT_RUN.containsMatchIn(text)
 
     private val extractionExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
 
@@ -128,7 +142,12 @@ ${io.agents.pokeclaw.care.CareMemoryLearner.AI_SCHEMA}"""
         savePreference("- [$timestamp] $fact")
     }
 
+    @Synchronized // caller thread and extractionExecutor both write the same file
     private fun savePreference(bulletPoint: String) {
+        if (isSensitive(bulletPoint)) {
+            XLog.w(TAG, "savePreference: dropped a fact that looks like a PIN/OTP/password/card number")
+            return
+        }
         cachedMemoryPrompt = null // invalidate cache
         HybridMemoryRepository.recordTurnAsync("user_preference_fact", bulletPoint)
         val existing = KBManager.read(MEMORY_FILE_PATH).getOrNull()

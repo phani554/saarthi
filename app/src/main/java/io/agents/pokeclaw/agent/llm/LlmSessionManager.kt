@@ -93,19 +93,22 @@ object LlmSessionManager {
                 .build()
         }
 
-        if (openRouterKey.isEmpty()) {
+        val isOpenRouter = forceOpenRouter || interactionModel.contains("/") || KVUtils.getLlmProvider().equals("OPENROUTER", ignoreCase = true)
+        val resolvedModel = if (forceOpenRouter && !interactionModel.contains("/")) "google/gemini-3.5-flash-lite" else interactionModel
+        val baseUrl = if (isOpenRouter) "https://openrouter.ai/api/v1" else "https://generativelanguage.googleapis.com/v1beta/openai/"
+        // The Google endpoint gets a Google key, never the OpenRouter key (wrong host + guaranteed 401).
+        val apiKey = if (isOpenRouter) openRouterKey
+            else KVUtils.getApiKeyForProvider("GOOGLE").ifEmpty { KVUtils.getLlmApiKey() }.trim()
+
+        if (apiKey.isEmpty()) {
             XLog.w(TAG, "Interaction model selected but API key is blank")
             return null
         }
 
-        val isOpenRouter = forceOpenRouter || interactionModel.contains("/") || KVUtils.getLlmProvider().equals("OPENROUTER", ignoreCase = true)
-        val resolvedModel = if (forceOpenRouter && !interactionModel.contains("/")) "google/gemini-3.5-flash-lite" else interactionModel
-        val baseUrl = if (isOpenRouter) "https://openrouter.ai/api/v1" else "https://generativelanguage.googleapis.com/v1beta/openai/"
-
         XLog.d(TAG, "createInteractionChatModel: forceOpenRouter=$forceOpenRouter model=$resolvedModel via $baseUrl")
         return OpenAiChatModel.builder()
             .httpClientBuilder(OkHttpClientBuilderAdapter())
-            .apiKey(openRouterKey)
+            .apiKey(apiKey)
             .modelName(resolvedModel)
             .baseUrl(baseUrl)
             .customHeaders(mapOf("HTTP-Referer" to "https://pokeclaw.agents.io", "X-Title" to "PokeClaw"))
@@ -139,7 +142,9 @@ object LlmSessionManager {
 
     fun handleLlmError(e: Exception) {
         val msg = e.message.orEmpty()
-        if (msg.contains("401") || msg.contains("402") || msg.contains("403") || msg.contains("Unauthorized") || msg.contains("Payment Required")) {
+        // Only real HTTP auth/quota failures; a bare "401" inside a message used to trigger the warning.
+        val authFailure = Regex("""(?i)\b(?:http|status|code)\D{0,15}\b(401|402|403)\b""").containsMatchIn(msg)
+        if (authFailure || msg.contains("Unauthorized") || msg.contains("Payment Required")) {
             val report = "API Key Expired or Quota Exceeded (HTTP 401/402/403). Please check Settings."
             XLog.e(TAG, report, e)
             VoiceManager.speakNative("API Key Expired or Quota Exceeded. Please update your key in Settings.")

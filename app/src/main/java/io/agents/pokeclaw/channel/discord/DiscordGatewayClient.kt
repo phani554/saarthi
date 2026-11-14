@@ -5,6 +5,7 @@ package io.agents.pokeclaw.channel.discord
 
 import android.os.Handler
 import android.os.Looper
+import io.agents.pokeclaw.utils.KVUtils
 import io.agents.pokeclaw.utils.XLog
 import com.google.gson.Gson
 import com.google.gson.JsonObject
@@ -66,6 +67,8 @@ class DiscordGatewayClient private constructor() {
     private var stopped = false
 
     private var messageListener: OnDiscordMessageListener? = null
+    // Dispatch messages off the WebSocket reader thread so heartbeats keep being read.
+    private val dispatchExecutor = java.util.concurrent.Executors.newSingleThreadExecutor()
     private val connectionStateListeners = CopyOnWriteArrayList<ConnectionStateListener>()
 
     interface OnDiscordMessageListener {
@@ -262,13 +265,42 @@ class DiscordGatewayClient private constructor() {
             val channelId = d.get("channel_id").asString
             val messageId = d.get("id").asString
             val content = d.get("content")?.takeIf { !it.isJsonNull }?.asString ?: ""
+            val authorId = author?.get("id")?.takeIf { !it.isJsonNull }?.asString ?: ""
+            if (!isAllowedSender(authorId)) return
 
-            XLog.d(TAG, "Message received: channelId=$channelId, messageId=$messageId, content=$content")
+            XLog.d(TAG, "Message received: channelId=$channelId, messageId=$messageId")
 
-            messageListener?.onDiscordMessage(channelId, messageId, content)
+            val listener = messageListener ?: return
+            dispatchExecutor.execute {
+                try {
+                    listener.onDiscordMessage(channelId, messageId, content)
+                } catch (e: Exception) {
+                    XLog.e(TAG, "Discord message dispatch failed: ${e.message}", e)
+                }
+            }
         } catch (e: Exception) {
             XLog.e(TAG, "Failed to handle MESSAGE_CREATE: ${e.message}", e)
         }
+    }
+
+    /**
+     * Sender allow-list: only the paired owner (Discord user id) may send commands.
+     * If nobody is paired yet, the first sender becomes the owner and is stored.
+     */
+    @Synchronized
+    private fun isAllowedSender(authorId: String): Boolean {
+        if (authorId.isEmpty()) return false
+        val owner = KVUtils.getDiscordOwnerUserId()
+        if (owner.isEmpty()) {
+            KVUtils.setDiscordOwnerUserId(authorId)
+            XLog.i(TAG, "Discord owner paired: userId=$authorId")
+            return true
+        }
+        if (owner != authorId) {
+            XLog.w(TAG, "Discord message from unpaired sender ignored: userId=$authorId")
+            return false
+        }
+        return true
     }
 
     private fun startHeartbeat() {

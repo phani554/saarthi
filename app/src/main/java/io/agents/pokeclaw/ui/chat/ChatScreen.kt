@@ -153,6 +153,7 @@ fun ChatScreen(
     activeTasks: List<String> = emptyList(),
     onStopTask: (String) -> Unit = {},
     onStopAllTasks: () -> Unit = {},
+    onKillTask: () -> Unit = onStopAllTasks,
     inputEnabled: Boolean = true,
     onModelSwitch: (modelId: String, displayName: String) -> Unit = { _, _ -> },
     colors: PokeclawColors = AbyssDark,
@@ -316,7 +317,7 @@ fun ChatScreen(
                             onSendChat = onSendChat,
                             onSendTask = onSendTask,
                             onVoiceInputTap = onVoiceInputTap,
-                            onStopAll = onStopAllTasks,
+                            onStopAll = onKillTask,
                             onAttach = onAttach,
                             colors = colors,
                             prefillText = prefillText,
@@ -474,8 +475,18 @@ private fun ChatTopBar(
                     val now = System.currentTimeMillis()
                     if (now - sosArmedAt < 4_000L) {
                         sosArmedAt = 0L
-                        val msg = io.agents.pokeclaw.care.DistressEscalator.trigger(sosContext, "chat button")
-                        android.widget.Toast.makeText(sosContext, msg, android.widget.Toast.LENGTH_LONG).show()
+                        // trigger() speaks through VoiceManager and may wait on it: keep it off the main thread.
+                        val appContext = sosContext.applicationContext
+                        Thread {
+                            val msg = try {
+                                io.agents.pokeclaw.care.DistressEscalator.trigger(appContext, "chat button")
+                            } catch (e: Exception) {
+                                "SOS could not start: ${e.message}"
+                            }
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                android.widget.Toast.makeText(appContext, msg, android.widget.Toast.LENGTH_LONG).show()
+                            }
+                        }.start()
                     } else {
                         sosArmedAt = now
                         android.widget.Toast.makeText(sosContext, "Tap SOS again to call for help", android.widget.Toast.LENGTH_SHORT).show()

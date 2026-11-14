@@ -4,10 +4,10 @@
 package io.agents.pokeclaw.agent
 
 import android.accessibilityservice.AccessibilityService
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.tool.ToolResult
-import io.agents.pokeclaw.tool.impl.SendMessageTool
 import io.agents.pokeclaw.utils.ContactListUiUtils
 import io.agents.pokeclaw.utils.ContactMatchUtils
 import io.agents.pokeclaw.utils.XLog
@@ -47,13 +47,13 @@ object MessageToCartPipeline {
         val messageText = extractLatestChatMessage(root)
         if (messageText.isBlank()) return ToolResult.error("No message found in chat with '$contactName'")
 
-        XLog.i(TAG, "Extracted latest message from '$contactName': '$messageText'")
+        XLog.i(TAG, "Extracted latest incoming message (len=${messageText.length})")
 
         // Step 3: Extract items from message text
         val items = parseShoppingItemsFromMessage(messageText)
         if (items.isEmpty()) return ToolResult.error("Could not parse shopping items from message: '$messageText'")
 
-        XLog.i(TAG, "Parsed ${items.size} shopping items: $items")
+        XLog.i(TAG, "Parsed ${items.size} shopping items")
 
         // Close WhatsApp completely by pressing Back twice before opening target store
         service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
@@ -67,7 +67,8 @@ object MessageToCartPipeline {
             storeApp.lowercase().contains("blinkit") -> "com.grofers.customerapp"
             storeApp.lowercase().contains("zepto") -> "com.zeptoconsumerapp"
             storeApp.lowercase().contains("amazon") -> "com.amazon.mShop.android.shopping"
-            else -> "com.flipkart.android"
+            // Never silently order on a store the user did not name.
+            else -> return ToolResult.error("I don't know the store '$storeApp'. Please say Blinkit, Zepto, Flipkart or Amazon.")
         }
 
         service.openApp(storePackage)
@@ -82,15 +83,27 @@ object MessageToCartPipeline {
 
     private fun extractLatestChatMessage(root: AccessibilityNodeInfo): String {
         val messages = mutableListOf<String>()
-        collectMessageTextNodes(root, messages)
+        val rootBounds = Rect()
+        root.getBoundsInScreen(rootBounds)
+        collectMessageTextNodes(root, messages, rootBounds)
         return messages.lastOrNull().orEmpty()
     }
 
-    private fun collectMessageTextNodes(node: AccessibilityNodeInfo?, results: MutableList<String>) {
+    /**
+     * Collects only WhatsApp message bubbles (message_text ids) that are INCOMING (left-aligned).
+     * Any TextView used to qualify, so the "latest message" could be the user's own outgoing bubble,
+     * the chat header or "Tap here for contact info".
+     */
+    private fun collectMessageTextNodes(node: AccessibilityNodeInfo?, results: MutableList<String>, rootBounds: Rect) {
         if (node == null || !node.isVisibleToUser) return
         val resId = node.viewIdResourceName.orEmpty().lowercase()
         val text = node.text?.toString().orEmpty().trim()
-        if (resId.contains("message_text") || resId.contains("text_content") || (node.className != null && node.className.toString().contains("TextView") && text.length > 3)) {
+        val isIncomingBubble = resId.contains("message_text") && text.isNotEmpty() && run {
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            (r.left - rootBounds.left) <= (rootBounds.right - r.right)
+        }
+        if (isIncomingBubble) {
             // Old filter dropped any line containing "AM"/"PM" (e.g. "AMUL milk", "PAMPERS").
             // Skip only bubbles that ARE a timestamp/date label.
             val isTimestampLabel = Regex("""^\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?$""", RegexOption.IGNORE_CASE).matches(text) ||
@@ -100,7 +113,7 @@ object MessageToCartPipeline {
             }
         }
         for (i in 0 until node.childCount) {
-            collectMessageTextNodes(node.getChild(i), results)
+            collectMessageTextNodes(node.getChild(i), results, rootBounds)
         }
     }
 

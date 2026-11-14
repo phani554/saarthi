@@ -36,7 +36,7 @@ object EngineHolder {
      *                   context-free and easier to unit-test
      */
     @Synchronized
-    fun getOrCreate(modelPath: String, cacheDir: String): Engine {
+    fun getOrCreate(modelPath: String, cacheDir: String, preferCpu: Boolean = false): Engine {
         val existing = engine
         if (existing != null && currentModelPath == modelPath && currentBackendLabel != null) {
             XLog.d(TAG, "getOrCreate: reusing engine for $modelPath (${currentBackendLabel ?: "unknown"})")
@@ -61,19 +61,34 @@ object EngineHolder {
         // Old code: GPU only, and any GPU failure (OpenCL missing, driver issue) killed local mode.
         // Now: NPU (only for an SM8635 AOT file with the QNN libs bundled) -> GPU -> CPU.
         val nativeDir = io.agents.pokeclaw.ClawApplication.instance.applicationInfo.nativeLibraryDir
+        // Crash quarantine: a native abort during GPU/NPU/MTP init can't be caught, so the attempt is
+        // marked before it starts. If the process dies, the next launch promotes the marker to CPU-safe
+        // mode and shouldForceCpu() returns true, so only plain CPU (no MTP) is tried.
+        val forceCpu = try {
+            LocalBackendHealth.shouldForceCpu(preferCpu)
+        } catch (e: Exception) {
+            XLog.w(TAG, "getOrCreate: backend health check failed, keeping default order", e)
+            false
+        }
         val order = buildList {
-            if (isNpuModel(modelPath) && npuLibsPresent(nativeDir)) add("NPU")
-            add("GPU")
+            if (!forceCpu) {
+                if (isNpuModel(modelPath) && npuLibsPresent(nativeDir)) add("NPU")
+                add("GPU")
+            }
             add("CPU")
         }
-        var lastError: Exception? = null
+        var lastError: Throwable? = null
         // Gemma 4 files downloaded after 2026-05-05 carry an MTP "draft" model (speculative decoding,
         // Google: up to 2.2x decode on mobile GPU). Try it on GPU/CPU first; if the file has no drafter
         // or the runtime is too old, the same backend is retried without it.
-        val attempts = order.flatMap { label -> if (label == "NPU") listOf(label to false) else listOf(label to true, label to false) }
+        val attempts = order.flatMap { label ->
+            if (label == "NPU" || forceCpu) listOf(label to false) else listOf(label to true, label to false)
+        }
         for ((label, mtp) in attempts) {
             val backend = backendFor(label, nativeDir) ?: continue
             if (!setSpeculativeDecoding(mtp) && mtp) continue
+            val risky = label != "CPU" || mtp
+            if (risky) LocalBackendHealth.markGpuInitStarted(modelPath)
             try {
                 val engineConfig = EngineConfig(
                     modelPath = modelPath,
@@ -85,16 +100,24 @@ object EngineHolder {
                 val newEngine = Engine(engineConfig)
                 try {
                     newEngine.initialize()
-                } catch (e: Exception) {
-                    try { newEngine.close() } catch (_: Exception) {}
+                } catch (e: Throwable) {
+                    try { newEngine.close() } catch (_: Throwable) {}
                     throw e
                 }
                 engine = newEngine
                 currentModelPath = modelPath
                 currentBackendLabel = label
+                if (label != "CPU") LocalBackendHealth.noteGpuInitSuccess(modelPath)
+                else if (risky) LocalBackendHealth.markGpuInitFinished()
                 XLog.i(TAG, "getOrCreate: engine ready for $modelPath with $label backend (mtp=$mtp)")
                 return newEngine
-            } catch (e: Exception) {
+            } catch (e: VirtualMachineError) {
+                if (risky) LocalBackendHealth.markGpuInitFinished()
+                throw e
+            } catch (e: Throwable) {
+                // Throwable, not Exception: UnsatisfiedLinkError/ExceptionInInitializerError from one
+                // backend's native libs must fall through to the next backend.
+                if (risky) LocalBackendHealth.markGpuInitFinished()
                 XLog.e(TAG, "getOrCreate: $label (mtp=$mtp) init failed for $modelPath, trying next option", e)
                 lastError = e
             }
@@ -103,15 +126,22 @@ object EngineHolder {
     }
 
     /**
-     * ExperimentalFlags.enableSpeculativeDecoding (litertlm >= 0.11). Reflection keeps this compiling on
-     * older versions. Returns false when the flag does not exist.
+     * ExperimentalFlags.enableSpeculativeDecoding via reflection. litertlm 0.16.1 declares the setter as
+     * setEnableSpeculativeDecoding(java.lang.Boolean); 0.10.0 used a primitive boolean. Try both.
+     * Returns false when neither exists.
      */
     private fun setSpeculativeDecoding(on: Boolean): Boolean = try {
         val cls = Class.forName("com.google.ai.edge.litertlm.ExperimentalFlags")
         val instance = cls.getField("INSTANCE").get(null)
-        cls.getMethod("setEnableSpeculativeDecoding", Boolean::class.javaPrimitiveType).invoke(instance, on)
+        val setter = try {
+            cls.getMethod("setEnableSpeculativeDecoding", Boolean::class.javaObjectType)
+        } catch (_: NoSuchMethodException) {
+            cls.getMethod("setEnableSpeculativeDecoding", Boolean::class.javaPrimitiveType)
+        }
+        setter.invoke(instance, on)
         true
-    } catch (_: Throwable) {
+    } catch (e: Throwable) {
+        XLog.w(TAG, "setSpeculativeDecoding($on) unavailable: ${e.message}")
         false
     }
 
@@ -129,7 +159,7 @@ object EngineHolder {
         "NPU" -> try {
             // FastRPC must find our skel before the first QNN call.
             android.system.Os.setenv("ADSP_LIBRARY_PATH", "$nativeDir;/vendor/dsp/cdsp;/vendor/lib/rfsa/adsp;/vendor/dsp", true)
-            // Reflection so this compiles on litertlm 0.10.0 (no Backend.NPU); works on 0.18.1+.
+            // Backend.NPU(String) exists in litertlm 0.10.0 and 0.16.1; reflection only guards odd builds.
             Class.forName("com.google.ai.edge.litertlm.Backend\$NPU")
                 .getConstructor(String::class.java)
                 .newInstance(nativeDir) as Backend

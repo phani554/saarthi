@@ -7,6 +7,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Rect;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -99,13 +100,15 @@ public class InputTextTool extends BaseTool {
 
         // Strategy 1: try ACTION_SET_TEXT (standard approach)
         // Note: ACTION_SET_TEXT overwrites existing text cleanly when clearFirst is true
-        if (trySetTextWithRetries(targetNode, text, clearFirst)) {
+        // performAction returning true is not proof: read the field back before reporting success.
+        if (trySetTextWithRetries(targetNode, text, clearFirst) && fieldHasText(targetNode, text)) {
             service.dismissKeyboard();
             return ToolResult.success(clearFirst ? "Input text: " + text : "Appended text: " + text);
         }
 
-        // Strategy 2: paste via clipboard (better compatibility)
-        boolean clipboardSet = setClipboardText(service, text);
+        // Strategy 2: paste via clipboard (better compatibility). The user's clipboard is restored after.
+        ClipData[] previousClip = {null};
+        boolean clipboardSet = setClipboardText(service, text, previousClip);
         if (!clipboardSet) {
             return ToolResult.error("Failed to set clipboard text");
         }
@@ -128,9 +131,15 @@ public class InputTextTool extends BaseTool {
         }
 
         // Perform paste
-        if (targetNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)) {
+        boolean pasted = targetNode.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+        boolean verified = pasted && fieldHasText(targetNode, text);
+        restoreClipboard(service, previousClip[0]);
+        if (verified) {
             service.dismissKeyboard();
             return ToolResult.success(clearFirst ? "Input text (via paste): " + text : "Appended text (via paste): " + text);
+        }
+        if (pasted) {
+            return ToolResult.error("Pasted, but the field does not show the text. Call get_screen_info to check which field received it.");
         }
 
         return ToolResult.error("Failed to input text, both ACTION_SET_TEXT and clipboard paste failed");
@@ -164,6 +173,18 @@ public class InputTextTool extends BaseTool {
             return "";
         }
         return text;
+    }
+
+    /** Reads the field back; password fields (masked) cannot be read and are trusted. */
+    private boolean fieldHasText(AccessibilityNodeInfo node, String text) {
+        try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        if (!node.refresh()) return false;
+        if (node.isPassword()) return true;
+        CharSequence now = node.getText();
+        if (now == null) return false;
+        String want = text.replaceAll("\\s+", " ").trim();
+        String have = now.toString().replaceAll("\\s+", " ").trim();
+        return want.isEmpty() || have.contains(want);
     }
 
     private boolean trySetTextWithRetries(AccessibilityNodeInfo node, String text, boolean clearFirst) {
@@ -203,15 +224,25 @@ public class InputTextTool extends BaseTool {
                 continue;
             }
 
-            AccessibilityNodeInfo focused = findFocusedEditText(root);
-            if (focused != null) {
-                return focused;
-            }
-
             if (targetCoords != null) {
+                // node_id given: the field under the tapped node first; a focused field only if it
+                // is that field; never "the first editable on screen" (usually the search bar).
                 AccessibilityNodeInfo nearTarget = findEditableNearPoint(root, targetCoords[0], targetCoords[1]);
                 if (nearTarget != null) {
                     return nearTarget;
+                }
+                AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
+                if (focused != null && focused.isEditable()) {
+                    Rect fb = new Rect();
+                    focused.getBoundsInScreen(fb);
+                    if (fb.contains(targetCoords[0], targetCoords[1])) {
+                        return focused;
+                    }
+                }
+            } else {
+                AccessibilityNodeInfo focused = findFocusedEditText(root);
+                if (focused != null) {
+                    return focused;
                 }
             }
 
@@ -220,7 +251,7 @@ public class InputTextTool extends BaseTool {
         return null;
     }
 
-    private boolean setClipboardText(Context context, String text) {
+    private boolean setClipboardText(Context context, String text, ClipData[] previousOut) {
         CountDownLatch latch = new CountDownLatch(1);
         boolean[] result = {false};
 
@@ -228,6 +259,7 @@ public class InputTextTool extends BaseTool {
             try {
                 ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
                 if (clipboard != null) {
+                    try { previousOut[0] = clipboard.getPrimaryClip(); } catch (Exception ignored) { }
                     clipboard.setPrimaryClip(ClipData.newPlainText("input_text", text));
                     result[0] = true;
                 }
@@ -238,9 +270,25 @@ public class InputTextTool extends BaseTool {
 
         try {
             latch.await(2, TimeUnit.SECONDS);
-        } catch (InterruptedException ignored) {
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
         return result[0];
+    }
+
+    private void restoreClipboard(Context context, ClipData previous) {
+        new Handler(Looper.getMainLooper()).post(() -> {
+            try {
+                ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
+                if (clipboard == null) return;
+                if (previous != null) {
+                    clipboard.setPrimaryClip(previous);
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    clipboard.clearPrimaryClip();
+                }
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     private AccessibilityNodeInfo findFocusedEditText(AccessibilityNodeInfo root) {

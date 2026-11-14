@@ -3,6 +3,7 @@
 
 package io.agents.pokeclaw.tool.impl
 
+import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.tool.BaseTool
@@ -23,7 +24,6 @@ class AddToCartTool : BaseTool() {
             "com.grofers.customerapp:id/tv_add",
             "com.grofers.customerapp:id/fyt_add_button",
             "com.grofers.customerapp:id/stepper_add",
-            "com.grofers.customerapp:id/tv_title",
             "com.grofers.customerapp:id/v_add_button",
             "com.grofers.customerapp:id/add_to_cart",
             "com.grofers.customerapp:id/add_to_cart_btn",
@@ -46,6 +46,10 @@ class AddToCartTool : BaseTool() {
             "add-to-cart-button",
             "atc-declarative"
         )
+
+        private val ITEMS_LABEL = Regex("""^\d+\s+items?\b""", RegexOption.IGNORE_CASE)
+        private val STEPPER_SIGNS = setOf("+", "-", "−", "–")
+        private val STOP_WORDS = setOf("the", "of", "and", "pack", "pouch", "with", "for", "in", "a")
 
         private val NEGATIVE_KEYWORDS = arrayOf(
             "wishlist", "favorite", "favourite", "address", "note", "review",
@@ -79,105 +83,178 @@ class AddToCartTool : BaseTool() {
         val root = service.rootInActiveWindow
             ?: return ToolResult.error("Screen unavailable")
 
-        // 0. Pre-check for Multi-Option Variant Selection Bottom Sheet
-        val variantClicked = handleVariantBottomSheet(service, root, productName)
-        if (variantClicked) {
-            return ToolResult.success("Selected variant option and added product to cart")
-        }
+        // 0. Multi-option variant selection bottom sheet
+        val variantResult = handleVariantBottomSheet(service, root, productName)
+        if (variantResult != null) return variantResult
 
-
-        // Check if item is already added to cart on active screen
-        // Only "already in cart" if the stepper sits on THIS product's card; a screen-wide match
-        // made item 2 look done whenever item 1 showed "1 in cart".
-        val inCartNode = NodeFinder.findNodeByIdOrText(root, "com.grofers.customerapp:id/stepper_add", "added", "1 in cart", "2 in cart", "3 in cart")
-        if (inCartNode != null && matchesProductContext(inCartNode, productName)) {
+        // Already in cart only if a quantity stepper / "in cart" label sits on THIS product's card.
+        // (stepper_add is an ADD button id and "added" matched too broadly, so neither counts.)
+        val inCartNode = NodeFinder.findNodeByIdOrText(root, "1 in cart", "2 in cart", "3 in cart")
+        if (inCartNode != null && productName.isNotBlank() && matchesProductContext(inCartNode, productName)) {
             XLog.i(TAG, "execute: product already added to cart")
             return ToolResult.success("Product is already in cart")
         }
 
-        // 1. Try ID matches first (ensuring negative keywords like wishlist are excluded)
-        // Prefer the ADD button whose product card mentions the product; only if none does,
-        // fall back to the first visible one (old behaviour: matchesProductContext was always true).
+        // 1. ID matches (negative keywords like wishlist excluded). With a product name, only an
+        // ADD button whose card mentions the product is used; never fall back to the first ADD.
         val visibleAddNodes = ADD_CART_IDS.flatMap { service.findNodesById(it) }
             .filter { it.isVisibleToUser && !isNegativeMatch(it) }
-        val contextMatched = visibleAddNodes.filter { matchesProductContext(it, productName) }
-        val orderedCandidates = if (contextMatched.isNotEmpty()) contextMatched else visibleAddNodes
-        run {
-            for (node in orderedCandidates) {
-                run {
-                    val target = findClickableTarget(node)
-                    val clicked = service.clickNode(target)
-                    XLog.i(TAG, "execute: clicked ADD (contextMatched=${contextMatched.isNotEmpty()}), result=$clicked")
-                    if (clicked) {
-                        try { Thread.sleep(300L) } catch (_: InterruptedException) {}
-                        val newRoot = service.rootInActiveWindow
-                        if (newRoot != null && isAlreadyInCart(newRoot)) {
-                            return ToolResult.success("Added product to cart (verified on UI)")
-                        }
-                    }
-                }
-            }
-        }
+        val candidates = if (productName.isBlank()) visibleAddNodes
+            else visibleAddNodes.filter { matchesProductContext(it, productName) }
+        var candidate: AccessibilityNodeInfo? = candidates.firstOrNull()
 
         // 2. Structural text search for "ADD" / "Add to Cart"
-        val targetNode = findAddButtonInTree(root)
-        if (targetNode != null) {
-            val target = findClickableTarget(targetNode)
-            val clicked = service.clickNode(target)
-            XLog.i(TAG, "execute: clicked structural text match '${targetNode.text ?: targetNode.contentDescription}', result=$clicked")
-            if (clicked) {
-                try { Thread.sleep(300L) } catch (_: InterruptedException) {}
-                val newRoot = service.rootInActiveWindow
-                if (newRoot != null && isAlreadyInCart(newRoot)) {
-                    return ToolResult.success("Added product to cart (verified on UI)")
-                }
+        if (candidate == null) {
+            val textNode = findAddButtonInTree(root)
+            if (textNode != null && (productName.isBlank() || matchesProductContext(textNode, productName))) {
+                candidate = textNode
             }
         }
 
-        // Out-of-stock is only reported when no ADD worked (a screen-wide check would
-        // otherwise block every item whenever one other product is sold out).
-        val latest = service.rootInActiveWindow
-        if (latest != null && isOutOfStock(latest)) {
+        if (candidate == null) {
+            if (productName.isNotBlank() && visibleAddNodes.isNotEmpty()) {
+                return ToolResult.error("No ADD button on screen belongs to '$productName'. Not adding a different product. Scroll or search for it, or call add_to_cart with a shorter product_name.")
+            }
+            if (isOutOfStock(root, productName)) {
+                return ToolResult.error("Product is OUT OF STOCK on screen. Do not retry searching or scrolling for this item. Skip it or call finish.")
+            }
+            return ToolResult.error("Add to cart button not found on screen")
+        }
+
+        // Out-of-stock, scoped to this product's card.
+        if (cardIsOutOfStock(candidate)) {
             return ToolResult.error("Product is OUT OF STOCK on screen. Do not retry searching or scrolling for this item. Skip it or call finish.")
         }
-        return ToolResult.error("Add to cart button not found or click did not update cart on screen")
+
+        // Click exactly one candidate, then verify; never click a second product.
+        return clickAndVerify(service, candidate, "Added product to cart")
     }
 
-    private fun handleVariantBottomSheet(service: ClawAccessibilityService, root: AccessibilityNodeInfo, productName: String): Boolean {
-        val variantNode = NodeFinder.findNodeByIdOrText(root,
-            "com.flipkart.android:id/variant_sheet",
-            "com.flipkart.android:id/bottom_sheet",
-            "com.grofers.customerapp:id/variant_bottom_sheet",
-            "select variant", "select pack", "choose size", "available options"
-        )
-        if (variantNode != null) {
-            XLog.i(TAG, "Multi-option variant bottom sheet detected for '$productName'")
-
-            val sizeMatch = if (productName.contains("1l") || productName.contains("500g") || productName.contains("250ml")) {
-                val sizeKey = when {
-                    productName.contains("1l") -> "1l"
-                    productName.contains("500g") -> "500g"
-                    productName.contains("250ml") -> "250ml"
-                    else -> ""
-                }
-                NodeFinder.findNodeByIdOrText(root, sizeKey)
-            } else null
-
-            val targetCta = sizeMatch ?: NodeFinder.findNodeByIdOrText(root,
-                "com.flipkart.android:id/add_cta",
-                "com.grofers.customerapp:id/add_button",
-                "com.zeptoconsumerapp:id/button_add",
-                "add", "+ add", "add to cart"
-            )
-
-            if (targetCta != null) {
-                val target = findClickableTarget(targetCta)
-                val clicked = service.clickNode(target)
-                XLog.i(TAG, "Multi-option bottom sheet auto-clicked CTA: $clicked")
-                return clicked
+    /**
+     * Clicks the candidate's clickable target once and polls up to ~1.5 s for proof: the cart
+     * count/badge changed, or a quantity stepper appeared on the clicked card.
+     */
+    private fun clickAndVerify(service: ClawAccessibilityService, node: AccessibilityNodeInfo, okMessage: String): ToolResult {
+        val target = findClickableTarget(node)
+        if (BaseTool.isPaymentNodeOrAncestor(target)) {
+            return ToolResult.error("Blocked: that control is a payment / place-order button. The user must complete payment themselves.")
+        }
+        val cardBounds = Rect()
+        (target.parent ?: target).getBoundsInScreen(cardBounds)
+        val before = cartSignature(service.rootInActiveWindow)
+        val clicked = service.clickNode(target)
+        XLog.i(TAG, "clickAndVerify: clicked '${node.text ?: node.contentDescription ?: node.viewIdResourceName}', result=$clicked")
+        if (!clicked) return ToolResult.error("Could not click the ADD button")
+        val deadline = System.currentTimeMillis() + 1500L
+        while (System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(250L) } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return ToolResult.error("Interrupted while verifying add to cart")
+            }
+            val now = service.rootInActiveWindow ?: continue
+            val after = cartSignature(now)
+            if (after.isNotEmpty() && after != before) {
+                return ToolResult.success("$okMessage (verified: cart count changed)")
+            }
+            if (stepperInBounds(now, cardBounds)) {
+                return ToolResult.success("$okMessage (verified: quantity stepper on the product card)")
             }
         }
+        return ToolResult.error("Tapped ADD but could not confirm the item reached the cart. Call get_screen_info to check before trying again; do not tap other products.")
+    }
+
+    /** Text of cart-count/badge nodes and "N items" cart-bar labels, joined. */
+    private fun cartSignature(root: AccessibilityNodeInfo?): String {
+        val out = StringBuilder()
+        collectCartSignals(root, out, 0)
+        return out.toString()
+    }
+
+    private fun collectCartSignals(node: AccessibilityNodeInfo?, out: StringBuilder, depth: Int) {
+        if (node == null || depth > 40) return
+        val id = node.viewIdResourceName?.lowercase().orEmpty()
+        val text = node.text?.toString()?.trim().orEmpty()
+        val isCartId = id.contains("cart") && (id.contains("count") || id.contains("badge") || id.contains("quantity") || id.contains("item"))
+        if ((isCartId && text.isNotEmpty()) || ITEMS_LABEL.containsMatchIn(text)) {
+            out.append(id).append('=').append(text).append(';')
+        }
+        for (i in 0 until node.childCount) collectCartSignals(node.getChild(i), out, depth + 1)
+    }
+
+    /** True when the area holds a quantity number plus a +/- control, or an "in cart" label. */
+    private fun stepperInBounds(root: AccessibilityNodeInfo, area: Rect): Boolean {
+        val found = BooleanArray(2) // [0] digit, [1] plus/minus
+        scanStepper(root, area, found, 0)
+        return found[0] && found[1]
+    }
+
+    private fun scanStepper(node: AccessibilityNodeInfo?, area: Rect, found: BooleanArray, depth: Int) {
+        if (node == null || depth > 40) return
+        val r = Rect()
+        node.getBoundsInScreen(r)
+        if (Rect.intersects(r, area)) {
+            val t = node.text?.toString()?.trim().orEmpty().lowercase()
+            val d = node.contentDescription?.toString()?.trim().orEmpty().lowercase()
+            if (t.matches(Regex("\\d{1,2}"))) found[0] = true
+            if (t in STEPPER_SIGNS || d in STEPPER_SIGNS || d.contains("increase") || d.contains("decrease") ||
+                d.contains("add one") || d.contains("remove one")) found[1] = true
+            if (t.contains("in cart") || d.contains("in cart")) { found[0] = true; found[1] = true }
+        }
+        for (i in 0 until node.childCount) scanStepper(node.getChild(i), area, found, depth + 1)
+    }
+
+    private fun cardIsOutOfStock(node: AccessibilityNodeInfo): Boolean {
+        var card: AccessibilityNodeInfo? = node.parent ?: return false
+        repeat(2) {
+            val text = subtreeText(card, 4)
+            if (text.contains("out of stock") || text.contains("sold out") || text.contains("currently unavailable")) return true
+            card = card?.parent ?: return false
+        }
         return false
+    }
+
+    /** Returns null when no variant sheet is showing; otherwise the verified result. */
+    private fun handleVariantBottomSheet(service: ClawAccessibilityService, root: AccessibilityNodeInfo, productName: String): ToolResult? {
+        val variantNode = NodeFinder.findNodeByIdOrText(root,
+            "com.flipkart.android:id/variant_sheet",
+            "com.grofers.customerapp:id/variant_bottom_sheet",
+            "select variant", "select pack", "choose size", "available options"
+        ) ?: return null
+        XLog.i(TAG, "Multi-option variant bottom sheet detected for '$productName'")
+
+        // Size chip: exact (normalized) text match only; "1l" must not match "11l" or "1 litre pack of 2".
+        val sizeKey = Regex("""\b\d+(\.\d+)?\s?(ml|l|g|kg)\b""").find(productName)?.value?.replace(" ", "")
+        if (sizeKey != null) {
+            val chip = findExactLabel(root, sizeKey)
+            if (chip != null) {
+                service.clickNode(findClickableTarget(chip))
+                try { Thread.sleep(400L) } catch (_: InterruptedException) { Thread.currentThread().interrupt() }
+            }
+        }
+
+        val latest = service.rootInActiveWindow ?: root
+        val cta = NodeFinder.findNodeByIdOrText(latest,
+            "com.flipkart.android:id/add_cta",
+            "com.grofers.customerapp:id/add_button",
+            "com.zeptoconsumerapp:id/button_add"
+        ) ?: findExactLabel(latest, "add") ?: findExactLabel(latest, "+ add") ?: findExactLabel(latest, "add to cart")
+        if (cta == null || isNegativeMatch(cta) || !cta.isVisibleToUser) {
+            return ToolResult.error("A size/variant sheet is open but its ADD button was not found. Call get_screen_info and pick the variant with tap_node.")
+        }
+        return clickAndVerify(service, cta, "Selected variant and added product to cart")
+    }
+
+    private fun findExactLabel(node: AccessibilityNodeInfo?, label: String, depth: Int = 0): AccessibilityNodeInfo? {
+        if (node == null || depth > 40) return null
+        val want = label.lowercase().replace(" ", "")
+        val t = node.text?.toString()?.lowercase()?.replace(" ", "").orEmpty()
+        val d = node.contentDescription?.toString()?.lowercase()?.replace(" ", "").orEmpty()
+        if ((t == want || d == want) && node.isVisibleToUser) return node
+        for (i in 0 until node.childCount) {
+            val hit = findExactLabel(node.getChild(i), label, depth + 1)
+            if (hit != null) return hit
+        }
+        return null
     }
 
     private fun isNegativeMatch(node: AccessibilityNodeInfo): Boolean {
@@ -194,16 +271,24 @@ class AddToCartTool : BaseTool() {
 
     private fun matchesProductContext(node: AccessibilityNodeInfo, productName: String): Boolean {
         if (productName.isBlank()) return true
-        val needle = productName.lowercase().trim()
+        val tokens = tokenize(productName)
+        if (tokens.isEmpty()) return true
         // Look at the product card (parent / grandparent subtree), not just the parent's own text.
         var card: AccessibilityNodeInfo? = node.parent ?: return false
         repeat(2) {
-            val text = subtreeText(card, 4)
-            if (text.contains(needle)) return true
+            val cardTokens = tokenize(subtreeText(card, 4)).toSet()
+            val hits = tokens.count { it in cardTokens }
+            if (hits * 10 >= tokens.size * 6) return true // >= 60% of the product's words
             card = card?.parent ?: return false
         }
         return false
     }
+
+    /** Lowercase words, units and punctuation dropped (e.g. "500ml", "pack", "of" ignored). */
+    private fun tokenize(text: String): List<String> =
+        text.lowercase().split(Regex("[^\\p{L}\\p{N}]+"))
+            .filter { it.length >= 2 && it !in STOP_WORDS && !it.matches(Regex("\\d+(\\.\\d+)?(ml|l|g|gm|kg|pcs|pc)?")) }
+            .distinct()
 
     private fun subtreeText(node: AccessibilityNodeInfo?, depth: Int): String {
         if (node == null || depth < 0) return ""
@@ -214,15 +299,11 @@ class AddToCartTool : BaseTool() {
         return sb.toString().lowercase()
     }
 
-    private fun isOutOfStock(root: AccessibilityNodeInfo): Boolean {
-        // Old version read root.text only (almost always empty), so it never fired.
+    private fun isOutOfStock(root: AccessibilityNodeInfo, productName: String): Boolean {
+        // Only when the sold-out label sits on this product's card (or no product was named).
         val found = NodeFinder.findNodeByIdOrText(root, "", "out of stock", "sold out", "currently unavailable")
-        return found != null
-    }
-
-    private fun isAlreadyInCart(root: AccessibilityNodeInfo): Boolean {
-        val node = NodeFinder.findNodeByIdOrText(root, "com.grofers.customerapp:id/stepper_add", "added", "1 in cart", "2 in cart", "3 in cart")
-        return node != null
+            ?: return false
+        return productName.isBlank() || matchesProductContext(found, productName)
     }
 
     private fun findAddButtonInTree(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {

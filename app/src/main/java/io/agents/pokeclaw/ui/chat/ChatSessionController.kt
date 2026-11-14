@@ -50,9 +50,14 @@ class ChatSessionController(
         private const val BASE_SYSTEM_PROMPT = "You are a helpful AI assistant on an Android phone."
     }
 
+    // Written on the executor and read on main (and vice versa).
+    @Volatile
     private var engine: Engine? = null
+    @Volatile
     private var loadedModelPath: String? = null
+    @Volatile
     private var conversation: Conversation? = null
+    @Volatile
     private var isModelReady = false
 
     private var cloudClient: LlmClient? = null
@@ -197,9 +202,33 @@ class ChatSessionController(
         conversationId: String,
         visibleMessages: List<ChatMessage>,
     ) {
-        syncUiToActiveModel()
-        val currentModelPath = ModelConfigRepository.snapshot().local.modelPath
-        if (currentModelPath.isNotEmpty() && currentModelPath != loadedModelPath) {
+        val config = ModelConfigRepository.snapshot()
+        if (!config.isLocalActive()) {
+            syncUiToActiveModel()
+            return
+        }
+        // Local mode: decide here once. (syncUiToActiveModel() would queue its own load and the branches
+        // below a second one, opening the model two or three times on every return to the app.)
+        cloudClient = null
+        val currentModelPath = config.local.modelPath
+        if (currentModelPath.isBlank()) {
+            uiState.modelStatus.value = "No model selected"
+            setButtonsEnabled(false)
+            return
+        }
+        if (isTaskRunning()) {
+            // A local task holds the model; cleanupAfterTask reloads it when the task ends.
+            uiState.modelStatus.value = "● Local task using model"
+            isModelReady = false
+            setButtonsEnabled(false)
+            return
+        }
+        if (loadedModelPath == currentModelPath && isModelReady) {
+            updateLocalModelStatus(currentModelPath)
+            setButtonsEnabled(true)
+            return
+        }
+        if (currentModelPath != loadedModelPath) {
             loadModelIfReady(conversationId, visibleMessages)
         } else if (!isModelReady && engine != null && currentModelPath.isNotEmpty()) {
             val generation = ++localUiGeneration
@@ -254,15 +283,23 @@ class ChatSessionController(
     }
 
     fun onPause(conversationId: String) {
-        if (engine != null && ConversationCompactor.needsCompaction(uiState.messages)) {
+        val compactEngine = engine
+        // Compact only for an idle local chat: not while a task holds the model (it is often what paused us),
+        // and not in cloud mode, where a local summarisation would only block the executor.
+        val snapshot = uiState.messages.toList() // taken on main; the executor must not iterate the live list
+        if (compactEngine != null && cloudClient == null && !isTaskRunning() &&
+            ConversationCompactor.needsCompaction(snapshot)
+        ) {
             executor.submit {
                 try {
                     conversation?.close()
                 } catch (_: Exception) {
                 }
                 conversation = null
-                ConversationCompactor.compact(engine!!, uiState.messages, activity, conversationId)
                 isModelReady = false
+                if (!isTaskRunning()) {
+                    ConversationCompactor.compact(compactEngine, snapshot, activity, conversationId)
+                }
             }
         }
         executor.submit {
@@ -408,14 +445,22 @@ class ChatSessionController(
                 conversation?.close()
             } catch (_: Exception) {
             }
+            conversation = null
+            isModelReady = false
             val modelPath = ModelConfigRepository.snapshot().local.modelPath.ifEmpty { loadedModelPath.orEmpty() }
-            if (modelPath.isNotEmpty()) {
-                val lease = LocalModelRuntime.openConversation(activity, modelPath, buildConversationConfig())
-                engine = lease.engine
-                conversation = lease.conversation
-                isModelReady = true
+            // While a task holds the local model, leave it alone; cleanupAfterTask reloads afterwards.
+            if (modelPath.isNotEmpty() && !isTaskRunning()) {
+                try {
+                    val lease = LocalModelRuntime.openConversation(activity, modelPath, buildConversationConfig())
+                    engine = lease.engine
+                    conversation = lease.conversation
+                    isModelReady = true
+                } catch (e: Exception) {
+                    XLog.e(TAG, "startNewConversationRuntime: open failed", e)
+                }
             }
             postToMain {
+                setButtonsEnabled(isModelReady)
                 addSystem("New conversation started.")
                 onRefreshSidebarHistory()
             }
@@ -625,13 +670,17 @@ class ChatSessionController(
             setButtonsEnabled(false)
             return
         }
-        if (conversation != null) {
-            try {
-                conversation?.close()
-            } catch (_: Exception) {
-            }
+        val oldConversation = conversation
+        if (oldConversation != null) {
             conversation = null
             isModelReady = false
+            // Close on the executor: it may be mid-generation there, and closing from main is a native crash risk.
+            executor.submit {
+                try {
+                    oldConversation.close()
+                } catch (_: Exception) {
+                }
+            }
         }
         loadedModelPath = null
         if (cloudClient == null || cloudModelName != cloud.modelName || !isModelReady) {

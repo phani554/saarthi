@@ -63,7 +63,7 @@ class DefaultAgentService : AgentService {
         private const val LOCAL_TASK_PROMPT = """You are Saarthi, an AI phone assistant controlling an Android phone using tools.
 
 ## Execution Rules
-1. Action Tasks: Use high-level direct tools (send_message, place_call, forward_whatsapp_message, send_distress_signal, find_search_bar, add_to_cart, read_cart) to execute tasks end-to-end in 1 fast step whenever possible.
+1. Action Tasks: Use high-level direct tools (send_message, place_call, send_distress_signal, message_care_contact (chemist auto-order and auto_reply need confirmed=true after the user says yes), find_search_bar, add_to_cart, read_cart) to execute tasks end-to-end in 1 fast step whenever possible.
 2. E-Commerce Cart Completion: When requested items are added to cart and the Cart Summary / "Pay ₹XX" / "View Cart" CTA is visible on screen, DO NOT perform math calculations or audit price discrepancies! (Differences like delivery fees are normal). Call finish(summary="Items added to cart. Total: ₹XX") IMMEDIATELY! Never switch tabs to audit item prices.
 3. Fact / Memory Statements: If user shares a preference, confirm and call finish(summary="Got it! Noted.").
 4. Precision: Never guess or tap random suggestions. When searching for contacts or items, use exact keywords from memory/request.
@@ -167,12 +167,12 @@ class DefaultAgentService : AgentService {
             Handler(Looper.getMainLooper()).post { callback.onLoopStart(0) }
         }
 
-        if (running.get()) {
+        // Atomic check-and-set: two concurrent executeTask calls must not both start.
+        if (!running.compareAndSet(false, true)) {
             callback.onError(0, IllegalStateException("Agent is already running a task"), 0)
             return
         }
 
-        running.set(true)
         cancelled.set(false)
         var terminalCallback: (() -> Unit)? = null
 
@@ -204,7 +204,10 @@ class DefaultAgentService : AgentService {
             }
         }
 
-        currentAgentJob = serviceScope.launch {
+        // LAZY start so currentAgentJob is assigned before the body (and its finally) can run.
+        val taskClient: LlmClient? = if (::llmClient.isInitialized) llmClient else null
+        val job = serviceScope.launch(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            val myJob = coroutineContext[Job]
             try {
                 // Give Compose one frame to render the running/stop controls.
                 yield()
@@ -231,23 +234,34 @@ class DefaultAgentService : AgentService {
                     }
                 }
             } finally {
-                currentAgentJob = null
-                // Close local engine BEFORE clearing running flag so the chat engine
-                // reload (triggered by onComplete/onError) never overlaps with task engine.
-                if (::llmClient.isInitialized) {
-                    try {
-                        llmClient.close()
-                        XLog.i(TAG, "LlmClient closed after task completion")
-                    } catch (e: Exception) {
-                        XLog.w(TAG, "LlmClient close error after task", e)
+                // If a newer task has already replaced this job (cancel() then a new executeTask),
+                // this stale job must not close the new task's engine, clear its job/running state,
+                // or fire a stale "Task cancelled" callback into the new task's UI.
+                val isCurrent = currentAgentJob === myJob
+                if (isCurrent) {
+                    currentAgentJob = null
+                    // Close local engine BEFORE clearing running flag so the chat engine
+                    // reload (triggered by onComplete/onError) never overlaps with task engine.
+                    if (taskClient != null) {
+                        try {
+                            taskClient.close()
+                            XLog.i(TAG, "LlmClient closed after task completion")
+                        } catch (e: Exception) {
+                            XLog.w(TAG, "LlmClient close error after task", e)
+                        }
                     }
+                    running.set(false)
+                    val terminal = terminalCallback
+                    terminalCallback = null
+                    terminal?.invoke()
+                } else {
+                    XLog.i(TAG, "Stale agent job finished after a newer task started; skipping cleanup/callback")
+                    terminalCallback = null
                 }
-                running.set(false)
-                val terminal = terminalCallback
-                terminalCallback = null
-                terminal?.invoke()
             }
         }
+        currentAgentJob = job
+        job.start()
     }
 
     // ==================== Pre-flight Check ====================
@@ -604,6 +618,7 @@ class DefaultAgentService : AgentService {
         var actualModelName: String? = null  // Track the real model name from API response
         val loopHistory = LinkedList<RoundFingerprint>()
         var lastScreenHash = 0
+        var lastToolError: String? = null
         var previousScreenTexts: Set<String> = emptySet()
         val tokenMonitor = TokenMonitor(config.modelName)
         val stuckDetector = StuckDetector()
@@ -611,6 +626,21 @@ class DefaultAgentService : AgentService {
         var softLimitWarned = false
         var hasExecutedTool = false
         var localNoToolNudges = 0
+        var accessibilityNudges = 0
+        // Tasks whose only valid outcome is an action on the phone (a text reply alone cannot complete them).
+        val looksLikeSideEffectTask = lowerPrompt.contains("send ") || lowerPrompt.contains("call ") ||
+            lowerPrompt.contains("dial ") || lowerPrompt.contains("message ") || lowerPrompt.contains("text ") ||
+            lowerPrompt.contains("order") || lowerPrompt.contains("buy ") || lowerPrompt.contains("add ") ||
+            lowerPrompt.contains("open ") || lowerPrompt.contains("tap ") || lowerPrompt.contains("click ") ||
+            lowerPrompt.contains("turn on ") || lowerPrompt.contains("turn off ") || lowerPrompt.contains("install ") ||
+            lowerPrompt.contains("play ") || lowerPrompt.contains("hi to")
+        var guardTextNudges = 0
+        var lastScreenDiffCount = 0
+        var consecutiveActionRounds = 0
+        val taskWantsSettings = lowerPrompt.contains("setting") || lowerPrompt.contains("wifi") ||
+            lowerPrompt.contains("wi-fi") || lowerPrompt.contains("bluetooth") || lowerPrompt.contains("brightness") ||
+            lowerPrompt.contains("permission") || lowerPrompt.contains("airplane") || lowerPrompt.contains("hotspot") ||
+            lowerPrompt.contains("location") || lowerPrompt.contains("volume") || lowerPrompt.contains("display")
         val taskStartTime = System.currentTimeMillis()
         val maxIterations = minOf(config.maxIterations, 30)
         if (config.maxIterations > maxIterations) {
@@ -668,12 +698,14 @@ class DefaultAgentService : AgentService {
             when (taskBudget.check(tokenStatus.totalTokens, tokenStatus.estimatedCostUsd)) {
                 TaskBudget.Status.HARD_LIMIT -> {
                     XLog.w(TAG, "Budget HARD LIMIT reached at step $iterations: ${tokenStatus.formattedTokens} (${tokenStatus.formattedCost})")
-                    callback.onComplete(
+                    // Reported as an error, not a completion: the task was not finished.
+                    callback.onError(
                         iterations,
-                        "Task stopped: budget limit reached (${tokenStatus.formattedTokens} tokens, ${tokenStatus.formattedCost}). " +
-                        "Increase budget in Settings if needed.",
-                        totalTokens,
-                        actualModelName
+                        RuntimeException(
+                            "Task stopped: budget limit reached (${tokenStatus.formattedTokens} tokens, ${tokenStatus.formattedCost}). " +
+                            "Increase budget in Settings if needed."
+                        ),
+                        totalTokens
                     )
                     return
                 }
@@ -692,7 +724,7 @@ class DefaultAgentService : AgentService {
             }
 
             // DEBUG: log raw LLM response for tool calling diagnosis
-            XLog.i(TAG, "runAgentLoop iter=$iterations response.text=${llmResponse.text?.take(500)}")
+            XLog.i(TAG, "runAgentLoop iter=$iterations response.textLen=${llmResponse.text?.length ?: 0}")
             XLog.i(TAG, "runAgentLoop iter=$iterations hasToolCalls=${llmResponse.hasToolExecutionRequests()} toolCallCount=${llmResponse.toolExecutionRequests?.size ?: 0}")
 
             // Add AI message to history (must construct AiMessage)
@@ -730,19 +762,42 @@ class DefaultAgentService : AgentService {
                      responseText.contains("not enabled", ignoreCase = true) ||
                      responseText.contains("enable it", ignoreCase = true))
 
-                // Small local models often "answer" a phone task in words ("I opened WhatsApp")
+                // A task guard (in-app search / email compose / device data) says the work is not done yet:
+                // a text-only "done" is a hallucinated completion. Push back with the guard's correction.
+                if (looksLikeTask && guardTextNudges < 2) {
+                    val guardCorrection = when {
+                        inAppSearchGuard.shouldBlockTextOnlyCompletion() -> inAppSearchGuard.buildCompletionCorrection()
+                        emailComposeGuard.shouldBlockTextOnlyCompletion() -> emailComposeGuard.buildCompletionCorrection()
+                        directDeviceDataGuard.shouldBlockTextOnlyCompletion() -> directDeviceDataGuard.buildCompletionCorrection()
+                        else -> null
+                    }
+                    if (guardCorrection != null) {
+                        guardTextNudges++
+                        XLog.w(TAG, "runAgentLoop: text-only completion blocked by task guard; nudging ($guardTextNudges/2)")
+                        messages.add(UserMessage.from(guardCorrection))
+                        continue
+                    }
+                }
+
+                // Models often "answer" a phone task in words ("Message sent!", "I opened WhatsApp")
                 // without calling any tool. Push back twice before accepting a text-only reply.
-                if (config.provider == LlmProvider.LOCAL && !hasExecutedTool && looksLikeTask && localNoToolNudges < 2) {
+                if (!hasExecutedTool && looksLikeTask && localNoToolNudges < 2) {
                     localNoToolNudges++
-                    XLog.w(TAG, "runAgentLoop: local model replied without a tool call on a task; nudging ($localNoToolNudges/2)")
+                    XLog.w(TAG, "runAgentLoop: model replied without a tool call on a task; nudging ($localNoToolNudges/2)")
                     messages.add(UserMessage.from(
-                        "You have not done anything on the phone yet. Do not describe results. " +
-                        "Reply with exactly one action in this format:\nAction: tool_name\n{\"arg\": \"value\"}"
+                        if (config.provider == LlmProvider.LOCAL) {
+                            "You have not done anything on the phone yet. Do not describe results. " +
+                            "Reply with exactly one action in this format:\nAction: tool_name\n{\"arg\": \"value\"}"
+                        } else {
+                            "You have not done anything on the phone yet. Do not describe results or claim the task is done. " +
+                            "Call the tool for the next step now."
+                        }
                     ))
                     continue
                 }
 
-                if (isHallucinatedAccessibilityError) {
+                if (isHallucinatedAccessibilityError && accessibilityNudges < 1) {
+                    accessibilityNudges++
                     XLog.w(TAG, "runAgentLoop: detected hallucinated accessibility error text from LLM! Injecting tool prompt.")
                     messages.add(UserMessage.from(
                         "[System Notice] Accessibility Service is ALREADY ENABLED and FULLY ACTIVE on this phone. " +
@@ -756,6 +811,17 @@ class DefaultAgentService : AgentService {
                     responseText.isNotEmpty() -> "text-only response"
                     hasExecutedTool -> "empty post-tool response"
                     else -> "empty response"
+                }
+                if (!hasExecutedTool && looksLikeSideEffectTask) {
+                    // Nothing was done on the phone: never report a text-only reply ("Message sent!")
+                    // to a send/call/order/open task as success. Questions answered from the screen are fine.
+                    XLog.w(TAG, "runAgentLoop: phone task ended without any tool call; reporting as not done")
+                    callback.onError(
+                        iterations,
+                        RuntimeException("I couldn't do this on the phone, so nothing was done."),
+                        totalTokens
+                    )
+                    return
                 }
                 val finalAnswer = if (responseText.isNotEmpty()) responseText else ClawApplication.instance.getString(R.string.agent_task_completed)
                 XLog.i(TAG, "runAgentLoop: $completionReason, completing")
@@ -803,7 +869,7 @@ class DefaultAgentService : AgentService {
                 } else null
                 if (blockedFinish != null) {
                     val blockedResult = ToolResult.error(blockedFinish)
-                    XLog.i(TAG, "Task guard blocked premature finish for '$userPrompt'")
+                    XLog.i(TAG, "Task guard blocked premature finish (promptLen=${userPrompt.length})")
                     callback.onToolCall(iterations, toolName, displayName, toolArgs)
                     callback.onToolResult(iterations, toolName, displayName, params.toString(), blockedResult)
                     messages.add(ToolExecutionResultMessage.from(toolRequest, GSON.toJson(blockedResult)))
@@ -815,7 +881,10 @@ class DefaultAgentService : AgentService {
                 directDeviceDataGuard.recordToolAttempt(toolName)
                 emailComposeGuard.recordToolAttempt(toolName)
 
-                TaskExecutionState.instance.setActiveContext("", toolName)
+                val activePkg = try {
+                    ClawAccessibilityService.getConnectedInstance(100L)?.rootInActiveWindow?.packageName?.toString().orEmpty()
+                } catch (_: Exception) { "" }
+                TaskExecutionState.instance.setActiveContext(activePkg, toolName)
                 TaskExecutionState.instance.incrementStep()
 
                 val result = ToolRegistry.getInstance().executeTool(toolName, params)
@@ -841,7 +910,7 @@ class DefaultAgentService : AgentService {
                 }
 
                 // End-to-end direct completion tools: complete task immediately upon tool success (0 extra LLM rounds)
-                val directCompletionTools = setOf("place_call", "send_message", "forward_whatsapp_message", "send_distress_signal", "message_care_contact", "add_to_cart", "update_memory")
+                val directCompletionTools = setOf("place_call", "send_message", "send_distress_signal", "message_care_contact")
                 if (toolName in directCompletionTools && result.isSuccess) {
                     val completionMsg = result.data ?: "✓ $toolName executed successfully"
                     XLog.i(TAG, "Direct completion tool '$toolName' succeeded — completing task end-to-end immediately")
@@ -872,6 +941,7 @@ class DefaultAgentService : AgentService {
                             val added = currentTexts - previousScreenTexts
                             val removed = previousScreenTexts - currentTexts
                             previousScreenTexts = currentTexts
+                            lastScreenDiffCount = added.size + removed.size
                             val diffSection = buildString {
                                 if (added.isNotEmpty()) append("\nNew on screen: ${added.take(10).joinToString(", ")}")
                                 if (removed.isNotEmpty()) append("\nGone from screen: ${removed.take(10).joinToString(", ")}")
@@ -879,7 +949,11 @@ class DefaultAgentService : AgentService {
                             // Chain of Thought Backtracking check for accidental navigation (e.g. Settings / launcher)
                             val service = ClawAccessibilityService.getConnectedInstance(100L)
                             val currentPkg = service?.rootInActiveWindow?.packageName?.toString().orEmpty()
-                            val isAccidentalNav = currentPkg.contains("settings") || currentPkg.contains("permission")
+                            // Never auto-back when the task is about settings, right after open_app, or on the
+                            // runtime permission dialog (CALL_PHONE / SEND_SMS grants need it to stay up).
+                            val isAccidentalNav = !taskWantsSettings && toolName != "open_app" &&
+                                !currentPkg.contains("permissioncontroller") &&
+                                (currentPkg.contains("settings") || currentPkg.contains("permission"))
                             var backtrackNotice = ""
                             if (isAccidentalNav && service != null) {
                                 XLog.w(TAG, "Chain of Thought Backtracking: accidental navigation to '$currentPkg' detected! Pressing Back.")
@@ -915,22 +989,40 @@ class DefaultAgentService : AgentService {
                     if (loopHistory.size > LOOP_DETECT_WINDOW) loopHistory.removeFirst()
                 }
 
+                lastToolError = if (result.isSuccess) null else (result.error ?: "error")
+
                 // Add tool result to messages
                 messages.add(ToolExecutionResultMessage.from(toolRequest, combinedResultData))
                 XLog.d(TAG, "displayName:$displayName toolName:$toolName")
+            }
+
+            // Dead-loop: same tool call on the same screen for LOOP_DETECT_WINDOW rounds → stop honestly.
+            if (isStuckInLoop(loopHistory)) {
+                XLog.w(TAG, "runAgentLoop: dead loop detected (same action on same screen ${LOOP_DETECT_WINDOW}x), stopping")
+                callback.onError(
+                    iterations,
+                    RuntimeException("I kept repeating the same step without progress, so I stopped. The task is not finished."),
+                    totalTokens
+                )
+                return
             }
 
             // Stuck detection & Active Auto-Recovery
             val lastAction = llmResponse.toolExecutionRequests?.firstOrNull()?.let {
                 "${it.name()}:${it.arguments()?.take(50)}"
             } ?: ""
-            val screenDiffCount = (previousScreenTexts as? Set<*>)?.size ?: 0
-            val detection = stuckDetector.record(TaskExecutionState.instance.activePackageName, lastAction, lastScreenHash, screenDiffCount, null)
+            val roundHadAction = llmResponse.toolExecutionRequests?.any { (it.name() ?: "") in ACTION_TOOLS } == true
+            consecutiveActionRounds = if (roundHadAction) consecutiveActionRounds + 1 else 0
+            // Diff only means something after an action round (the screen was re-read); otherwise report "changed".
+            val screenDiffCount = if (roundHadAction) lastScreenDiffCount else 1
+            val detection = stuckDetector.record(TaskExecutionState.instance.activePackageName, lastAction, lastScreenHash, screenDiffCount, lastToolError)
             if (detection != null) {
                 XLog.w(TAG, "StuckDetector ${detection.level} at iteration $iterations: ${detection.signal.description}")
 
                 val service = ClawAccessibilityService.getConnectedInstance(1000L)
-                if (service != null && (detection.level == StuckDetector.RecoveryLevel.AUTO_DISMISS || detection.level == StuckDetector.RecoveryLevel.STRATEGY_SWITCH)) {
+                // Only press BACK / dismiss when the last 3 rounds were real actions: an unchanged hash
+                // after read-only tools is not evidence of a stuck screen.
+                if (service != null && consecutiveActionRounds >= 3 && (detection.level == StuckDetector.RecoveryLevel.AUTO_DISMISS || detection.level == StuckDetector.RecoveryLevel.STRATEGY_SWITCH)) {
                     val root = service.rootInActiveWindow
                     if (root != null) {
                         try {

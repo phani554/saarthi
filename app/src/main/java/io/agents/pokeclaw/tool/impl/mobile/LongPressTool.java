@@ -56,6 +56,11 @@ public class LongPressTool extends BaseTool {
         String boundsError = validateCoordinates(x, y);
         if (boundsError != null) return ToolResult.error(boundsError);
         long duration = optionalLong(params, "duration_ms", 1000);
+        // Clamp: >5s outlives dispatchGestureSync's wait, >60s makes StrokeDescription throw.
+        duration = Math.max(100, Math.min(duration, 3000));
+        // A long press on a plain View still ends in performClick(), so gate it like a tap.
+        String payBlock = BaseTool.paymentGestureBlock(service.getRootInActiveWindow(), x, y, x, y);
+        if (payBlock != null) return ToolResult.error(payBlock);
         boolean success = service.performLongPress(x, y, duration);
         return success ? ToolResult.success("Long pressed at (" + x + ", " + y + ") for " + duration + "ms")
                 : ToolResult.error("Failed to long press at (" + x + ", " + y + ")");

@@ -3,8 +3,13 @@
 
 package io.agents.pokeclaw.tool
 
+import android.graphics.Rect
+import android.view.accessibility.AccessibilityNodeInfo
 import com.blankj.utilcode.util.ScreenUtils
+import io.agents.pokeclaw.agent.PaymentGate
 import io.agents.pokeclaw.service.ClawAccessibilityService
+import io.agents.pokeclaw.utils.ContactListUiUtils
+import io.agents.pokeclaw.utils.ContactMatchUtils
 
 abstract class BaseTool {
 
@@ -24,6 +29,108 @@ abstract class BaseTool {
             "Optional: milliseconds to wait after this action completes for UI settle (e.g. 700). Default 700.",
             false
         )
+
+        private val SLIDE_TO_PAY = Regex(
+            """(slide|swipe|drag)\s+(right\s+)?to\s+(pay|order|place|confirm|buy|checkout)""",
+            RegexOption.IGNORE_CASE
+        )
+
+        /**
+         * Gesture-level payment stop for long-press and swipe, which do not go through
+         * ClawAccessibilityService.performTap's PaymentGate check. Returns an error message
+         * when the gesture touches a pay / place-order control, or a "slide/swipe to pay"
+         * slider lies near the gesture path; null when the gesture is allowed.
+         */
+        @JvmStatic
+        fun paymentGestureBlock(
+            root: AccessibilityNodeInfo?,
+            startX: Int, startY: Int, endX: Int, endY: Int
+        ): String? {
+            if (root == null) return null
+            if (PaymentGate.isPaymentAt(root, startX, startY) || PaymentGate.isPaymentAt(root, endX, endY)) {
+                return "Blocked: that is a payment / place-order control. The user must complete payment themselves."
+            }
+            val pad = 150
+            val path = Rect(
+                minOf(startX, endX) - pad, minOf(startY, endY) - pad,
+                maxOf(startX, endX) + pad, maxOf(startY, endY) + pad
+            )
+            return if (slideToPayNear(root, path, 0)) {
+                "Blocked: a slide/swipe-to-pay control is on that path. The user must complete payment themselves."
+            } else null
+        }
+
+        /**
+         * Tool-side PaymentGate check that also covers what clickNode can end up clicking:
+         * the node and its labels up to 3 levels down, then each ancestor up to and including
+         * the first clickable one (clickNode clicks that parent without re-checking it).
+         */
+        @JvmStatic
+        fun isPaymentNodeOrAncestor(node: AccessibilityNodeInfo?): Boolean {
+            var n: AccessibilityNodeInfo? = node
+            var depth = 0
+            while (n != null && depth < 8) {
+                if (PaymentGate.isPaymentNode(n) || subtreeHasPayLabel(n, 0)) return true
+                if (n.isClickable) break
+                n = n.parent
+                depth++
+            }
+            return false
+        }
+
+        private fun subtreeHasPayLabel(node: AccessibilityNodeInfo?, depth: Int): Boolean {
+            if (node == null || depth > 3) return false
+            if (PaymentGate.isPaymentLabel(node.text?.toString()) ||
+                PaymentGate.isPaymentLabel(node.contentDescription?.toString())) return true
+            for (i in 0 until minOf(node.childCount, 12)) {
+                if (subtreeHasPayLabel(node.getChild(i), depth + 1)) return true
+            }
+            return false
+        }
+
+        /**
+         * True when WhatsApp has the chat with [contact] open: the screen is an open chatroom and
+         * the conversation title (by id; the top text band only as a fallback) names the contact.
+         * Editable nodes (the search box holding the typed name) never count.
+         */
+        @JvmStatic
+        fun isWhatsAppChatWith(root: AccessibilityNodeInfo?, contact: String): Boolean {
+            if (root == null) return false
+            if (!ContactListUiUtils.isOpenChatroom(root)) return false
+            val names = ContactMatchUtils.buildNormalizedAliases(contact)
+            val digits = ContactMatchUtils.buildDigitAliases(contact)
+            val titles = mutableListOf<AccessibilityNodeInfo>()
+            for (id in arrayOf("com.whatsapp:id/conversation_contact_name", "com.whatsapp.w4b:id/conversation_contact_name")) {
+                try { root.findAccessibilityNodeInfosByViewId(id)?.let { titles.addAll(it) } } catch (_: Exception) { }
+            }
+            if (titles.isEmpty()) collectTopText(root, titles, 0)
+            return titles.any { n ->
+                !n.isEditable && ContactMatchUtils.matchesTarget(n.text, n.contentDescription, names, digits)
+            }
+        }
+
+        private fun collectTopText(node: AccessibilityNodeInfo?, out: MutableList<AccessibilityNodeInfo>, depth: Int) {
+            if (node == null || depth > 40 || !node.isVisibleToUser) return
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            if (r.top < 350 && (node.text != null || node.contentDescription != null)) out.add(node)
+            for (i in 0 until node.childCount) collectTopText(node.getChild(i), out, depth + 1)
+        }
+
+        private fun slideToPayNear(node: AccessibilityNodeInfo?, area: Rect, depth: Int): Boolean {
+            if (node == null || depth > 40) return false
+            val r = Rect()
+            node.getBoundsInScreen(r)
+            if (Rect.intersects(r, area)) {
+                val t = node.text?.toString().orEmpty()
+                val d = node.contentDescription?.toString().orEmpty()
+                if (SLIDE_TO_PAY.containsMatchIn(t) || SLIDE_TO_PAY.containsMatchIn(d)) return true
+            }
+            for (i in 0 until node.childCount) {
+                if (slideToPayNear(node.getChild(i), area, depth + 1)) return true
+            }
+            return false
+        }
     }
 
     abstract fun getName(): String

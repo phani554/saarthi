@@ -28,9 +28,21 @@ object KBManager {
     // ── Vault root ────────────────────────────────────────────────────────────
 
     private fun vaultDir(): File {
-        val dir = File(ClawApplication.instance.getExternalFilesDir(null), VAULT_SUBDIR)
+        // getExternalFilesDir() returns null when shared storage is unavailable; never fall back to a relative path.
+        val base = ClawApplication.instance.getExternalFilesDir(null) ?: ClawApplication.instance.filesDir
+        val dir = File(base, VAULT_SUBDIR)
         if (!dir.exists()) dir.mkdirs()
         return dir
+    }
+
+    /** Memory file that feeds every system prompt; the agent's KB tools must not write it. */
+    private const val PROTECTED_MEMORY_FILE = "user_preferences.md"
+
+    /** True when [path] resolves to the protected memory file (same normalisation as [resolve]). */
+    fun isProtectedPath(path: String): Boolean {
+        val norm = path.trimStart('/').replace("..", "")
+            .split('/').filter { it.isNotEmpty() && it != "." }.joinToString("/")
+        return norm.equals(PROTECTED_MEMORY_FILE, ignoreCase = true)
     }
 
     /** Resolve a caller-supplied relative path safely (no traversal). */

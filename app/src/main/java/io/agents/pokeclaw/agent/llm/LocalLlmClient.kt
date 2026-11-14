@@ -20,11 +20,16 @@ import dev.langchain4j.agent.tool.ToolSpecification
 import dev.langchain4j.data.message.AiMessage
 import dev.langchain4j.data.message.ChatMessage
 import dev.langchain4j.data.message.SystemMessage
+import dev.langchain4j.data.message.TextContent
 import dev.langchain4j.data.message.ToolExecutionResultMessage
 import dev.langchain4j.data.message.UserMessage
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.util.LinkedHashMap
+import java.util.concurrent.CopyOnWriteArraySet
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -51,9 +56,44 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
     // Engine is owned by the shared local runtime.
     // We keep a local reference only for null-check convenience.
     private var engine: Engine? = null
-    private var conversation: com.google.ai.edge.litertlm.Conversation? = null
+    @Volatile private var conversation: com.google.ai.edge.litertlm.Conversation? = null
     private var processedMessageCount = 0
     private var activeBackendLabel: String = "unknown"
+
+    // Guards native calls on a Conversation: close() must never free a conversation while
+    // sendMessage() is still decoding on another thread (use-after-free -> SIGSEGV on Stop).
+    private val convLock = ReentrantLock()
+    @Volatile private var inFlight: com.google.ai.edge.litertlm.Conversation? = null
+    private val pendingClose = CopyOnWriteArraySet<com.google.ai.edge.litertlm.Conversation>()
+
+    /**
+     * Close [conv] safely: cancel a running decode, wait briefly for it to return, then close.
+     * If the native call is still running after the wait, the sending thread closes it when it returns.
+     */
+    private fun releaseConversation(conv: com.google.ai.edge.litertlm.Conversation?) {
+        if (conv == null) return
+        pendingClose.add(conv)
+        if (inFlight === conv) {
+            try { conv.cancelProcess() } catch (e: Exception) { XLog.w(TAG, "cancelProcess error", e) }
+        }
+        var locked = false
+        try {
+            locked = convLock.tryLock(CLOSE_WAIT_MS, TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        if (locked) {
+            try {
+                if (pendingClose.remove(conv)) conv.close()
+            } catch (e: Exception) {
+                XLog.w(TAG, "close conversation error", e)
+            } finally {
+                convLock.unlock()
+            }
+        } else {
+            XLog.w(TAG, "releaseConversation: native call still running, conversation will close when it returns")
+        }
+    }
 
     private fun ensureEngine() {
         val modelPath = config.baseUrl
@@ -81,8 +121,9 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
      */
     private fun createConversation(systemPrompt: String, toolSpecs: List<ToolSpecification>) {
         // LiteRT-LM only supports one session at a time — close existing first
-        try { conversation?.close() } catch (_: Exception) {}
+        val old = conversation
         conversation = null
+        releaseConversation(old)
 
         val promptWithManualTools = buildManualToolPrompt(systemPrompt, toolSpecs)
         XLog.i(TAG, "createConversation: sdk tools hidden, manual tool schemas injected (${toolSpecs.size})")
@@ -167,6 +208,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
     }
 
     private var sendCount = 0
+    private var pendingRecap = false // recap still owed to a rebuilt session (survives a failed send)
     private var originalTask: String = ""
     private val recentActions = ArrayDeque<String>()
 
@@ -193,10 +235,11 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
                 ?: config.systemPrompt.ifEmpty { LOCAL_SYSTEM_PROMPT }
             createConversation(systemPrompt, toolSpecs)
             sendCount = 0
+            pendingRecap = needsRebuild
             if (isNewTask) {
                 processedMessageCount = 0
                 recentActions.clear()
-                originalTask = messages.filterIsInstance<UserMessage>().firstOrNull()?.singleText()?.take(600).orEmpty()
+                originalTask = messages.filterIsInstance<UserMessage>().firstOrNull()?.let { userText(it) }?.take(600).orEmpty()
             }
         }
 
@@ -209,7 +252,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
         // and every sendMessage makes the model generate a reply: the discarded in-between replies
         // stayed in the conversation and the model then "remembered" actions it never took.
         val parts = mutableListOf<String>()
-        if (needsRebuild) {
+        if (pendingRecap) {
             // Old code replayed every user/tool message (without the model's own actions) into the
             // fresh session. Now: one compact recap.
             parts += "Task: $originalTask"
@@ -221,7 +264,7 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             when (msg) {
                 is SystemMessage -> { /* handled in createConversation */ }
                 is UserMessage -> {
-                    val text = msg.singleText()
+                    val text = userText(msg)
                     parts += text.take(LOCAL_MAX_USER_CHARS)
                 }
                 is AiMessage -> {
@@ -240,30 +283,59 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             }
         }
 
+        val allowedTools = toolSpecs.map { it.name() }.toSet()
         var lastResponse: Any? = null
         val payload = parts.filter { it.isNotBlank() }.joinToString("\n\n")
         if (payload.isNotBlank()) {
             lastResponse = send(payload)
+            pendingRecap = false
             // One correction round if the model wrote "Action:" but the JSON was unusable,
             // instead of treating the broken text as the final answer.
             val rawText = (lastResponse as? Message)?.contents?.toString()?.trim().orEmpty()
-            val parsed = extractToolCalls(rawText)
+            val parsed = extractToolCalls(rawText, allowedTools)
             if (parsed.hasToolCalls && parsed.requests.isEmpty()) {
                 XLog.w(TAG, "chat: malformed tool call, asking model to repeat it once")
                 lastResponse = send("Your last action could not be parsed. Reply again with exactly:\nAction: tool_name\n{\"arg\": \"value\"}")
+                val retryText = (lastResponse as? Message)?.contents?.toString()?.trim().orEmpty()
+                val retryParsed = extractToolCalls(retryText, allowedTools)
+                if (retryParsed.hasToolCalls && retryParsed.requests.isEmpty()) {
+                    // Never hand the pre-action "I'll send it now" text back as a final answer.
+                    XLog.w(TAG, "chat: tool call still unparseable after retry, reporting failure")
+                    processedMessageCount = messages.size
+                    return LlmResponse(text = UNPARSEABLE_ACTION_TEXT, toolExecutionRequests = emptyList())
+                }
             }
         }
 
         processedMessageCount = messages.size
-        return parseResponse(lastResponse)
+        return parseResponse(lastResponse, allowedTools)
     }
+
+    /** Text of a user message; never throws on multi-part (e.g. image) messages. */
+    private fun userText(msg: UserMessage): String =
+        if (msg.hasSingleText()) msg.singleText()
+        else msg.contents().filterIsInstance<TextContent>().joinToString("\n") { it.text() }
 
     private suspend fun send(text: String): Any? {
         val conv = conversation ?: throw RuntimeException("LiteRT-LM conversation not initialized — engine may have failed to load the model")
         XLog.i(TAG, "chat: roundSend backend=$activeBackendLabel sendCount=$sendCount chars=${text.length}")
         val response = withContext(Dispatchers.Default) {
             currentCoroutineContext().ensureActive()
-            conv.sendMessage(text)
+            convLock.lock()
+            try {
+                if (conversation !== conv || pendingClose.contains(conv)) {
+                    throw CancellationException("LiteRT-LM conversation was closed")
+                }
+                inFlight = conv
+                conv.sendMessage(text)
+            } finally {
+                inFlight = null
+                // close() gave up waiting for this call: close the conversation now that native returned.
+                if (pendingClose.remove(conv)) {
+                    try { conv.close() } catch (e: Exception) { XLog.w(TAG, "deferred close error", e) }
+                }
+                convLock.unlock()
+            }
         }
         sendCount++
         return response
@@ -285,13 +357,16 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
     }
 
     /** Parse LiteRT-LM response into LlmResponse using raw-string tool call parsing. */
-    private fun parseResponse(response: Any?): LlmResponse {
+    private fun parseResponse(response: Any?, allowedTools: Set<String>): LlmResponse {
         if (response is Message) {
             val rawText = response.contents.toString().trim()
-            val parseResult = extractToolCalls(rawText)
+            val parseResult = extractToolCalls(rawText, allowedTools)
             if (parseResult.hasToolCalls) {
                 // Text before the action only (anything after it is usually a made-up result).
-                val thinkingText = rawText.substringBefore("Action:").trim().ifEmpty { null }
+                val actionStart = ACTION_NAME_PATTERN.findAll(rawText).firstOrNull {
+                    it.value.startsWith("Action:") || allowedTools.isEmpty() || it.groupValues[1].trim() in allowedTools
+                }?.range?.first ?: rawText.length
+                val thinkingText = rawText.substring(0, actionStart).trim().ifEmpty { null }
                 return LlmResponse(text = thinkingText, toolExecutionRequests = parseResult.requests)
             }
             return LlmResponse(text = rawText.ifEmpty { null }, toolExecutionRequests = emptyList())
@@ -303,14 +378,21 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
         )
     }
 
-    private fun extractToolCalls(text: String): ToolParseResult {
+    private fun extractToolCalls(text: String, allowedTools: Set<String>): ToolParseResult {
         val calls = mutableListOf<ToolExecutionRequest>()
         var hasToolCalls = false
         val mapType = object : TypeToken<Map<String, Any?>>() {}.type
 
         ACTION_NAME_PATTERN.findAll(text).forEachIndexed { idx, match ->
-            hasToolCalls = true
             val name = match.groupValues[1].trim()
+            val known = allowedTools.isEmpty() || name in allowedTools
+            // Lower-case prose like "next action: I will..." is not a tool call.
+            if (!known && !match.value.startsWith("Action:")) return@forEachIndexed
+            hasToolCalls = true
+            if (!known) {
+                XLog.w(TAG, "Unknown tool in action: $name")
+                return@forEachIndexed
+            }
             // Balanced-brace scan (old lazy regex cut JSON at the first "}" and broke nested args).
             val argsJson = balancedJsonAfter(text, match.range.last + 1) ?: if (name in ZERO_ARG_TOOLS) "{}" else null
             if (argsJson == null) {
@@ -360,10 +442,12 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
 
     override fun close() {
         XLog.i(TAG, "close() — closing conversation only (engine stays in EngineHolder)")
-        try { conversation?.close() } catch (e: Exception) { XLog.w(TAG, "close conversation error", e) }
+        val conv = conversation
         conversation = null
+        releaseConversation(conv)
         engine = null
         processedMessageCount = 0
+        pendingRecap = false
         XLog.i(TAG, "close() — done")
     }
 
@@ -375,6 +459,8 @@ class LocalLlmClient(private val config: AgentConfig) : LlmClient {
             options = setOf(RegexOption.IGNORE_CASE)
         )
 
+        private const val CLOSE_WAIT_MS = 1500L // close() may run on the main thread (Stop): keep it short
+        private const val UNPARSEABLE_ACTION_TEXT = "I couldn't complete that step on the phone."
         private const val MAX_SENDS_PER_SESSION = 4 // keeps a session well inside the KV cache; recap carries state
         private const val LOCAL_MAX_TOOL_RESULT_CHARS = 2000 // was 400: the model could not see the screen
         private const val LOCAL_MAX_USER_CHARS = 3500

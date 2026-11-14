@@ -89,18 +89,21 @@ public class SystemKeyTool extends BaseTool {
                 success = service.unlockScreen();
                 successMsg = "Screen unlock requested";
                 break;
-            case "enter":
-                try {
-                    Runtime.getRuntime().exec(new String[]{"input", "keyevent", String.valueOf(android.view.KeyEvent.KEYCODE_ENTER)}).waitFor();
-                    success = true;
-                } catch (Exception e) { success = false; }
+            case "enter": {
+                // An app uid cannot inject key events (no INJECT_EVENTS), so use the IME action on
+                // the focused field; fall back to the shell only if its exit code says it worked.
+                android.view.accessibility.AccessibilityNodeInfo root = service.getRootInActiveWindow();
+                android.view.accessibility.AccessibilityNodeInfo focused = root != null
+                        ? root.findFocus(android.view.accessibility.AccessibilityNodeInfo.FOCUS_INPUT) : null;
+                success = focused != null && service.performImeAction(focused);
+                if (!success) {
+                    success = shellKeyEvent(android.view.KeyEvent.KEYCODE_ENTER);
+                }
                 successMsg = "Pressed Enter key";
                 break;
+            }
             case "tab":
-                try {
-                    Runtime.getRuntime().exec(new String[]{"input", "keyevent", String.valueOf(android.view.KeyEvent.KEYCODE_TAB)}).waitFor();
-                    success = true;
-                } catch (Exception e) { success = false; }
+                success = shellKeyEvent(android.view.KeyEvent.KEYCODE_TAB);
                 successMsg = "Pressed Tab key";
                 break;
             default:
@@ -109,5 +112,18 @@ public class SystemKeyTool extends BaseTool {
 
         return success ? ToolResult.success(successMsg)
                 : ToolResult.error("Failed to execute " + key);
+    }
+
+    /** Shell "input keyevent"; true only when the command exits 0. */
+    private static boolean shellKeyEvent(int keyCode) {
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{"input", "keyevent", String.valueOf(keyCode)});
+            return p.waitFor() == 0;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Exception e) {
+            return false;
+        }
     }
 }

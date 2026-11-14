@@ -206,7 +206,22 @@ class WeChatApiClient(
         if (rawText != null && rawText.isNotEmpty() && rawText != "{}") {
             XLog.i(TAG, "sendMessage response: $rawText")
         }
-        return rawText != null
+        if (rawText == null) return false
+        // HTTP 200 can still carry an API error in ret / errcode.
+        val apiError = try {
+            if (rawText.isBlank()) 0 else {
+                val json = JSONObject(rawText)
+                val ret = json.optInt("ret", 0)
+                if (ret != 0) ret else json.optInt("errcode", 0)
+            }
+        } catch (_: Exception) {
+            0
+        }
+        if (apiError != 0) {
+            XLog.w(TAG, "sendMessage API error: $apiError")
+            return false
+        }
+        return true
     }
 
     /**

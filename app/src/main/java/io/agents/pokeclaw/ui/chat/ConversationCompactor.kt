@@ -73,10 +73,18 @@ object ConversationCompactor {
 History:
 $olderText"""
 
-            val response = tempConversation.sendMessage(prompt)
-            val digest = response?.toString()?.trim() ?: return null
-
-            tempConversation.close()
+            // Always close the temporary session: a leaked one shows up as "session already exists" /
+            // "Model busy" for every later chat or local task until the app restarts.
+            val digest = try {
+                val response = tempConversation.sendMessage(prompt)
+                response?.toString()?.trim()
+            } finally {
+                try {
+                    tempConversation.close()
+                } catch (e: Exception) {
+                    XLog.w(TAG, "Compaction: temp conversation close failed", e)
+                }
+            } ?: return null
 
             // Save digest to .memory.md
             saveDigest(context, conversationId, digest, messages)

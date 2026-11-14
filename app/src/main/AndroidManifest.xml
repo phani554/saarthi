@@ -113,7 +113,8 @@
 
         <receiver
             android:name=".debug.DebugTaskReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="io.agents.pokeclaw.DEBUG_TASK" />
             </intent-filter>
@@ -185,7 +186,8 @@
         <!-- Debug: trigger tasks via ADB broadcast -->
         <receiver
             android:name=".debug.TaskTriggerReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="android.permission.DUMP">
             <intent-filter>
                 <action android:name="io.agents.pokeclaw.TASK" />
             </intent-filter>

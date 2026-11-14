@@ -53,7 +53,9 @@ public class AutoReplyTool extends BaseTool {
                 new ToolParameter("contact", "string",
                         "The contact name to monitor (required when action='on')", false),
                 new ToolParameter("app", "string",
-                        "Messaging app name to monitor (default: WhatsApp)", false)
+                        "Messaging app name to monitor (default: WhatsApp)", false),
+                new ToolParameter("confirmed", "boolean",
+                        "Set true only after the user explicitly said yes to auto-replies being sent in their name (required for action='on')", false)
         );
     }
 
@@ -69,15 +71,19 @@ public class AutoReplyTool extends BaseTool {
         }
 
         if (action.equals("on") || action.equals("enable") || action.equals("start")) {
-            String rawContact = params.containsKey("contact")
-                    ? String.valueOf(params.get("contact")).trim()
-                    : "";
+            // optionalString maps a present-but-null value to the default instead of the string "null".
+            String rawContact = optionalString(params, "contact", "").trim();
+            if (rawContact.equalsIgnoreCase("null")) rawContact = "";
             String contact = io.agents.pokeclaw.agent.knowledge.ContactAliasResolver.INSTANCE.resolve(rawContact);
-            String app = params.containsKey("app")
-                    ? String.valueOf(params.get("app")).trim()
-                    : "WhatsApp";
+            String app = optionalString(params, "app", "WhatsApp").trim();
+            if (app.isEmpty() || app.equalsIgnoreCase("null")) app = "WhatsApp";
             if (contact.isEmpty()) {
                 return ToolResult.error("Contact name is required when enabling auto-reply.");
+            }
+            // Replies go out in the user's name: never switch this on from model or message text alone.
+            if (!optionalBoolean(params, "confirmed", false)) {
+                return ToolResult.error("CONFIRMATION NEEDED, auto-reply NOT enabled. Ask the user: should I automatically reply to "
+                        + contact + " on " + app + " in your name? Only if they say yes, call auto_reply again with confirmed=true.");
             }
             manager.addTarget(contact, app);
             manager.setEnabled(true);

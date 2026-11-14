@@ -111,7 +111,8 @@ public class ClipboardTool extends BaseTool {
 
         try {
             latch.await(2, TimeUnit.SECONDS);
-        } catch (InterruptedException ignored) {
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
 
         return result[0]

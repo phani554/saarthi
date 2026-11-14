@@ -57,7 +57,9 @@ object HybridMemoryRepository : MemoryRepository {
     private val loggingInterceptor = HttpLoggingInterceptor { message ->
         XLog.d(TAG, "OkHttp: $message")
     }.apply {
-        level = HttpLoggingInterceptor.Level.BODY
+        // Headers only, with the Mem0 token redacted: BODY logged the key and whole conversations.
+        level = HttpLoggingInterceptor.Level.HEADERS
+        redactHeader("Authorization")
     }
 
     private val okHttpClient = OkHttpClient.Builder()

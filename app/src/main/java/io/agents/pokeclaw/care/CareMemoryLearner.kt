@@ -18,9 +18,11 @@ object CareMemoryLearner {
     fun learnFast(text: String): String? {
         val role = CareRoles.fromWords(text) ?: return null
         val phone = PHONE.find(text)?.value?.trim() ?: return null
-        CareProfileStore.upsertContact(CareContact(role = role, phone = phone))
-        XLog.i(TAG, "Saved $role number from conversation")
-        return "${CareRoles.displayName(role)} number saved"
+        // Heard numbers are saved as pending: they never replace a saved contact and never join
+        // the SOS chain until the user confirms them in Care profile.
+        if (!CareProfileStore.addLearnedContact(CareContact(role = role, phone = phone))) return null
+        XLog.i(TAG, "Saved pending $role number from conversation")
+        return "${CareRoles.displayName(role)} number noted (please confirm it in Care profile)"
     }
 
     /** Prompt section asking the model for structured care facts alongside the plain fact. */
@@ -44,7 +46,7 @@ Only include what the user actually said. Use empty lists when nothing applies."
                     if (role !in CareRoles.ALL) continue
                     val name = c.optString("name").trim(); val phone = c.optString("phone").trim()
                     if (name.isBlank() && phone.isBlank()) continue
-                    CareProfileStore.upsertContact(CareContact(role, name, phone, c.optString("relation").trim()))
+                    CareProfileStore.addLearnedContact(CareContact(role, name, phone, c.optString("relation").trim()))
                 }
             }
             o.optJSONArray("conditions")?.let { arr ->

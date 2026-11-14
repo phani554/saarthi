@@ -50,11 +50,9 @@ class ReadCartTool : BaseTool() {
         )
 
         val cartPriceNode = NodeFinder.findNodeByIdOrText(root,
+            // Cart-total ids only: tv_price is a per-product price on listing pages.
             "com.grofers.customerapp:id/tv_cart_price",
-            "com.grofers.customerapp:id/tv_price",
             "com.zeptoconsumerapp:id/tv_cart_price",
-            "com.zeptoconsumerapp:id/tv_price",
-            "com.flipkart.android:id/tv_price",
             "com.flipkart.android:id/cart_total"
         )
 
@@ -69,9 +67,11 @@ class ReadCartTool : BaseTool() {
             "view cart", "go to cart"
         )
 
-        // Collect visible cart item titles
+        // Item titles only on the cart / checkout screen itself; on a search or listing page every
+        // product title used to be reported as "in the cart".
+        val onCartScreen = isCartScreen(root)
         val itemTitles = mutableListOf<String>()
-        collectCartItemTitles(root, itemTitles)
+        if (onCartScreen) collectCartItemTitles(root, itemTitles)
 
         val hasCartBar = cartCountNode != null || cartPriceNode != null || viewCartBtn != null || itemTitles.isNotEmpty()
 
@@ -84,12 +84,21 @@ class ReadCartTool : BaseTool() {
                     append(" Item List: ").append(itemTitles.take(8).joinToString(", "))
                 }
                 if (viewCartBtn != null) append(" [View Cart button active]")
+                if (!onCartScreen) append(" (Not on the cart screen: item names are not listed. Open the cart to see them.)")
             }
             XLog.i("ReadCartTool", summary)
             ToolResult.success(summary)
         } else {
             ToolResult.success("Cart is currently empty or no cart summary bar visible on $pkg.")
         }
+    }
+
+    private fun isCartScreen(root: AccessibilityNodeInfo): Boolean {
+        val marker = NodeFinder.findNodeByIdOrText(root,
+            "cart_item", "cart_recycler", "cart_list", "checkout",
+            "my cart", "your cart", "bill details", "price details", "bill summary", "to pay"
+        )
+        return marker != null
     }
 
     private fun collectCartItemTitles(node: AccessibilityNodeInfo?, results: MutableList<String>) {
@@ -105,7 +114,7 @@ class ReadCartTool : BaseTool() {
             return // Skip promotional widget sub-trees completely
         }
 
-        if ((resId.contains("item_title") || resId.contains("tv_item_name") || resId.contains("product_name") || resId.contains("title")) && text.length > 2) {
+        if ((resId.contains("item_title") || resId.contains("tv_item_name") || resId.contains("product_name") || resId.contains("cart_item")) && text.length > 2) {
             if (!results.contains(text) && !text.equals("view cart", ignoreCase = true) && !text.contains("total", ignoreCase = true) && !text.contains("price details", ignoreCase = true)) {
                 results.add(text)
             }

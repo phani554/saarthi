@@ -20,7 +20,7 @@ public final class UiTextMatchUtils {
         if (value == null) return "";
         return value
                 .trim()
-                .replaceAll("[^\\p{L}\\p{Nd}]+", " ")
+                .replaceAll("[^\\p{L}\\p{M}\\p{Nd}]+", " ")
                 .replaceAll("\\s+", " ")
                 .trim()
                 .toLowerCase(Locale.ROOT);

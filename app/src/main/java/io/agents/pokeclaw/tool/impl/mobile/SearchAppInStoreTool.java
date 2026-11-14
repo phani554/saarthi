@@ -48,7 +48,7 @@ public class SearchAppInStoreTool extends BaseTool {
 
     private static final String[][] FALLBACK_STORES = {
             {"com.tencent.android.qqdownloader", "Tencent MyApp"},
-            {"com.google.android.apps.market",   "Google Play Store"},
+            {"com.android.vending",              "Google Play Store"},
     };
 
     @Override

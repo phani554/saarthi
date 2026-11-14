@@ -14,6 +14,9 @@ import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import io.agents.pokeclaw.utils.XLog
 import fi.iki.elonen.NanoHTTPD
+import java.io.File
+import java.security.MessageDigest
+import java.security.SecureRandom
 
 /**
  * LAN HTTP configuration server
@@ -29,18 +32,80 @@ class ConfigServer(
         const val PORT = 9527
         private const val MIME_HTML = "text/html"
         private const val MIME_JSON = "application/json"
+        private const val TOKEN_HEADER = "x-config-token"
+        private const val TOKEN_COOKIE = "saathi_cfg_token"
     }
 
     private val gson = Gson()
 
+    /**
+     * Random per-start access token. Every server instance (one per ConfigServerManager.start)
+     * gets a fresh one. Opening "/?token=<token>" sets a SameSite=Strict, HttpOnly cookie so the
+     * bundled H5 page's same-origin fetches carry it; scripts can also send it in X-Config-Token.
+     */
+    val token: String = SecureRandom().let { rnd ->
+        val bytes = ByteArray(24)
+        rnd.nextBytes(bytes)
+        bytes.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun tokenMatches(candidate: String?): Boolean {
+        if (candidate.isNullOrEmpty()) return false
+        return MessageDigest.isEqual(candidate.toByteArray(Charsets.UTF_8), token.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun hasValidToken(session: IHTTPSession): Boolean {
+        if (tokenMatches(session.headers[TOKEN_HEADER])) return true
+        val cookie = try { session.cookies?.read(TOKEN_COOKIE) } catch (_: Exception) { null }
+        return tokenMatches(cookie)
+    }
+
+    /** Loopback only: reject other Host values (DNS rebinding) and foreign Origins. */
+    private fun isAllowedHostAndOrigin(session: IHTTPSession): Boolean {
+        val port = listeningPort
+        val allowedHosts = setOf("127.0.0.1:$port", "localhost:$port")
+        val host = session.headers["host"]?.trim()?.lowercase()
+        if (host == null || host !in allowedHosts) return false
+        val origin = session.headers["origin"]?.trim()?.lowercase()
+        if (origin != null && origin != "http://127.0.0.1:$port" && origin != "http://localhost:$port") return false
+        return true
+    }
+
+    private fun isJsonContentType(session: IHTTPSession): Boolean {
+        val ct = session.headers["content-type"]?.lowercase() ?: return false
+        return ct.startsWith(MIME_JSON)
+    }
+
+    private fun jsonError(status: Response.Status, message: String): Response {
+        val obj = JsonObject().apply {
+            addProperty("code", -1)
+            addProperty("message", message)
+        }
+        return corsResponse(newFixedLengthResponse(status, MIME_JSON, obj.toString()))
+    }
+
     override fun serve(session: IHTTPSession): Response {
-        // CORS preflight request
+        // No cross-origin access: preflights are refused (no CORS headers are sent).
         if (session.method == Method.OPTIONS) {
-            return corsResponse(newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, ""))
+            return newFixedLengthResponse(Response.Status.FORBIDDEN, MIME_PLAINTEXT, "")
+        }
+
+        if (!isAllowedHostAndOrigin(session)) {
+            return jsonError(Response.Status.FORBIDDEN, "forbidden")
         }
 
         val uri = session.uri
         val method = session.method
+
+        // Every route needs the per-start token: as ?token= on the page load, then the cookie or header.
+        val queryToken = session.parms["token"]
+        val authorized = hasValidToken(session) || tokenMatches(queryToken)
+        if (!authorized) {
+            return jsonError(Response.Status.UNAUTHORIZED, "unauthorized")
+        }
+        if (method == Method.POST && !isJsonContentType(session)) {
+            return jsonError(Response.Status.BAD_REQUEST, "content-type must be application/json")
+        }
 
         return try {
             when {
@@ -63,25 +128,25 @@ class ConfigServer(
             }
         } catch (e: Exception) {
             XLog.e(TAG, "Server error: ${e.message}")
-            corsResponse(
-                newFixedLengthResponse(
-                    Response.Status.INTERNAL_ERROR, MIME_JSON,
-                    """{"code":-1,"message":"${e.message}"}"""
-                )
-            )
+            jsonError(Response.Status.INTERNAL_ERROR, "internal error")
         }
     }
 
     private fun serveHtml(): Response {
         val inputStream = context.assets.open("web/index.html")
         val html = inputStream.bufferedReader().use { it.readText() }
-        return corsResponse(newFixedLengthResponse(Response.Status.OK, MIME_HTML, html))
+        return withTokenCookie(corsResponse(newFixedLengthResponse(Response.Status.OK, MIME_HTML, html)))
+    }
+
+    private fun withTokenCookie(response: Response): Response {
+        response.addHeader("Set-Cookie", "$TOKEN_COOKIE=$token; Path=/; HttpOnly; SameSite=Strict")
+        return response
     }
 
     private fun handleGetChannels(): Response {
         val data = JsonObject().apply {
-            addProperty("discordBotToken", KVUtils.getDiscordBotToken())
-            addProperty("telegramBotToken", KVUtils.getTelegramBotToken())
+            addProperty("discordBotToken", maskSecret(KVUtils.getDiscordBotToken()))
+            addProperty("telegramBotToken", maskSecret(KVUtils.getTelegramBotToken()))
         }
         val result = JsonObject().apply {
             addProperty("code", 0)
@@ -152,7 +217,7 @@ class ConfigServer(
     private fun handleGetLlm(): Response {
         val apiKey = KVUtils.getLlmApiKey()
         val data = JsonObject().apply {
-            addProperty("llmApiKey", apiKey)
+            addProperty("llmApiKey", maskSecret(apiKey))
             addProperty("llmBaseUrl", KVUtils.getLlmBaseUrl())
             addProperty("llmModelName", KVUtils.getLlmModelName())
         }
@@ -228,7 +293,7 @@ class ConfigServer(
     private fun serveDebugHtml(): Response {
         val inputStream = context.assets.open("web/debug.html")
         val html = inputStream.bufferedReader().use { it.readText() }
-        return corsResponse(newFixedLengthResponse(Response.Status.OK, MIME_HTML, html))
+        return withTokenCookie(corsResponse(newFixedLengthResponse(Response.Status.OK, MIME_HTML, html)))
     }
 
     private fun handleGetTools(): Response {
@@ -297,7 +362,7 @@ class ConfigServer(
             XLog.e(TAG, "Debug param parse error: ${e.message}")
         }
 
-        XLog.d(TAG, "Debug execute: $toolName params=$params")
+        XLog.d(TAG, "Debug execute: $toolName params=${params.keys}")
 
         val toolResult = try {
             ToolRegistry.executeTool(toolName, params)
@@ -326,9 +391,9 @@ class ConfigServer(
             )
         )
         // Security check: only allow access to files inside the cache directory
-        val cacheDir = context.cacheDir.absolutePath
-        val file = java.io.File(path)
-        if (!file.exists() || !file.absolutePath.startsWith(cacheDir)) {
+        val cacheDir = context.cacheDir.canonicalPath + File.separator
+        val file = try { File(path).canonicalFile } catch (_: Exception) { null }
+        if (file == null || !file.isFile || !file.path.startsWith(cacheDir)) {
             return corsResponse(
                 newFixedLengthResponse(
                     Response.Status.NOT_FOUND, MIME_JSON,
@@ -350,7 +415,7 @@ class ConfigServer(
      */
     private fun maskSecret(secret: String): String {
         if (secret.isEmpty()) return ""
-        if (secret.length <= 4) return secret
+        if (secret.length <= 4) return "****"
         return "*".repeat(secret.length - 4) + secret.takeLast(4)
     }
 
@@ -361,10 +426,9 @@ class ConfigServer(
         return value.contains("*")
     }
 
+    /** Name kept for the existing call sites; no CORS headers are sent any more (same-origin only). */
     private fun corsResponse(response: Response): Response {
-        response.addHeader("Access-Control-Allow-Origin", "*")
-        response.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        response.addHeader("Access-Control-Allow-Headers", "Content-Type")
+        response.addHeader("Cache-Control", "no-store")
         return response
     }
 }

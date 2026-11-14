@@ -85,6 +85,8 @@ public class FindAndTapTool extends BaseTool {
         try { lastScreen = service.getScreenTree(); } catch (Exception ignored) {}
 
         for (int i = 0; i < maxScrolls; i++) {
+            String payBlock = BaseTool.paymentGestureBlock(service.getRootInActiveWindow(), centerX, scrollStartY, centerX, scrollEndY);
+            if (payBlock != null) return ToolResult.error(payBlock);
             service.performSwipe(centerX, scrollStartY, centerX, scrollEndY, 400);
             try { Thread.sleep(500); } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -121,6 +123,10 @@ public class FindAndTapTool extends BaseTool {
                     if (tapped) {
                         XLog.i(TAG, "Found and tapped \"" + text + "\" at (" + cx + "," + cy + ")");
                         return ToolResult.success("Found \"" + text + "\" and tapped at (" + cx + ", " + cy + ")");
+                    }
+                    if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(service.getRootInActiveWindow(), cx, cy)) {
+                        // Don't report "not found" and keep scrolling the checkout page.
+                        return ToolResult.error("Blocked: \"" + text + "\" is a payment / place-order control. The user must complete payment themselves; do not retry with other taps.");
                     }
                 }
             }

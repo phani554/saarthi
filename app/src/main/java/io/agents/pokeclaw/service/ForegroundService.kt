@@ -8,6 +8,7 @@ import android.app.*
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.Handler
@@ -26,7 +27,8 @@ class ForegroundService : Service() {
 
     companion object {
         private const val TAG = "ForegroundService"
-        private const val MONITOR_HEALTH_POLL_MS = 5_000L
+        // Connect/disconnect callbacks already resync; this is only a safety net (was 5 s).
+        private const val MONITOR_HEALTH_POLL_MS = 60_000L
         const val CHANNEL_ID = "saathi_foreground_channel"
         const val NOTIFICATION_ID = 1001
         private const val EXTRA_TITLE = "extra_title"
@@ -48,6 +50,14 @@ class ForegroundService : Service() {
         @Volatile
         private var _mode = ForegroundMode.IDLE
 
+        /** startForegroundService() was called and onStartCommand has not called startForeground yet. */
+        @Volatile
+        private var startPending = false
+
+        /** stop() arrived while a start was pending; honoured right after startForeground. */
+        @Volatile
+        private var stopRequested = false
+
         /**
          * Check whether the foreground service is running
          */
@@ -66,10 +76,15 @@ class ForegroundService : Service() {
          * Show monitor state if auto-reply is active, otherwise stop the foreground service.
          */
         fun resetToIdle(context: Context) {
+            // The task is over: leave TASK mode first so syncToBackgroundState may stop or switch.
+            _mode = ForegroundMode.IDLE
             syncToBackgroundState(context)
         }
 
         fun showMonitorStatus(context: Context): Boolean {
+            // Never replace or stop the notification of a running task (callers fire from
+            // a11y/listener connect events and the keep-alive job at any time).
+            if (_mode == ForegroundMode.TASK) return true
             val manager = AutoReplyManager.getInstance()
             if (!manager.isEnabled || manager.monitoredContacts.isEmpty()) {
                 _mode = ForegroundMode.IDLE
@@ -110,6 +125,8 @@ class ForegroundService : Service() {
         }
 
         fun syncToBackgroundState(context: Context): Boolean {
+            // A running agent task keeps its foreground service; only resetToIdle ends TASK mode.
+            if (_mode == ForegroundMode.TASK) return true
             val manager = AutoReplyManager.getInstance()
             return if (manager.isEnabled && manager.monitoredContacts.isNotEmpty()) {
                 showMonitorStatus(context)
@@ -121,16 +138,15 @@ class ForegroundService : Service() {
         }
 
         private fun showNotification(context: Context, title: String, text: String): Boolean {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
-                    != PackageManager.PERMISSION_GRANTED
-                ) {
-                    return false
-                }
-            }
-
             try {
                 if (_isRunning) {
+                    // Updating the visible text needs POST_NOTIFICATIONS; the service itself does not.
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                        ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        return true
+                    }
                     val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                     manager.notify(NOTIFICATION_ID, buildNotification(context, title, text))
                     return true
@@ -146,22 +162,17 @@ class ForegroundService : Service() {
         /**
          * Start the foreground service
          * @param context Context
-         * @return true if started successfully, false if notification permission is missing
+         * @return true if the start request was accepted. A foreground service may run without
+         * POST_NOTIFICATIONS (its notification is just hidden), so that permission is not required.
          */
         fun start(
             context: Context,
             title: String = context.getString(R.string.notification_content_title),
             text: String = context.getString(R.string.notification_content_text)
         ): Boolean {
-            // Android 13+ requires notification permission check
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
-                        != PackageManager.PERMISSION_GRANTED) {
-                    return false
-                }
-            }
-
             return try {
+                startPending = true
+                stopRequested = false
                 val intent = Intent(context, ForegroundService::class.java).apply {
                     putExtra(EXTRA_TITLE, title)
                     putExtra(EXTRA_TEXT, text)
@@ -173,6 +184,7 @@ class ForegroundService : Service() {
                 }
                 true
             } catch (e: Exception) {
+                startPending = false
                 XLog.w(TAG, "Foreground service start blocked or failed", e)
                 false
             }
@@ -180,6 +192,12 @@ class ForegroundService : Service() {
 
         fun stop(context: Context) {
             _mode = ForegroundMode.IDLE
+            if (startPending) {
+                // Stopping before onStartCommand reached startForeground crashes the app
+                // ("did not then call startForeground"); defer the stop until it has.
+                stopRequested = true
+                return
+            }
             val intent = Intent(context, ForegroundService::class.java)
             context.stopService(intent)
             runCatching {
@@ -238,8 +256,22 @@ class ForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = createNotification(intent)
-        startForeground(NOTIFICATION_ID, notification)
+        try {
+            val notification = createNotification(intent)
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            XLog.w(TAG, "startForeground failed", e)
+        }
+        startPending = false
+        if (stopRequested) {
+            stopRequested = false
+            XLog.i(TAG, "Honouring stop requested while start was pending")
+            stopSelf()
+        }
         return START_NOT_STICKY
     }
 

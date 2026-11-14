@@ -77,6 +77,28 @@ class ActiveTaskShellController(
         }
     }
 
+    /** Monitor bar "Stop All": stops every auto-reply monitor, leaves a running phone task alone. */
+    fun stopAllMonitors(): String {
+        val stopped = autoReplyManager.isEnabled
+        if (stopped) autoReplyManager.stopAll()
+        refreshActiveTasks()
+        if (!appViewModel.isTaskRunning()) {
+            ForegroundService.resetToIdle(ClawApplication.instance)
+        }
+        return if (stopped) "All monitors stopped" else "No active monitors"
+    }
+
+    /** KILL TASK: stops the running phone task, leaves the auto-reply monitors running. */
+    fun killCurrentTask(): String {
+        val requested = appViewModel.isTaskRunning()
+        if (requested) appViewModel.stopTask()
+        if (!autoReplyManager.isEnabled) {
+            ForegroundService.resetToIdle(ClawApplication.instance)
+        }
+        refreshActiveTasks()
+        return if (requested) "Stopping current task..." else "Stopped"
+    }
+
     private fun refreshActiveTasks() {
         _activeTasks.value = if (autoReplyManager.isEnabled) {
             autoReplyManager.monitoredContacts.toList()

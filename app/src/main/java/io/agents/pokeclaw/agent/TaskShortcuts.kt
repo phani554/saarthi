@@ -107,12 +107,14 @@ object TaskShortcuts {
                 val numberMatch = Regex("""[\d\s\-+()]{7,}""").find(resolvedTarget)
                 if (numberMatch != null) {
                     val number = numberMatch.value.replace(Regex("""[\s\-()]"""), "")
-                    val callIntent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number")).apply {
+                    // ACTION_DIAL, not ACTION_CALL: the user confirms by pressing call. A direct
+                    // ACTION_CALL here would dial with no confirmation turn.
+                    val callIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")).apply {
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
                     return try {
                         context.startActivity(callIntent)
-                        "Calling $resolvedTarget ($number) now..."
+                        "Opened dialer for $resolvedTarget ($number). Press call to ring."
                     } catch (e: Exception) {
                         val dialIntent = Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")).apply {
                             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

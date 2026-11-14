@@ -20,7 +20,7 @@ public final class ContactMatchUtils {
         if (value == null) return "";
         return value
             .trim()
-            .replaceAll("[^\\p{L}\\p{Nd}]+", " ")
+            .replaceAll("[^\\p{L}\\p{M}\\p{Nd}]+", " ")
             .replaceAll("\\s+", " ")
             .trim()
             .toLowerCase(Locale.ROOT);
@@ -89,7 +89,8 @@ public final class ContactMatchUtils {
             }
 
             // 3. Exact word boundary match (prevents "Tomorrow" from matching "mom")
-            if (normalizedCandidate.matches(".*\\b" + Pattern.quote(alias) + "\\b.*")) {
+            // (normalized text is single-space separated, so compare on spaces; \\b misreads Indic marks)
+            if ((" " + normalizedCandidate + " ").contains(" " + alias + " ")) {
                 return true;
             }
         }

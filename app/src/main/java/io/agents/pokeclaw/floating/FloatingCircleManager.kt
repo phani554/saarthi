@@ -48,7 +48,9 @@ object FloatingCircleManager {
         ERROR           // task failed
     }
 
+    @Volatile
     private var isShowing = false
+    @Volatile
     private var currentState: State = State.IDLE
     private var currentRound: Int = 0
     private var currentChannel: Channel? = null
@@ -73,6 +75,16 @@ object FloatingCircleManager {
         application: Application,
         x: Int? = null,
         y: Int? = null
+    ) {
+        // WindowManager.addView must run on the UI thread; agent callbacks call this off-main.
+        // ThreadUtils.runOnUiThread runs inline when already on the main thread.
+        ThreadUtils.runOnUiThread { showOnUiThread(application, x, y) }
+    }
+
+    private fun showOnUiThread(
+        application: Application,
+        x: Int?,
+        y: Int?
     ) {
         XLog.i("FloatingCircle", "show() called, isShowing=$isShowing")
         if (isShowing || EasyFloat.getFloatView(FLOAT_TAG) != null) {
@@ -163,9 +175,11 @@ object FloatingCircleManager {
      * Hide the floating window
      */
     fun hide() {
-        if (isShowing) {
-            EasyFloat.dismiss(FLOAT_TAG)
-            isShowing = false
+        ThreadUtils.runOnUiThread {
+            if (isShowing) {
+                EasyFloat.dismiss(FLOAT_TAG)
+                isShowing = false
+            }
         }
     }
 
@@ -179,13 +193,15 @@ object FloatingCircleManager {
      * ComposeChatActivity.onCreate), re-show it so task status is visible.
      */
     fun ensureShowing() {
-        if (!isShowing && EasyFloat.getFloatView(FLOAT_TAG) == null) {
-            val app = appRef
-            if (app != null) {
-                XLog.i("FloatingCircle", "ensureShowing: re-showing dismissed float")
-                show(app)
-            } else {
-                XLog.w("FloatingCircle", "ensureShowing: no appRef, cannot re-show")
+        ThreadUtils.runOnUiThread {
+            if (!isShowing && EasyFloat.getFloatView(FLOAT_TAG) == null) {
+                val app = appRef
+                if (app != null) {
+                    XLog.i("FloatingCircle", "ensureShowing: re-showing dismissed float")
+                    show(app)
+                } else {
+                    XLog.w("FloatingCircle", "ensureShowing: no appRef, cannot re-show")
+                }
             }
         }
     }

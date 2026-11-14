@@ -48,7 +48,7 @@ class DebugTaskReceiver : BroadcastReceiver() {
         val task = intent.getStringExtra("task") ?: "open my camera"
         breadcrumb(
             context,
-            "received tool=$directTool backend_action=$backendAction support_action=$supportAction simulate_contact=${intent.getStringExtra("simulate_contact").orEmpty()} simulate_message=$simulateMessage task=$task"
+            "received tool=$directTool backend_action=$backendAction support_action=$supportAction simulate_contact=${intent.getStringExtra("simulate_contact").orEmpty()} simulate_message_len=${simulateMessage.length} task_len=${task.length}"
         )
         if (backendAction.isNotEmpty()) {
             handleLocalBackendDebug(intent, backendAction)
@@ -143,12 +143,12 @@ class DebugTaskReceiver : BroadcastReceiver() {
                     }
                 }
 
-            XLog.i("DebugTaskReceiver", "Executing debug tool: $toolName params=$params")
-            breadcrumb(io.agents.pokeclaw.ClawApplication.instance, "executeTool start tool=$toolName params=$params")
+            XLog.i("DebugTaskReceiver", "Executing debug tool: $toolName params=${params.keys}")
+            breadcrumb(io.agents.pokeclaw.ClawApplication.instance, "executeTool start tool=$toolName params=${params.keys}")
             val result = ToolRegistry.getInstance().executeTool(toolName, params)
             if (result.isSuccess) {
-                XLog.i("DebugTaskReceiver", "Debug tool success: $toolName -> ${result.data}")
-                breadcrumb(io.agents.pokeclaw.ClawApplication.instance, "executeTool success tool=$toolName data=${result.data}")
+                XLog.i("DebugTaskReceiver", "Debug tool success: $toolName -> ${result.data?.length ?: 0} chars")
+                breadcrumb(io.agents.pokeclaw.ClawApplication.instance, "executeTool success tool=$toolName data_len=${result.data?.length ?: 0}")
             } else {
                 XLog.w("DebugTaskReceiver", "Debug tool failed: $toolName -> ${result.error}")
                 breadcrumb(io.agents.pokeclaw.ClawApplication.instance, "executeTool fail tool=$toolName error=${result.error}")
@@ -170,11 +170,11 @@ class DebugTaskReceiver : BroadcastReceiver() {
             val ensureTargetEnabled = intent.getBooleanExtra("simulate_enable", true)
             XLog.i(
                 "DebugTaskReceiver",
-                "Simulating incoming message: contact=$contact app=$app ensureTargetEnabled=$ensureTargetEnabled message='$simulateMessage'"
+                "Simulating incoming message: contact=$contact app=$app ensureTargetEnabled=$ensureTargetEnabled message_len=${simulateMessage.length}"
             )
             breadcrumb(
                 io.agents.pokeclaw.ClawApplication.instance,
-                "simulateIncomingMessage contact=$contact app=$app ensureTargetEnabled=$ensureTargetEnabled message=$simulateMessage"
+                "simulateIncomingMessage contact=$contact app=$app ensureTargetEnabled=$ensureTargetEnabled message_len=${simulateMessage.length}"
             )
             AutoReplyManager.getInstance().debugSimulateIncomingMessage(
                 app,

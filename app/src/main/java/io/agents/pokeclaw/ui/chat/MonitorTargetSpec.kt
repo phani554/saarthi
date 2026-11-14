@@ -47,7 +47,12 @@ object MonitorTargetParser {
             "please", "can you", "start", "enable", "begin", "help me",
         )
         for (word in removeWords) {
-            cleaned = cleaned.replace(word, " ")
+            // Whole words only: "watchman" must not lose "watch", nor "Forum" its "for".
+            cleaned = if (word.startsWith("'")) {
+                cleaned.replace(word, " ")
+            } else {
+                cleaned.replace(Regex("\\b" + Regex.escape(word) + "\\b"), " ")
+            }
         }
         cleaned = cleaned.replace(Regex("\\s+"), " ").trim()
         return if (cleaned.isNotEmpty()) cleaned.replaceFirstChar { it.uppercase() } else ""

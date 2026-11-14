@@ -8,11 +8,15 @@ import io.agents.pokeclaw.utils.XLog
 
 /** One person Saathi can call or message. */
 data class CareContact(
-    val role: String,              // watchman | family_doctor | chemist | loved_one | doctor
+    // Default "" so every field has a default: Kotlin then emits a no-arg constructor and Gson
+    // fills missing JSON fields with these defaults instead of null.
+    val role: String = "",         // watchman | family_doctor | chemist | loved_one | doctor
     val name: String = "",
     val phone: String = "",
     val relation: String = "",     // for loved ones: "son", "daughter"...
     val note: String = "",
+    /** Learned from conversation and not yet confirmed by the user: never called or texted by SOS. */
+    val pending: Boolean = false,
 ) {
     val digits: String get() = phone.filter { it.isDigit() || it == '+' }
     val hasPhone: Boolean get() = digits.count { it.isDigit() } >= 7
@@ -41,11 +45,19 @@ data class CareProfile(
     val distressPriority: List<String> = emptyList(),
 ) {
     fun byRole(role: String): List<CareContact> = contacts.filter { it.role == role }
-    fun first(role: String): CareContact? = byRole(role).firstOrNull { it.hasPhone } ?: byRole(role).firstOrNull()
+    fun first(role: String): CareContact? {
+        val all = byRole(role)
+        return all.firstOrNull { it.hasPhone && !it.pending } ?: all.firstOrNull { !it.pending }
+            ?: all.firstOrNull { it.hasPhone } ?: all.firstOrNull()
+    }
+
+    /** Contacts learned from conversation that wait for the user's confirmation. */
+    fun pendingContacts(): List<CareContact> = contacts.filter { it.pending }
 
     /** Distress order: the saved priority first, then any other callable contact (loved ones, watchman, doctor). */
     fun distressOrder(): List<CareContact> {
-        val callable = contacts.filter { it.hasPhone }
+        // Unconfirmed (learned) contacts are never part of the SOS chain.
+        val callable = contacts.filter { it.hasPhone && !it.pending }
         val ordered = distressPriority.mapNotNull { k -> callable.firstOrNull { keyOf(it) == k } }
         val defaultRank = listOf(CareRoles.LOVED_ONE, CareRoles.WATCHMAN, CareRoles.FAMILY_DOCTOR)
         val rest = callable.filter { it !in ordered && it.role in defaultRank }
@@ -58,7 +70,7 @@ data class CareProfile(
         if (contacts.isEmpty() && medicines.isEmpty() && medicalHistory.isEmpty()) return ""
         return buildString {
             append("\n\n## Care profile (use these when the user mentions them)\n")
-            contacts.forEach { append("- ${CareRoles.displayName(it.role)}: ${it.label()}${if (it.hasPhone) " [number saved]" else ""}\n") }
+            contacts.forEach { append("- ${CareRoles.displayName(it.role)}: ${it.label()}${if (it.hasPhone) " [number saved]" else ""}${if (it.pending) " (unconfirmed)" else ""}\n") }
             if (medicalHistory.isNotEmpty()) append("- Medical history: ${medicalHistory.joinToString("; ")}\n")
             if (medicines.isNotEmpty()) append("- Current medicines: ${medicines.joinToString("; ") { listOf(it.name, it.dose, it.frequency).filter { s -> s.isNotBlank() }.joinToString(" ") }}\n")
             append("- To message the chemist/doctor/watchman/loved one, use message_care_contact(role, message).\n")
@@ -118,7 +130,7 @@ object CareProfileStore {
         } ?: CareProfile()
         // Gson can leave Kotlin non-null lists as null when a field is missing in old JSON.
         val safe = CareProfile(
-            contacts = loaded.contacts ?: emptyList(),
+            contacts = (loaded.contacts ?: emptyList()).filter { it.role.isNotBlank() },
             medicines = loaded.medicines ?: emptyList(),
             medicalHistory = loaded.medicalHistory ?: emptyList(),
             distressPriority = loaded.distressPriority ?: emptyList(),
@@ -151,9 +163,47 @@ object CareProfileStore {
         val merged = p.contacts.firstOrNull { it.role == c.role && (singleRole || it.name.equals(c.name, true)) }
             ?.let { old -> c.copy(name = c.name.ifBlank { old.name }, phone = c.phone.ifBlank { old.phone }, relation = c.relation.ifBlank { old.relation }) }
             ?: c
-        val priority = if (merged.hasPhone && p.distressPriority.none { it == CareProfile.keyOf(merged) } &&
-            merged.role in setOf(CareRoles.LOVED_ONE, CareRoles.WATCHMAN)) p.distressPriority + CareProfile.keyOf(merged) else p.distressPriority
-        p.copy(contacts = others + merged, distressPriority = priority)
+        val newKey = CareProfile.keyOf(merged)
+        // A replaced contact keeps its place in the SOS order instead of dropping to the end.
+        val removedKeys = p.contacts.filter { it !in others }.map { CareProfile.keyOf(it) }.toSet()
+        var priority = p.distressPriority.map { if (it in removedKeys) newKey else it }.distinct()
+        if (merged.hasPhone && !merged.pending && newKey !in priority &&
+            merged.role in setOf(CareRoles.LOVED_ONE, CareRoles.WATCHMAN)) priority = priority + newKey
+        if (merged.pending) priority = priority - newKey
+        val nextContacts = others + merged
+        val validKeys = nextContacts.map { CareProfile.keyOf(it) }.toSet()
+        p.copy(contacts = nextContacts, distressPriority = priority.filter { it in validKeys })
+    }
+
+    /**
+     * Saves a contact heard in conversation as pending (unconfirmed). It never replaces an existing
+     * contact and is never added to the SOS chain; the user confirms it with [confirmContact].
+     * Returns false when nothing new was saved.
+     */
+    fun addLearnedContact(c: CareContact): Boolean {
+        var added = false
+        update { p ->
+            val key = CareProfile.keyOf(c)
+            val existing = p.contacts.firstOrNull { CareProfile.keyOf(it) == key }
+            if (existing != null) {
+                p
+            } else {
+                added = true
+                p.copy(contacts = p.contacts + c.copy(pending = true))
+            }
+        }
+        return added
+    }
+
+    /** User confirmed a learned contact: saves it like a manual entry (may join the SOS chain). */
+    fun confirmContact(c: CareContact): CareProfile {
+        update { p -> p.copy(contacts = p.contacts.filterNot { it.pending && CareProfile.keyOf(it) == CareProfile.keyOf(c) }) }
+        return upsertContact(c.copy(pending = false))
+    }
+
+    /** User rejected a learned contact. */
+    fun discardPendingContact(c: CareContact): CareProfile = update { p ->
+        p.copy(contacts = p.contacts.filterNot { it.pending && CareProfile.keyOf(it) == CareProfile.keyOf(c) })
     }
 
     fun addHistory(items: List<String>): CareProfile = update { p ->
