@@ -46,3 +46,11 @@ class PlaceholderMessageGuardTest {
         assertEquals(null, PlaceholderMessageGuard.check("I will call you in the evening"))
     }
 }
+
+class WhoForTest {
+    @Test fun shoppingPromptSaysWhoItIsFor() {
+        val p = ShoppingStoreRouter.promptSection("check Kamya's message and search it on Flipkart", ShoppingStoreRouter.Mode.UNKNOWN)
+        assertTrue(p.contains("dress for women"))
+        assertTrue(p.contains("Child: only when"))
+    }
+}

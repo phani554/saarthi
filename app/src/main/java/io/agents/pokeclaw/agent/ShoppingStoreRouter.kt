@@ -57,7 +57,22 @@ object ShoppingStoreRouter {
     /** Prompt section for the agent; empty when the task is not about shopping. */
     fun promptSection(task: String, mode: Mode): String {
         if (!isShopping(task)) return ""
-        return "\n\n## Store choice\n" + when (mode) {
+        return "\n\n## Store choice\n" + storeLine(mode) + "\n\n" + WHO_FOR
+    }
+
+    /**
+     * Clothes are searched for the person they are for. Phone log 2026-11-15 00:30: Kamya (an adult woman)
+     * asked for a red frock, the agent searched "Red Frock" and Flipkart showed girls' frocks.
+     */
+    const val WHO_FOR = """## Who it is for (clothes, shoes, gifts)
+Before searching clothes or shoes, work out who they are for and put that in the search text:
+- Use what you know about the person: their relation in memory (daughter, son, wife, grandson...), how they write in the chat, and their name.
+- Adult woman: search "<colour> dress for women" (in India "frock" alone shows girls' frocks), or "<item> for women". Adult man: "<item> for men".
+- Child: only when memory or the message says it is for a child (grandchild, "beti ke liye", an age under 14, a kids' size). Then search "<item> for girls/boys".
+- Not sure: assume an adult if the person sends their own WhatsApp messages, and say in one short line who you searched for."""
+
+    private fun storeLine(mode: Mode): String {
+        return when (mode) {
             Mode.MINUTES -> "This item is a quick-commerce item: on Flipkart use the Minutes tab (Saathi switches to it right after Flipkart opens)."
             Mode.MAIN -> "This item is NOT a 10-minute item: on Flipkart search the regular Flipkart store, never the Minutes tab. If Flipkart opens on Minutes, go back to the main Flipkart home first."
             Mode.UNKNOWN -> """
