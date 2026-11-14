@@ -65,6 +65,9 @@ android {
         buildConfigField("String", "SARVAM_API_KEY", "\"${readLocalOrEnvString("SARVAM_API_KEY")}\"")
         buildConfigField("String", "GEMINI_API_KEY", "\"${readLocalOrEnvString("GEMINI_API_KEY")}\"")
         buildConfigField("String", "MEM0_API_KEY", "\"${readLocalOrEnvString("MEM0_API_KEY")}\"")
+        // Benchmark "Send report" receiver (Apps Script web app) and its shared token.
+        buildConfigField("String", "BENCH_UPLOAD_URL", "\"${readLocalOrEnvString("BENCH_UPLOAD_URL")}\"")
+        buildConfigField("String", "BENCH_UPLOAD_TOKEN", "\"${readLocalOrEnvString("BENCH_UPLOAD_TOKEN")}\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

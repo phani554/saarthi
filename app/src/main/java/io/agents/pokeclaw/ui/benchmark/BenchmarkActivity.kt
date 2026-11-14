@@ -29,6 +29,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import io.agents.pokeclaw.benchmark.BenchmarkUploader
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -102,6 +104,8 @@ private fun BenchmarkScreen(onBack: () -> Unit) {
     var confirmClear by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var traceText by remember { mutableStateOf<String?>(null) }
+    var askName by remember { mutableStateOf(false) }
+    var nameDraft by remember { mutableStateOf("") }
 
     fun reload() {
         scope.launch {
@@ -287,6 +291,29 @@ private fun BenchmarkScreen(onBack: () -> Unit) {
                             modifier = Modifier.weight(1f).height(56.dp),
                         ) { Text("Clear", fontSize = BODY) }
                     }
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        enabled = !busy && runs.isNotEmpty(),
+                        onClick = {
+                            if (!BenchmarkUploader.isConfigured()) {
+                                Toast.makeText(context, "Sending is not set up in this build. Use Export.", Toast.LENGTH_LONG).show()
+                            } else if (BenchmarkUploader.testerName().isBlank()) {
+                                askName = true
+                            } else {
+                                busy = true
+                                scope.launch {
+                                    val r = withContext(Dispatchers.IO) { BenchmarkUploader.send(context) }
+                                    busy = false
+                                    val msg = when (r) {
+                                        is BenchmarkUploader.Result.Sent -> "Report sent (${r.files} files)."
+                                        is BenchmarkUploader.Result.Failed -> "Could not send: ${r.reason}"
+                                    }
+                                    Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                }
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth().height(56.dp),
+                    ) { Text(if (busy) "Sending…" else "Send report", fontSize = BODY) }
                     if (runs.isEmpty()) {
                         Spacer(Modifier.height(8.dp))
                         Text(
@@ -324,6 +351,33 @@ private fun BenchmarkScreen(onBack: () -> Unit) {
         )
     }
 
+    if (askName) {
+        AlertDialog(
+            onDismissRequest = { askName = false },
+            title = { Text("Your name", fontSize = TITLE) },
+            text = {
+                OutlinedTextField(value = nameDraft, onValueChange = { nameDraft = it.take(40) },
+                    singleLine = true, label = { Text("So Phani knows whose report it is") })
+            },
+            confirmButton = {
+                TextButton(enabled = nameDraft.isNotBlank(), onClick = {
+                    BenchmarkUploader.setTesterName(nameDraft)
+                    askName = false
+                    busy = true
+                    scope.launch {
+                        val r = withContext(Dispatchers.IO) { BenchmarkUploader.send(context) }
+                        busy = false
+                        val msg = when (r) {
+                            is BenchmarkUploader.Result.Sent -> "Report sent (${r.files} files)."
+                            is BenchmarkUploader.Result.Failed -> "Could not send: ${r.reason}"
+                        }
+                        Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                    }
+                }) { Text("Send", fontSize = BODY) }
+            },
+            dismissButton = { TextButton(onClick = { askName = false }) { Text("Cancel", fontSize = BODY) } },
+        )
+    }
     if (confirmClear) {
         AlertDialog(
             onDismissRequest = { confirmClear = false },
