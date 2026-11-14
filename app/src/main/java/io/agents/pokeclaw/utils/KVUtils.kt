@@ -6,6 +6,8 @@ package io.agents.pokeclaw.utils
 import android.content.Context
 import com.tencent.mmkv.MMKV
 import io.agents.pokeclaw.BuildConfig
+import io.agents.pokeclaw.security.SecretKeyPolicy
+import io.agents.pokeclaw.security.SecureKeyStore
 import io.agents.pokeclaw.utils.XLog
 
 /**
@@ -32,6 +34,18 @@ object KVUtils {
     const val KEY_WECHAT_UPDATES_CURSOR = "DEFAULT_WECHAT_UPDATES_CURSOR"
 
     private lateinit var mmkv: MMKV
+    /**
+     * Encrypted store (Keystore-wrapped MMKV crypt key) for the keys [SecretKeyPolicy] marks as
+     * secret: API keys, bot tokens, the care profile, remembered facts. Null only when the Keystore
+     * is unusable on this device; those keys then stay in [mmkv] as before.
+     */
+    @Volatile private var secure: MMKV? = null
+
+    /** The store a key lives in. Every read/write/remove below goes through this. */
+    private fun kv(key: String): MMKV = if (SecretKeyPolicy.isSecret(key)) secure ?: mmkv else mmkv
+
+    /** True when secrets are stored encrypted (false = Keystore unavailable, plain fallback). */
+    fun isSecureStorageActive(): Boolean = secure != null
 
     private const val DEFAULT_INT = 0
     private const val DEFAULT_LONG = 0L
@@ -45,7 +59,45 @@ object KVUtils {
     fun init(context: Context) {
         MMKV.initialize(context)
         mmkv = MMKV.defaultMMKV()
+        secure = SecureKeyStore.open(context)
+        migrateSecretsToSecureStore()
         migrateOldModelPaths()
+    }
+
+    /**
+     * Moves secrets saved by older builds in plain MMKV into the encrypted store, then deletes the
+     * plain copies. Runs on every start (cheap key scan) so a secret written during a plain fallback
+     * is picked up once the Keystore works. A plain copy is removed only after the encrypted copy
+     * reads back equal. If both exist, the encrypted one wins (it is the newer write).
+     */
+    private fun migrateSecretsToSecureStore() {
+        val enc = secure ?: return
+        val plainSecrets = try { SecretKeyPolicy.secretsAmong(mmkv.allKeys()) } catch (t: Throwable) { emptyList() }
+        if (plainSecrets.isEmpty()) return
+        var moved = 0
+        for (key in plainSecrets) {
+            try {
+                if (!enc.containsKey(key)) {
+                    val value = mmkv.decodeString(key, null) ?: continue
+                    enc.encode(key, value)
+                    if (enc.decodeString(key, null) != value) {
+                        XLog.e("KVUtils", "Secret migration read-back mismatch; keeping the plain copy")
+                        continue
+                    }
+                }
+                mmkv.removeValueForKey(key)
+                moved++
+            } catch (t: Throwable) {
+                XLog.e("KVUtils", "Secret migration failed for one key: ${t.javaClass.simpleName}")
+            }
+        }
+        if (moved > 0) {
+            enc.sync()
+            // Rewrites the plain file without the removed entries (best effort: MMKV only compacts
+            // when the file is larger than its minimum size).
+            try { mmkv.trim() } catch (_: Throwable) {}
+            XLog.i("KVUtils", "Moved $moved secret value(s) to encrypted storage")
+        }
     }
 
     /**
@@ -70,86 +122,89 @@ object KVUtils {
 
     // ==================== String ====================
     fun putString(key: String, value: String?): Boolean {
-        return mmkv.encode(key, value)
+        return kv(key).encode(key, value)
     }
 
     fun getString(key: String, defaultValue: String = ""): String {
-        return mmkv.decodeString(key, defaultValue) ?: defaultValue
+        return kv(key).decodeString(key, defaultValue) ?: defaultValue
     }
 
     // ==================== Int ====================
     fun putInt(key: String, value: Int): Boolean {
-        return mmkv.encode(key, value)
+        return kv(key).encode(key, value)
     }
 
     fun getInt(key: String, defaultValue: Int = DEFAULT_INT): Int {
-        return mmkv.decodeInt(key, defaultValue)
+        return kv(key).decodeInt(key, defaultValue)
     }
 
     // ==================== Long ====================
     fun putLong(key: String, value: Long): Boolean {
-        return mmkv.encode(key, value)
+        return kv(key).encode(key, value)
     }
 
     fun getLong(key: String, defaultValue: Long = DEFAULT_LONG): Long {
-        return mmkv.decodeLong(key, defaultValue)
+        return kv(key).decodeLong(key, defaultValue)
     }
 
     // ==================== Boolean ====================
     fun putBoolean(key: String, value: Boolean): Boolean {
-        return mmkv.encode(key, value)
+        return kv(key).encode(key, value)
     }
 
     fun getBoolean(key: String, defaultValue: Boolean = DEFAULT_BOOL): Boolean {
-        return mmkv.decodeBool(key, defaultValue)
+        return kv(key).decodeBool(key, defaultValue)
     }
 
     // ==================== Float ====================
     fun putFloat(key: String, value: Float): Boolean {
-        return mmkv.encode(key, value)
+        return kv(key).encode(key, value)
     }
 
     fun getFloat(key: String, defaultValue: Float = DEFAULT_FLOAT): Float {
-        return mmkv.decodeFloat(key, defaultValue)
+        return kv(key).decodeFloat(key, defaultValue)
     }
 
     // ==================== Double ====================
     fun putDouble(key: String, value: Double): Boolean {
-        return mmkv.encode(key, value)
+        return kv(key).encode(key, value)
     }
 
     fun getDouble(key: String, defaultValue: Double = DEFAULT_DOUBLE): Double {
-        return mmkv.decodeDouble(key, defaultValue)
+        return kv(key).decodeDouble(key, defaultValue)
     }
 
     // ==================== Bytes ====================
     fun putBytes(key: String, value: ByteArray?): Boolean {
-        return mmkv.encode(key, value)
+        return kv(key).encode(key, value)
     }
 
     fun getBytes(key: String): ByteArray? {
-        return mmkv.decodeBytes(key)
+        return kv(key).decodeBytes(key)
     }
 
     // ==================== Common Operations ====================
     fun contains(key: String): Boolean {
-        return mmkv.containsKey(key)
+        return kv(key).containsKey(key)
     }
 
     fun remove(key: String) {
-        mmkv.removeValueForKey(key)
+        kv(key).removeValueForKey(key)
     }
 
     fun remove(vararg keys: String) {
-        mmkv.removeValuesForKeys(keys)
+        for (key in keys) kv(key).removeValueForKey(key)
     }
 
     fun clear() {
         mmkv.clearAll()
+        secure?.clearAll()
     }
 
     fun getAllKeys(): Array<String> {
-        return mmkv.allKeys() ?: emptyArray()
+        val plain = mmkv.allKeys() ?: emptyArray()
+        val enc = secure?.allKeys() ?: emptyArray()
+        return (plain + enc).distinct().toTypedArray()
     }
 
     /**
@@ -157,6 +212,7 @@ object KVUtils {
      */
     fun sync() {
         mmkv.sync()
+        secure?.sync()
     }
 
 

@@ -70,29 +70,47 @@ public class TapNodeTool extends BaseTool {
         if (boundsError != null) return ToolResult.error(boundsError);
 
         if (meta != null && meta.node != null) {
-            // Stale ID: the screen changed since get_screen_info; a coordinate fallback would hit whatever is there now.
-            if (!meta.node.refresh()) {
-                return ToolResult.error("Node " + nodeId + " is no longer on screen. Call get_screen_info first to refresh node IDs.");
+            // Stale ID: the screen changed since get_screen_info (node gone, moved, or relabelled).
+            // A coordinate fallback would hit whatever is there now, so refuse and ask for a re-read.
+            io.agents.pokeclaw.a11y.StaleNodeCheck.Verdict verdict = service.checkNodeFresh(nodeId);
+            if (verdict != io.agents.pokeclaw.a11y.StaleNodeCheck.Verdict.FRESH) {
+                return ToolResult.error("Node " + nodeId + " is stale ("
+                        + (verdict == null ? "not cached" : io.agents.pokeclaw.a11y.StaleNodeCheck.describe(verdict))
+                        + "). Call get_screen_info first to refresh node IDs.");
             }
             // clickNode clicks the first clickable parent without re-checking it, so check ancestors here.
             if (BaseTool.isPaymentNodeOrAncestor(meta.node)) {
                 return ToolResult.error("Blocked: node " + nodeId + " is (inside) a payment / place-order control. The user must complete payment themselves.");
             }
         }
-        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(service.getRootInActiveWindow(), x, y)) {
-            return ToolResult.error("Blocked: node " + nodeId + " is a payment / place-order control. The user must complete payment themselves.");
-        }
-        if ((meta != null && io.agents.pokeclaw.agent.OutboundConfirmGate.isDirectOutboundControl(meta.node))
-                || io.agents.pokeclaw.agent.OutboundConfirmGate.isDirectOutboundAt(service.getRootInActiveWindow(), x, y)) {
-            return ToolResult.error(io.agents.pokeclaw.agent.OutboundConfirmGate.DIRECT_SEND_BLOCKED);
+        android.view.accessibility.AccessibilityNodeInfo activeRoot = service.getRootInActiveWindow();
+        try {
+            if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(activeRoot, x, y)) {
+                return ToolResult.error("Blocked: node " + nodeId + " is a payment / place-order control. The user must complete payment themselves.");
+            }
+            if ((meta != null && io.agents.pokeclaw.agent.OutboundConfirmGate.isDirectOutboundControl(meta.node))
+                    || io.agents.pokeclaw.agent.OutboundConfirmGate.isDirectOutboundAt(activeRoot, x, y)) {
+                return ToolResult.error(io.agents.pokeclaw.agent.OutboundConfirmGate.DIRECT_SEND_BLOCKED);
+            }
+        } finally {
+            io.agents.pokeclaw.a11y.NodeRecycler.recycle(activeRoot);
         }
 
         service.dismissKeyboard();
-        boolean success = service.clickNodeById(nodeId);
+        boolean success = service.clickNodeById(nodeId); // re-checks freshness right before the click
 
         String label = meta != null ? meta.getDisplayLabel() : nodeId;
         String cls = (meta != null && !meta.className.isEmpty()) ? " (" + meta.className.substring(meta.className.lastIndexOf('.') + 1) + ")" : "";
 
+        if (!success) {
+            // Hiding the keyboard (or an animation) can move the layout; say so instead of a vague failure.
+            io.agents.pokeclaw.a11y.StaleNodeCheck.Verdict after = service.checkNodeFresh(nodeId);
+            if (after != null && after != io.agents.pokeclaw.a11y.StaleNodeCheck.Verdict.FRESH) {
+                return ToolResult.error("Did not tap node " + nodeId + ": it is "
+                        + io.agents.pokeclaw.a11y.StaleNodeCheck.describe(after)
+                        + ". Call get_screen_info again and use the new node ID.");
+            }
+        }
         return success
                 ? ToolResult.success("Successfully tapped node " + nodeId + " '" + label + "'" + cls + " at (" + x + ", " + y + ")")
                 : ToolResult.error("Failed to tap node " + nodeId + " '" + label + "' at (" + x + ", " + y + ")");

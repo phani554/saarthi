@@ -130,7 +130,9 @@ class GroupTaskSummaryTool : BaseTool() {
         }
 
         for (i in 0 until node.childCount) {
-            collectChatMessages(node.getChild(i), results)
+            val child = node.getChild(i) ?: continue
+            collectChatMessages(child, results)
+            io.agents.pokeclaw.a11y.NodeRecycler.recycle(child) // only strings are kept
         }
     }
 

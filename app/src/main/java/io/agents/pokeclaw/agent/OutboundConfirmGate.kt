@@ -4,6 +4,7 @@ package io.agents.pokeclaw.agent
 
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import io.agents.pokeclaw.a11y.NodeRecycler
 import io.agents.pokeclaw.tool.ToolResult
 import io.agents.pokeclaw.utils.XLog
 import java.util.UUID
@@ -30,6 +31,8 @@ object OutboundConfirmGate {
     /** Internal param carrying the one-time approval token. */
     const val TOKEN_PARAM = "__user_confirm_token"
     private const val TTL_MS = 5 * 60_000L
+    /** Most actions that may wait for her yes at once (e.g. "Ravi ko bolo ... aur Sita ko bolo ..."). */
+    const val MAX_PENDING = 5
 
     data class Pending(
         val toolName: String,
@@ -37,19 +40,33 @@ object OutboundConfirmGate {
         /** Question for the user, in her language. */
         val question: String,
         val createdAt: Long,
-    )
+    ) {
+        /**
+         * True once its question was handed out by [pendingQuestion] (i.e. shown/spoken to her).
+         * A yes only ever approves an action she was actually asked about.
+         */
+        var asked: Boolean = false
+            internal set
+    }
 
     data class Approved(val toolName: String, val params: Map<String, Any>)
 
     enum class Reply { YES, NO, OTHER }
 
     private val lock = Any()
-    private var pending: Pending? = null
+    /** Parked actions, asked and confirmed one by one, oldest first. */
+    private val queue = PendingQueue<Pending>(
+        capacity = MAX_PENDING,
+        ttlMs = TTL_MS,
+        keyOf = { it.toolName to it.params.toString() },
+        createdAtOf = { it.createdAt },
+    )
     private var approvedToken: String? = null
 
     /**
      * Returns null when this call carries the user's approval (the tool may go ahead); otherwise
-     * parks the call and returns the ToolResult the tool must return (nothing was sent).
+     * parks the call at the end of the queue and returns the ToolResult the tool must return
+     * (nothing was sent). The same call parked twice is asked once.
      */
     @JvmStatic
     @JvmOverloads
@@ -60,7 +77,7 @@ object OutboundConfirmGate {
         agentNotice: String = DEFAULT_AGENT_NOTICE,
     ): ToolResult? {
         val token = params[TOKEN_PARAM]?.toString()
-        synchronized(lock) {
+        val added: PendingQueue.AddResult = synchronized(lock) {
             if (token != null && token == approvedToken) {
                 approvedToken = null
                 XLog.i(TAG, "$toolName approved by the user")
@@ -68,9 +85,17 @@ object OutboundConfirmGate {
             }
             val clean = LinkedHashMap<String, Any>()
             for ((k, v) in params) if (k != TOKEN_PARAM && k != "confirmed") clean[k] = v
-            pending = Pending(toolName, clean, question, System.currentTimeMillis())
+            val now = System.currentTimeMillis()
+            queue.add(Pending(toolName, clean, question, now), now)
         }
-        XLog.i(TAG, "Parked $toolName until the user says yes")
+        if (added == PendingQueue.AddResult.FULL) {
+            XLog.w(TAG, "Confirmation queue full; $toolName not parked")
+            return ToolResult.error(
+                "$MARKER: too many messages/calls are already waiting for the user's yes. Nothing was sent. " +
+                    "Stop here and do not send or call any other way."
+            )
+        }
+        XLog.i(TAG, "Parked $toolName until the user says yes ($added)")
         return ToolResult.error("$MARKER: $agentNotice")
     }
 
@@ -96,30 +121,61 @@ object OutboundConfirmGate {
     fun isAskResult(result: ToolResult?): Boolean =
         result != null && !result.isSuccess && result.error?.startsWith(MARKER) == true
 
-    /** The parked call, or null (none, or older than 5 minutes). */
+    /**
+     * The parked call she has been asked about and has not answered yet, or null (none, not asked yet,
+     * or older than 5 minutes). Queued actions behind it stay invisible here until they are asked.
+     */
     @JvmStatic
-    fun peek(): Pending? = synchronized(lock) {
-        val p = pending ?: return@synchronized null
-        if (System.currentTimeMillis() - p.createdAt > TTL_MS) {
-            pending = null
-            null
-        } else p
+    fun peek(): Pending? = synchronized(lock) { queue.head(System.currentTimeMillis())?.takeIf { it.asked } }
+
+    /**
+     * Question for the oldest waiting action, and marks it as asked: call this exactly when the
+     * question is shown / spoken to her (DefaultAgentService, TaskOrchestrator, and after a queued
+     * action ran or was declined, to ask the next one). Null when nothing waits.
+     */
+    @JvmStatic
+    fun pendingQuestion(): String? = synchronized(lock) {
+        val head = queue.head(System.currentTimeMillis()) ?: return@synchronized null
+        head.asked = true
+        head.question
     }
 
+    /** How many actions wait for her yes (asked or not). */
     @JvmStatic
-    fun pendingQuestion(): String? = peek()?.question
+    fun pendingCount(): Int = synchronized(lock) { queue.size(System.currentTimeMillis()) }
 
+    /** All waiting actions, oldest first (for display). */
+    @JvmStatic
+    fun pendingAll(): List<Pending> = synchronized(lock) { queue.snapshot(System.currentTimeMillis()) }
+
+    /** Drops every waiting action and any unused approval. */
     @JvmStatic
     fun clear() = synchronized(lock) {
-        pending = null
+        queue.clear()
         approvedToken = null
     }
 
-    /** User said yes: the parked call with a fresh one-time token, or null when nothing is parked. */
+    /**
+     * She said no to the action asked now: drop only that one. Returns true when another action
+     * still waits; ask it with [pendingQuestion].
+     */
+    @JvmStatic
+    fun decline(): Boolean = synchronized(lock) {
+        val now = System.currentTimeMillis()
+        if (queue.head(now)?.asked == true) queue.pop(now)
+        queue.head(now) != null
+    }
+
+    /**
+     * User said yes to the action asked now: removes it from the queue and returns it with a fresh
+     * one-time token, or null when nothing is parked. Any later actions stay queued; ask
+     * [pendingQuestion] after this one has run.
+     */
     @JvmStatic
     fun approve(): Approved? = synchronized(lock) {
-        val p = peek() ?: return@synchronized null
-        pending = null
+        val now = System.currentTimeMillis()
+        if (queue.head(now)?.asked != true) return@synchronized null
+        val p = queue.pop(now) ?: return@synchronized null
         val token = UUID.randomUUID().toString()
         approvedToken = token
         Approved(p.toolName, p.params + (TOKEN_PARAM to token))
@@ -151,65 +207,59 @@ object OutboundConfirmGate {
     /** True when [node] (or its clickable ancestor) is a Send / Call button in a messaging or dialer app. */
     @JvmStatic
     fun isDirectOutboundControl(node: AccessibilityNodeInfo?): Boolean {
+        // [node] is the caller's; ancestors fetched here are recycled (API < 33).
         var n = node
         var depth = 0
+        var result = false
         while (n != null && depth < 4) {
             val pkg = n.packageName?.toString().orEmpty()
-            if (pkg !in OUTBOUND_PACKAGES) return false
+            if (pkg !in OUTBOUND_PACKAGES) break
             val id = n.viewIdResourceName.orEmpty()
             val desc = n.contentDescription?.toString()?.trim().orEmpty()
             val text = n.text?.toString()?.trim().orEmpty()
             if (OUTBOUND_ID.containsMatchIn(id) || OUTBOUND_LABEL.matches(desc) ||
-                (!n.isEditable && OUTBOUND_LABEL.matches(text))) return true
-            if (n.isClickable) return false
-            n = n.parent
+                (!n.isEditable && OUTBOUND_LABEL.matches(text))) { result = true; break }
+            if (n.isClickable) break
+            val next = n.parent
+            NodeRecycler.recycleUnless(n, node)
+            n = next
             depth++
         }
-        return false
+        NodeRecycler.recycleUnless(n, node)
+        return result
     }
 
     /** Coordinate form of [isDirectOutboundControl]: checks the deepest node under (x, y). */
     @JvmStatic
-    fun isDirectOutboundAt(root: AccessibilityNodeInfo?, x: Int, y: Int): Boolean =
-        isDirectOutboundControl(deepestAt(root, x, y, 0))
+    fun isDirectOutboundAt(root: AccessibilityNodeInfo?, x: Int, y: Int): Boolean {
+        val leaf = deepestAt(root, x, y, 0)
+        return try { isDirectOutboundControl(leaf) } finally { NodeRecycler.recycleUnless(leaf, root) }
+    }
 
+    /** Deepest node under (x, y); children off the returned path are recycled. */
     private fun deepestAt(node: AccessibilityNodeInfo?, x: Int, y: Int, depth: Int): AccessibilityNodeInfo? {
         if (node == null || depth > 60) return null
         val r = Rect()
         node.getBoundsInScreen(r)
         if (!r.contains(x, y)) return null
         for (i in node.childCount - 1 downTo 0) {
-            val hit = deepestAt(node.getChild(i), x, y, depth + 1)
+            val child = node.getChild(i) ?: continue
+            val hit = deepestAt(child, x, y, depth + 1)
+            if (hit !== child) NodeRecycler.recycle(child)
             if (hit != null) return hit
         }
         return node
     }
 
-    private val NO_WORDS = setOf(
-        "no", "nope", "nahi", "nahin", "nai", "na", "naa", "mat", "nako", "cancel", "stop", "ruko", "rehne",
-        "vaddu", "vadhu", "kaadu", "ledu", "venda", "naahi", "thamba",
-        "नहीं", "नही", "ना", "मत", "रुको", "नाही", "नको", "थांबा", "రద్దు", "వద్దు", "కాదు", "లేదు"
-    )
-    private val YES_WORDS = setOf(
-        "yes", "yeah", "yep", "ok", "okay", "okk", "sure", "haan", "han", "haa", "ha", "haanji", "hanji", "ji",
-        "theek", "thik", "sahi", "bhejo", "bhej", "karo", "kar", "lagao", "milao", "avunu", "sare", "seri",
-        "cheyyi", "pampu", "pampandi", "ho", "hoy", "pathva", "kara", "lava",
-        "हाँ", "हां", "हा", "जी", "ठीक", "सही", "भेजो", "भेज", "करो", "लगाओ", "मिलाओ",
-        "हो", "होय", "पाठवा", "करा", "लावा",
-        "అవును", "సరే", "పంపు", "పంపండి", "చెయ్యి"
-    )
-
-    /** Short yes / no in Hindi, Marathi, Telugu or English. Long or unclear replies are OTHER. */
+    /**
+     * Yes / no in Hindi, Marathi, Telugu or English, judged against the action asked now. A longer
+     * yes ("haan bhej do Ravi ko abhi") still counts; a reply that adds a new request is OTHER.
+     * See [ConfirmReplyClassifier].
+     */
     @JvmStatic
-    fun classify(text: String): Reply {
-        val tokens = text.lowercase()
-            .replace(Regex("[\\p{P}\\p{S}]"), " ")
-            .trim()
-            .split(Regex("\\s+"))
-            .filter { it.isNotEmpty() }
-        if (tokens.isEmpty() || tokens.size > 6) return Reply.OTHER
-        if (tokens.any { it in NO_WORDS }) return Reply.NO
-        if (tokens.first() in YES_WORDS) return Reply.YES
-        return Reply.OTHER
+    fun classify(text: String): Reply = when (ConfirmReplyClassifier.classify(text, peek()?.toolName)) {
+        ConfirmReplyClassifier.Reply.YES -> Reply.YES
+        ConfirmReplyClassifier.Reply.NO -> Reply.NO
+        ConfirmReplyClassifier.Reply.OTHER -> Reply.OTHER
     }
 }

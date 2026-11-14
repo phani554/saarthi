@@ -3,6 +3,7 @@
 
 package io.agents.pokeclaw.tool.impl
 
+import io.agents.pokeclaw.a11y.NodeRecycler
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.content.Intent
@@ -172,7 +173,10 @@ class PlaceCallTool : BaseTool() {
         if (desc == "end call" || desc == "leave call") return true
         if (text == "calling" || text == "calling…" || text == "calling..." || text == "ringing" || text == "ringing…") return true
         for (i in 0 until node.childCount) {
-            if (hasWhatsAppCallScreen(node.getChild(i), depth + 1)) return true
+            val child = node.getChild(i) ?: continue
+            val hit = hasWhatsAppCallScreen(child, depth + 1)
+            NodeRecycler.recycle(child) // boolean scan: no node escapes
+            if (hit) return true
         }
         return false
     }
@@ -436,8 +440,10 @@ class PlaceCallTool : BaseTool() {
             return node
         }
         for (i in 0 until node.childCount) {
-            val child = findHeaderTitleByRegion(node.getChild(i))
-            if (child != null) return child
+            val c = node.getChild(i) ?: continue
+            val hit = findHeaderTitleByRegion(c)
+            if (hit !== c) NodeRecycler.recycle(c) // keep only the node we return
+            if (hit != null) return hit
         }
         return null
     }
@@ -467,17 +473,18 @@ class PlaceCallTool : BaseTool() {
     private fun collectById(root: AccessibilityNodeInfo, id: String): List<AccessibilityNodeInfo> =
         try { root.findAccessibilityNodeInfosByViewId(id) ?: emptyList() } catch (_: Exception) { emptyList() }
 
-    private fun collectHeaderNodes(node: AccessibilityNodeInfo?, results: MutableList<AccessibilityNodeInfo>) {
-        if (node == null || !node.isVisibleToUser) return
+    /** Returns true when [node] itself was added to [results] (then the caller must not recycle it). */
+    private fun collectHeaderNodes(node: AccessibilityNodeInfo?, results: MutableList<AccessibilityNodeInfo>): Boolean {
+        if (node == null || !node.isVisibleToUser) return false
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
-        if (bounds.top < 350 && (node.text != null || node.contentDescription != null)) {
-            results.add(node)
-        }
+        val added = bounds.top < 350 && (node.text != null || node.contentDescription != null)
+        if (added) results.add(node)
         for (i in 0 until node.childCount) {
             val child = node.getChild(i)
-            if (child != null) collectHeaderNodes(child, results)
+            if (child != null && !collectHeaderNodes(child, results)) NodeRecycler.recycle(child)
         }
+        return added
     }
 
     private fun findTopActionBarCallButton(root: AccessibilityNodeInfo?, isVideo: Boolean): AccessibilityNodeInfo? {
@@ -495,8 +502,10 @@ class PlaceCallTool : BaseTool() {
         return candidates.firstOrNull()
     }
 
-    private fun collectTopActionBarCallNodes(node: AccessibilityNodeInfo?, isVideo: Boolean, results: MutableList<AccessibilityNodeInfo>) {
-        if (node == null || !node.isVisibleToUser) return
+    /** Returns true when [node] itself was added to [results] (then the caller must not recycle it). */
+    private fun collectTopActionBarCallNodes(node: AccessibilityNodeInfo?, isVideo: Boolean, results: MutableList<AccessibilityNodeInfo>): Boolean {
+        if (node == null || !node.isVisibleToUser) return false
+        var added = false
 
         val bounds = Rect()
         node.getBoundsInScreen(bounds)
@@ -515,12 +524,14 @@ class PlaceCallTool : BaseTool() {
 
             if (isMatch) {
                 results.add(node)
+                added = true
             }
         }
 
         for (i in 0 until node.childCount) {
             val child = node.getChild(i)
-            if (child != null) collectTopActionBarCallNodes(child, isVideo, results)
+            if (child != null && !collectTopActionBarCallNodes(child, isVideo, results)) NodeRecycler.recycle(child)
         }
+        return added
     }
 }

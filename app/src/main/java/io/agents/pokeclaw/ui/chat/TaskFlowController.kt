@@ -428,7 +428,8 @@ class TaskFlowController(
                 executeDirectToolTask(text, DirectDeviceDataGuard.DeterministicToolCall(approved.toolName, approved.params))
             }
             OutboundConfirmGate.Reply.NO -> {
-                OutboundConfirmGate.clear()
+                // Drop only the action she was asked about; a queued one behind it is asked next.
+                val more = OutboundConfirmGate.decline()
                 VoiceManager.onPlaybackFinished = null
                 currentVoiceState = VoiceInteractionState.IDLE
                 clearPreTaskHistory()
@@ -436,6 +437,7 @@ class TaskFlowController(
                 val line = SpokenStrings.declined()
                 addSystem(line)
                 VoiceManager.speakAsync(line, flush = true)
+                if (more) askNextQueuedConfirmation()
                 onPersistConversation()
                 true
             }
@@ -458,17 +460,29 @@ class TaskFlowController(
         runOffMain {
             try {
                 val result = ToolRegistry.getInstance().executeTool(toolCall.toolName, toolCall.params)
-                val english = if (result.isSuccess) {
-                    result.data ?: "Done."
+                // The tool parked itself behind the confirm gate: show its question, not "Failed: CONFIRMATION NEEDED".
+                val askResult = OutboundConfirmGate.isAskResult(result)
+                val answer = if (askResult) {
+                    null
                 } else {
-                    "Failed: ${result.error ?: "unknown error"}"
+                    val english = if (result.isSuccess) {
+                        result.data ?: "Done."
+                    } else {
+                        "Failed: ${result.error ?: "unknown error"}"
+                    }
+                    // Tool results are English (the agent reads them); the user hears her reply language.
+                    ReplyLocalizer.localize(english)
                 }
-                // Tool results are English (the agent reads them); the user hears her reply language.
-                val answer = ReplyLocalizer.localize(english)
                 activity.runOnUiThread {
-                    replaceTypingIndicator(answer)
-                    VoiceManager.speakAsync(answer, flush = true)
+                    if (answer != null) {
+                        replaceTypingIndicator(answer)
+                        VoiceManager.speakAsync(answer, flush = true)
+                    } else {
+                        removeTypingIndicator()
+                    }
                     cleanupAfterTask()
+                    // Another send / call may have been queued behind this one: ask it now.
+                    askNextQueuedConfirmation()
                 }
             } catch (e: Exception) {
                 XLog.e(TAG, "executeDirectToolTask failed: ${e.message}", e)
@@ -479,6 +493,22 @@ class TaskFlowController(
             }
         }
         return true
+    }
+
+    /**
+     * Asks the oldest action still waiting behind the confirm gate (marks it asked), then reopens the
+     * mic for her yes / no once the question has been spoken. No-op when nothing waits. Main thread.
+     */
+    private fun askNextQueuedConfirmation() {
+        val next = OutboundConfirmGate.pendingQuestion() ?: return
+        addSystem(next)
+        VoiceManager.speakAsync(next, flush = false)
+        VoiceManager.onPlaybackFinished = {
+            if (OutboundConfirmGate.peek() != null) {
+                activity.runOnUiThread { onTriggerVoiceCapture?.invoke() }
+            }
+        }
+        onPersistConversation()
     }
 
     private fun canRunWithoutAccessibility(text: String): Boolean {

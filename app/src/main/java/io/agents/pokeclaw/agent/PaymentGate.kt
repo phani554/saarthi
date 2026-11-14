@@ -4,6 +4,7 @@ package io.agents.pokeclaw.agent
 
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import io.agents.pokeclaw.a11y.NodeRecycler
 import io.agents.pokeclaw.utils.XLog
 
 /**
@@ -52,37 +53,49 @@ object PaymentGate {
         if (node == null) return false
         if (isPaymentNode(node)) return true
         if (node.isClickable) return false
+        // Ancestors are obtained here and never returned: recycled (API < 33). [node] is the caller's.
         var p: AccessibilityNodeInfo? = node.parent
         var depth = 0
         while (p != null && depth < ANCESTOR_DEPTH) {
-            if (isPaymentNode(p)) return true
-            if (p.isClickable) return false
-            p = p.parent
+            if (isPaymentNode(p)) { NodeRecycler.recycle(p); return true }
+            if (p.isClickable) { NodeRecycler.recycle(p); return false }
+            val next = p.parent
+            NodeRecycler.recycle(p)
+            p = next
             depth++
         }
+        NodeRecycler.recycle(p)
         return false
     }
 
-    /** Breadth-first scan of the node and its descendants up to [SUBTREE_DEPTH] levels. */
+    /**
+     * Breadth-first scan of the node and its descendants up to [SUBTREE_DEPTH] levels.
+     * Descendants are obtained here and recycled (API < 33); [root] belongs to the caller.
+     */
     private fun findPaymentLabel(root: AccessibilityNodeInfo): String? {
         val queue = ArrayDeque<Pair<AccessibilityNodeInfo, Int>>()
         queue.addLast(root to 0)
         var visited = 0
-        while (queue.isNotEmpty() && visited < SUBTREE_MAX_NODES) {
+        var found: String? = null
+        while (queue.isNotEmpty() && visited < SUBTREE_MAX_NODES && found == null) {
             val (n, d) = queue.removeFirst()
             visited++
             val text = n.text?.toString()
-            if (isPaymentLabel(text)) return text
             val desc = n.contentDescription?.toString()
-            if (isPaymentLabel(desc)) return desc
-            if (d < SUBTREE_DEPTH) {
+            if (isPaymentLabel(text)) {
+                found = text
+            } else if (isPaymentLabel(desc)) {
+                found = desc
+            } else if (d < SUBTREE_DEPTH) {
                 for (i in 0 until n.childCount) {
                     val c = n.getChild(i) ?: continue
                     queue.addLast(c to d + 1)
                 }
             }
+            NodeRecycler.recycleUnless(n, root)
         }
-        return null
+        for ((left, _) in queue) NodeRecycler.recycleUnless(left, root)
+        return found
     }
 
     /** Coordinate taps: check the smallest node containing (x, y) and its clickable ancestor. */
@@ -91,15 +104,23 @@ object PaymentGate {
         val leaf = deepestAt(root, x, y) ?: return false
         var n: AccessibilityNodeInfo? = leaf
         var depth = 0
+        var blocked = false
         while (n != null && depth < 4) {
-            if (isPaymentNode(n)) return true
+            if (isPaymentNode(n)) { blocked = true; break }
             if (n.isClickable) break
-            n = n.parent
+            val next = n.parent
+            NodeRecycler.recycleUnless(n, root)
+            n = next
             depth++
         }
-        return false
+        NodeRecycler.recycleUnless(n, root)
+        return blocked
     }
 
+    /**
+     * Deepest node under (x, y). Children that are not on the returned path are recycled; the
+     * returned node is the caller's to recycle (it may be [node] itself, i.e. the caller's root).
+     */
     private fun deepestAt(node: AccessibilityNodeInfo?, x: Int, y: Int): AccessibilityNodeInfo? {
         if (node == null) return null
         val r = Rect()
@@ -107,7 +128,9 @@ object PaymentGate {
         if (!r.contains(x, y)) return null
         // Last child is drawn on top, so it wins when siblings overlap.
         for (i in node.childCount - 1 downTo 0) {
-            val hit = deepestAt(node.getChild(i), x, y)
+            val child = node.getChild(i) ?: continue
+            val hit = deepestAt(child, x, y)
+            if (hit !== child) NodeRecycler.recycle(child)
             if (hit != null) return hit
         }
         return node
@@ -158,15 +181,21 @@ object PaymentGate {
         val queue = ArrayDeque<AccessibilityNodeInfo>()
         queue.addLast(root)
         var visited = 0
-        while (queue.isNotEmpty() && visited < SCREEN_SCAN_MAX_NODES) {
+        var hit = false
+        while (queue.isNotEmpty() && visited < SCREEN_SCAN_MAX_NODES && !hit) {
             val n = queue.removeFirst()
             visited++
             val t = n.text?.toString()
             val d = n.contentDescription?.toString()
-            if ((t != null && PAY_SCREEN.containsMatchIn(t)) || (d != null && PAY_SCREEN.containsMatchIn(d))) return true
-            for (i in 0 until n.childCount) n.getChild(i)?.let { queue.addLast(it) }
+            if ((t != null && PAY_SCREEN.containsMatchIn(t)) || (d != null && PAY_SCREEN.containsMatchIn(d))) {
+                hit = true
+            } else {
+                for (i in 0 until n.childCount) n.getChild(i)?.let { queue.addLast(it) }
+            }
+            NodeRecycler.recycleUnless(n, root) // [root] is the caller's
         }
-        return false
+        for (left in queue) NodeRecycler.recycleUnless(left, root)
+        return hit
     }
 
     /** Strict block for a screen root: a UPI / bank app showing anything payment-related. */
@@ -183,10 +212,17 @@ object PaymentGate {
     fun isStrictBlockedNode(node: AccessibilityNodeInfo?, activeRoot: AccessibilityNodeInfo?): Boolean {
         if (node == null || !isUpiOrBankPackage(node.packageName)) return false
         if (isPaymentNode(node)) return true
-        val root = try { node.window?.root } catch (_: Exception) { null } ?: activeRoot
-        if (root != null && isUpiOrBankPackage(root.packageName)) return isStrictBlockedScreen(root)
-        // No root to read: inside a UPI / bank app, fail closed.
-        return true
+        val window = try { node.window } catch (_: Exception) { null }
+        val windowRoot = try { window?.root } catch (_: Exception) { null }
+        NodeRecycler.recycleWindow(window)
+        val root = windowRoot ?: activeRoot
+        try {
+            if (root != null && isUpiOrBankPackage(root.packageName)) return isStrictBlockedScreen(root)
+            // No root to read: inside a UPI / bank app, fail closed.
+            return true
+        } finally {
+            NodeRecycler.recycle(windowRoot) // obtained here; activeRoot is the caller's
+        }
     }
 
     /** A PIN / passcode / CVV field: never typed into, in any app. */

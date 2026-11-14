@@ -349,16 +349,22 @@ public class ClawAccessibilityService extends AccessibilityService {
      * window other than the focused one).
      */
     private boolean isPaymentAtPoint(int x, int y) {
+        // Every node / window obtained here is local to this check: recycled on API < 33.
         AccessibilityNodeInfo activeRoot = getRootInActiveWindow();
-        if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(activeRoot, x, y)) {
-            return true;
-        }
-        // UPI / bank apps: any gesture on a payment-looking screen is refused.
-        if (io.agents.pokeclaw.agent.PaymentGate.isStrictBlockedScreen(activeRoot)) {
-            return true;
-        }
         try {
-            List<AccessibilityWindowInfo> windows = getWindows();
+            if (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(activeRoot, x, y)) {
+                return true;
+            }
+            // UPI / bank apps: any gesture on a payment-looking screen is refused.
+            if (io.agents.pokeclaw.agent.PaymentGate.isStrictBlockedScreen(activeRoot)) {
+                return true;
+            }
+        } finally {
+            io.agents.pokeclaw.a11y.NodeRecycler.recycle(activeRoot);
+        }
+        List<AccessibilityWindowInfo> windows = null;
+        try {
+            windows = getWindows();
             if (windows != null) {
                 Rect wb = new Rect();
                 for (AccessibilityWindowInfo window : windows) {
@@ -366,14 +372,22 @@ public class ClawAccessibilityService extends AccessibilityService {
                     window.getBoundsInScreen(wb);
                     if (!wb.contains(x, y)) continue;
                     AccessibilityNodeInfo wRoot = window.getRoot();
-                    if (wRoot != null && (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(wRoot, x, y)
-                            || io.agents.pokeclaw.agent.PaymentGate.isStrictBlockedScreen(wRoot))) {
-                        return true;
+                    try {
+                        if (wRoot != null && (io.agents.pokeclaw.agent.PaymentGate.isPaymentAt(wRoot, x, y)
+                                || io.agents.pokeclaw.agent.PaymentGate.isStrictBlockedScreen(wRoot))) {
+                            return true;
+                        }
+                    } finally {
+                        io.agents.pokeclaw.a11y.NodeRecycler.recycle(wRoot);
                     }
                 }
             }
         } catch (Exception e) {
             XLog.w(TAG, "PaymentGate window scan failed", e);
+        } finally {
+            if (windows != null) {
+                for (AccessibilityWindowInfo w : windows) io.agents.pokeclaw.a11y.NodeRecycler.recycleWindow(w);
+            }
         }
         return false;
     }
@@ -475,21 +489,26 @@ public class ClawAccessibilityService extends AccessibilityService {
             }
             XLog.w(TAG, "ACTION_CLICK returned false, falling back to parent/tap");
         }
-        // Try clicking the parent if the node itself is not clickable
+        // Try clicking the parent if the node itself is not clickable.
+        // Ancestors are obtained here and never leave this method: each is recycled (API < 33).
         AccessibilityNodeInfo parent = node.getParent();
         while (parent != null) {
             if (parent.isClickable()) {
                 // The ancestor can carry the pay label on a sibling of node: re-check it.
                 if (io.agents.pokeclaw.agent.PaymentGate.isPaymentNode(parent)) {
                     XLog.w(TAG, "clickNode blocked by PaymentGate on clickable ancestor");
+                    io.agents.pokeclaw.a11y.NodeRecycler.recycle(parent);
                     return false;
                 }
                 boolean clicked = parent.performAction(AccessibilityNodeInfo.ACTION_CLICK);
                 if (clicked) {
+                    io.agents.pokeclaw.a11y.NodeRecycler.recycle(parent);
                     return true;
                 }
             }
-            parent = parent.getParent();
+            AccessibilityNodeInfo next = parent.getParent();
+            io.agents.pokeclaw.a11y.NodeRecycler.recycle(parent);
+            parent = next;
         }
         // Fallback: tap at center of node bounds
         Rect bounds = new Rect();
@@ -609,8 +628,10 @@ public class ClawAccessibilityService extends AccessibilityService {
             // Benchmark hook: one volatile read when benchmark mode is off.
             final boolean bench = io.agents.pokeclaw.benchmark.BenchmarkRecorder.isRecording();
             final long benchT0 = bench ? System.nanoTime() : 0L;
-            buildNodeTree(root, sb, 0);
+            boolean rootCached = buildNodeTree(root, sb, 0);
             if (bench) recordBenchmarkCapture(root, sb.length(), nodeCounter.get(), System.nanoTime() - benchT0);
+            // The root is cached when it is itself a listed node; otherwise it is ours to recycle.
+            if (!rootCached) io.agents.pokeclaw.a11y.NodeRecycler.recycle(root);
             return sb.toString();
         } catch (Exception e) {
             XLog.e(TAG, "getScreenTree error", e);
@@ -628,28 +649,57 @@ public class ClawAccessibilityService extends AccessibilityService {
         return nodeMetaMap.get(nodeId);
     }
 
-    /** Click node by node ID with ancestor & gesture fallback. */
+    /**
+     * Click node by node ID (ancestor & gesture fallback inside clickNode).
+     * The cached node is refreshed first. If it is gone, moved, or its text changed since the last
+     * get_screen_info, nothing is tapped and false is returned: tapping the old coordinates would hit
+     * whatever is there now. Use {@link #checkNodeFresh(String)} to get the reason.
+     */
     public boolean clickNodeById(String nodeId) {
         NodeMetadata meta = nodeMetaMap.get(nodeId);
         if (meta != null && meta.node != null) {
-            // Refresh the cached snapshot so the PaymentGate reads the node's current label;
-            // a node that can no longer be refreshed is stale, so fall back to the (gated) tap.
-            boolean fresh;
-            try {
-                fresh = meta.node.refresh();
-            } catch (Exception e) {
-                fresh = false;
+            io.agents.pokeclaw.a11y.StaleNodeCheck.Verdict verdict = refreshAndJudge(meta);
+            if (verdict != io.agents.pokeclaw.a11y.StaleNodeCheck.Verdict.FRESH) {
+                XLog.w(TAG, "clickNodeById " + nodeId + " refused: "
+                        + io.agents.pokeclaw.a11y.StaleNodeCheck.describe(verdict));
+                return false;
             }
-            if (fresh) {
-                boolean clicked = clickNode(meta.node);
-                if (clicked) return true;
-            }
+            return clickNode(meta.node);
         }
+        // No cached node (never expected: ids and nodes are cached together): coordinate tap, still gated.
         int[] coords = nodeIdMap.get(nodeId);
         if (coords != null && coords.length >= 2) {
             return performTap(coords[0], coords[1]);
         }
         return false;
+    }
+
+    /**
+     * Refreshes the cached node behind [nodeId] and says whether it is still the element the model
+     * saw. Returns null when the id is not cached (call get_screen_info first), otherwise a verdict.
+     */
+    public io.agents.pokeclaw.a11y.StaleNodeCheck.Verdict checkNodeFresh(String nodeId) {
+        NodeMetadata meta = nodeMetaMap.get(nodeId);
+        if (meta == null || meta.node == null) return null;
+        return refreshAndJudge(meta);
+    }
+
+    private io.agents.pokeclaw.a11y.StaleNodeCheck.Verdict refreshAndJudge(NodeMetadata meta) {
+        boolean refreshed;
+        try {
+            refreshed = meta.node.refresh();
+        } catch (Exception e) {
+            refreshed = false;
+        }
+        if (!refreshed) return io.agents.pokeclaw.a11y.StaleNodeCheck.Verdict.GONE;
+        Rect now = new Rect();
+        meta.node.getBoundsInScreen(now);
+        int cx = meta.coords != null && meta.coords.length >= 2 ? meta.coords[0] : now.centerX();
+        int cy = meta.coords != null && meta.coords.length >= 2 ? meta.coords[1] : now.centerY();
+        return io.agents.pokeclaw.a11y.StaleNodeCheck.judge(
+                true, meta.node.isVisibleToUser(),
+                meta.text, meta.desc, cx, cy,
+                meta.node.getText(), meta.node.getContentDescription(), now.centerX(), now.centerY());
     }
 
     /**
@@ -748,16 +798,20 @@ public class ClawAccessibilityService extends AccessibilityService {
         return result;
     }
 
-    private void buildNodeTree(AccessibilityNodeInfo node, StringBuilder sb, int depth) {
+    /**
+     * Appends [node] and its subtree. Returns true when this node instance was put in the node cache
+     * (nodeMetaMap) and so must NOT be recycled; children that were not cached are recycled here.
+     */
+    private boolean buildNodeTree(AccessibilityNodeInfo node, StringBuilder sb, int depth) {
         if (node == null) {
-            return;
+            return false;
         }
 
         // Skip soft keyboard nodes so keyboard keys do not pollute the screen tree
         if (node.getPackageName() != null) {
             String pkg = node.getPackageName().toString().toLowerCase();
             if (pkg.contains("inputmethod") || pkg.contains("keyboard") || pkg.contains("honeyboard") || pkg.contains("swiftkey")) {
-                return;
+                return false;
             }
         }
 
@@ -767,10 +821,10 @@ public class ClawAccessibilityService extends AccessibilityService {
             for (int i = 0; i < node.getChildCount(); i++) {
                 AccessibilityNodeInfo child = node.getChild(i);
                 if (child != null) {
-                    buildNodeTree(child, sb, depth);
+                    if (!buildNodeTree(child, sb, depth)) io.agents.pokeclaw.a11y.NodeRecycler.recycle(child);
                 }
             }
-            return;
+            return false;
         }
 
         // Determine whether the current node is "meaningful" (has text/desc, is interactive/scrollable/editable/progress/slider)
@@ -847,9 +901,10 @@ public class ClawAccessibilityService extends AccessibilityService {
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
-                buildNodeTree(child, sb, childDepth);
+                if (!buildNodeTree(child, sb, childDepth)) io.agents.pokeclaw.a11y.NodeRecycler.recycle(child);
             }
         }
+        return isMeaningful;
     }
 
     /**
@@ -932,11 +987,12 @@ public class ClawAccessibilityService extends AccessibilityService {
 
         sb.append("\n");
 
-        // recurse all children
+        // recurse all children (nothing here is cached: each child is recycled after its subtree)
         for (int i = 0; i < node.getChildCount(); i++) {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child != null) {
                 buildNodeTreeFull(child, sb, depth + 1);
+                io.agents.pokeclaw.a11y.NodeRecycler.recycle(child);
             }
         }
     }
@@ -972,6 +1028,8 @@ public class ClawAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo child = node.getChild(i);
             if (child == null) continue;
             collectTextMatches(child, query, exactMatches, relaxedMatches);
+            // Matches are stored as obtain() copies, so the child itself is ours to recycle.
+            io.agents.pokeclaw.a11y.NodeRecycler.recycle(child);
         }
     }
 

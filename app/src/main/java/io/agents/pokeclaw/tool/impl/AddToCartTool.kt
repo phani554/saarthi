@@ -5,6 +5,7 @@ package io.agents.pokeclaw.tool.impl
 
 import android.graphics.Rect
 import android.view.accessibility.AccessibilityNodeInfo
+import io.agents.pokeclaw.a11y.NodeRecycler
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.tool.BaseTool
 import io.agents.pokeclaw.tool.ToolParameter
@@ -140,8 +141,12 @@ class AddToCartTool : BaseTool() {
             return ToolResult.error("Blocked: that control is a payment / place-order button. The user must complete payment themselves.")
         }
         val cardBounds = Rect()
-        (target.parent ?: target).getBoundsInScreen(cardBounds)
-        val before = cartSignature(service.rootInActiveWindow)
+        val cardParent = target.parent
+        (cardParent ?: target).getBoundsInScreen(cardBounds)
+        NodeRecycler.recycle(cardParent)
+        val beforeRoot = service.rootInActiveWindow
+        val before = cartSignature(beforeRoot)
+        NodeRecycler.recycle(beforeRoot)
         val clicked = service.clickNode(target)
         XLog.i(TAG, "clickAndVerify: clicked '${node.text ?: node.contentDescription ?: node.viewIdResourceName}', result=$clicked")
         if (!clicked) return ToolResult.error("Could not click the ADD button")
@@ -153,10 +158,13 @@ class AddToCartTool : BaseTool() {
             }
             val now = service.rootInActiveWindow ?: continue
             val after = cartSignature(now)
-            if (after.isNotEmpty() && after != before) {
+            val countChanged = after.isNotEmpty() && after != before
+            val stepper = !countChanged && stepperInBounds(now, cardBounds)
+            NodeRecycler.recycle(now) // poll root: obtained here, not kept
+            if (countChanged) {
                 return ToolResult.success("$okMessage (verified: cart count changed)")
             }
-            if (stepperInBounds(now, cardBounds)) {
+            if (stepper) {
                 return ToolResult.success("$okMessage (verified: quantity stepper on the product card)")
             }
         }
@@ -178,7 +186,11 @@ class AddToCartTool : BaseTool() {
         if ((isCartId && text.isNotEmpty()) || ITEMS_LABEL.containsMatchIn(text)) {
             out.append(id).append('=').append(text).append(';')
         }
-        for (i in 0 until node.childCount) collectCartSignals(node.getChild(i), out, depth + 1)
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            collectCartSignals(child, out, depth + 1)
+            NodeRecycler.recycle(child)
+        }
     }
 
     /** True when the area holds a quantity number plus a +/- control, or an "in cart" label. */
@@ -200,17 +212,28 @@ class AddToCartTool : BaseTool() {
                 d.contains("add one") || d.contains("remove one")) found[1] = true
             if (t.contains("in cart") || d.contains("in cart")) { found[0] = true; found[1] = true }
         }
-        for (i in 0 until node.childCount) scanStepper(node.getChild(i), area, found, depth + 1)
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            scanStepper(child, area, found, depth + 1)
+            NodeRecycler.recycle(child)
+        }
     }
 
     private fun cardIsOutOfStock(node: AccessibilityNodeInfo): Boolean {
-        var card: AccessibilityNodeInfo? = node.parent ?: return false
-        repeat(2) {
+        // Parent and grandparent cards; both obtained here and recycled (API < 33).
+        var card: AccessibilityNodeInfo? = node.parent
+        var level = 0
+        var out = false
+        while (card != null && level < 2 && !out) {
             val text = subtreeText(card, 4)
-            if (text.contains("out of stock") || text.contains("sold out") || text.contains("currently unavailable")) return true
-            card = card?.parent ?: return false
+            out = text.contains("out of stock") || text.contains("sold out") || text.contains("currently unavailable")
+            val next = if (out || level == 1) null else card.parent
+            NodeRecycler.recycle(card)
+            card = next
+            level++
         }
-        return false
+        NodeRecycler.recycle(card)
+        return out
     }
 
     /** Returns null when no variant sheet is showing; otherwise the verified result. */
@@ -251,7 +274,9 @@ class AddToCartTool : BaseTool() {
         val d = node.contentDescription?.toString()?.lowercase()?.replace(" ", "").orEmpty()
         if ((t == want || d == want) && node.isVisibleToUser) return node
         for (i in 0 until node.childCount) {
-            val hit = findExactLabel(node.getChild(i), label, depth + 1)
+            val child = node.getChild(i) ?: continue
+            val hit = findExactLabel(child, label, depth + 1)
+            if (hit !== child) NodeRecycler.recycle(child) // keep only the node we return
             if (hit != null) return hit
         }
         return null
@@ -274,14 +299,21 @@ class AddToCartTool : BaseTool() {
         val tokens = tokenize(productName)
         if (tokens.isEmpty()) return true
         // Look at the product card (parent / grandparent subtree), not just the parent's own text.
-        var card: AccessibilityNodeInfo? = node.parent ?: return false
-        repeat(2) {
+        // Ancestors are obtained here and recycled (API < 33).
+        var card: AccessibilityNodeInfo? = node.parent
+        var level = 0
+        var matched = false
+        while (card != null && level < 2 && !matched) {
             val cardTokens = tokenize(subtreeText(card, 4)).toSet()
             val hits = tokens.count { it in cardTokens }
-            if (hits * 10 >= tokens.size * 6) return true // >= 60% of the product's words
-            card = card?.parent ?: return false
+            matched = hits * 10 >= tokens.size * 6 // >= 60% of the product's words
+            val next = if (matched || level == 1) null else card.parent
+            NodeRecycler.recycle(card)
+            card = next
+            level++
         }
-        return false
+        NodeRecycler.recycle(card)
+        return matched
     }
 
     /** Lowercase words, units and punctuation dropped (e.g. "500ml", "pack", "of" ignored). */
@@ -295,7 +327,11 @@ class AddToCartTool : BaseTool() {
         val sb = StringBuilder()
         node.text?.let { sb.append(it).append(' ') }
         node.contentDescription?.let { sb.append(it).append(' ') }
-        for (i in 0 until node.childCount) sb.append(subtreeText(node.getChild(i), depth - 1))
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            sb.append(subtreeText(child, depth - 1))
+            NodeRecycler.recycle(child)
+        }
         return sb.toString().lowercase()
     }
 

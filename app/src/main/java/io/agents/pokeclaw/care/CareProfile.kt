@@ -113,7 +113,12 @@ object CareRoles {
     }
 }
 
-/** Persists the profile as one JSON blob in MMKV (same store as the rest of the app's settings). */
+/**
+ * Persists the profile as one JSON blob through KVUtils. [KEY] is listed in
+ * io.agents.pokeclaw.security.SecretKeyPolicy, so it lives in the Keystore-encrypted MMKV
+ * (medical history, medicines and family numbers are never written in plain text); an older plain
+ * copy is moved there once at start-up by KVUtils.init. Do not rename [KEY] without updating that list.
+ */
 object CareProfileStore {
     private const val KEY = "KEY_CARE_PROFILE_V1"
     private val gson = Gson()

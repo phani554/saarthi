@@ -88,6 +88,7 @@ class ReadMessageItemsTool : BaseTool() {
                 root.findAccessibilityNodeInfosByViewId(id)?.forEach { n ->
                     val t = n.text?.toString()?.trim().orEmpty()
                     if (n.isVisibleToUser && t.isNotEmpty()) byId.add(t)
+                    io.agents.pokeclaw.a11y.NodeRecycler.recycle(n) // only the text is kept
                 }
             } catch (_: Exception) { }
         }
@@ -114,7 +115,9 @@ class ReadMessageItemsTool : BaseTool() {
             }
         }
         for (i in 0 until node.childCount) {
-            collectMessageTextNodes(node.getChild(i), results)
+            val child = node.getChild(i) ?: continue
+            collectMessageTextNodes(child, results)
+            io.agents.pokeclaw.a11y.NodeRecycler.recycle(child) // only strings are kept
         }
     }
 }
