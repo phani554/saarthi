@@ -53,7 +53,9 @@ class StuckDetector(private val windowSize: Int = 8) {
         val fingerprint: String
     )
 
-    fun record(packageName: String, action: String, screenHash: Int, screenDiffCount: Int, error: String?): Detection? {
+    fun record(packageName: String, rawAction: String, screenHash: Int, screenDiffCount: Int, error: String?): Detection? {
+        // Swipes differ by a few pixels or ms each time; compare them by direction so a swipe loop is caught.
+        val action = normaliseAction(rawAction)
         actions.addLast(action)
         if (actions.size > windowSize) actions.removeFirst()
 
@@ -145,6 +147,11 @@ class StuckDetector(private val windowSize: Int = 8) {
     }
 
     private fun checkSameAction(): Signal? {
+        // Five swipes/scrolls in a row with nothing else in between is a search that isn't working.
+        val tail = actions.toList().takeLast(5)
+        if (tail.size == 5 && tail.all { it.startsWith("swipe") || it.startsWith("scroll") }) {
+            return Signal.SameAction("repeated swiping", 5)
+        }
         if (actions.size < 3) return null
         val last3 = actions.toList().takeLast(3)
         return if (last3.all { it == last3[0] }) {
@@ -228,6 +235,19 @@ class StuckDetector(private val windowSize: Int = 8) {
     }
 
     companion object {
+        private val NUM = { k: String -> Regex(""""?$k"?\s*[:=]\s*(-?\d+)""") }
+
+        /** "swipe:{start_x: 1100, start_y: 200, end_x: 200, end_y: 210 ...}" -> "swipe:left". Others unchanged. */
+        fun normaliseAction(action: String): String {
+            if (!action.startsWith("swipe")) return action
+            fun v(k: String) = NUM(k).find(action)?.groupValues?.get(1)?.toIntOrNull()
+            val sx = v("start_x"); val sy = v("start_y"); val ex = v("end_x"); val ey = v("end_y")
+            if (sx == null || sy == null || ex == null || ey == null) {
+                return Regex("""(?i)direction"?\s*[:=]\s*"?(\w+)""").find(action)?.let { "swipe:" + it.groupValues[1].lowercase() } ?: "swipe"
+            }
+            val dx = ex - sx; val dy = ey - sy
+            return "swipe:" + if (kotlin.math.abs(dx) >= kotlin.math.abs(dy)) (if (dx < 0) "left" else "right") else (if (dy < 0) "up" else "down")
+        }
         private const val TAG = "StuckDetector"
     }
 }

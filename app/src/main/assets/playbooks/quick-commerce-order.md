@@ -9,9 +9,6 @@ triggers:
   - "order from"
   - "buy from"
   - "items from"
-  - "flipkart minutes"
-  - "minutes"
-  - "order"
 ---
 
 When the user asks to order multiple items from Blinkit, Zepto, Instamart, or another quick-commerce app:

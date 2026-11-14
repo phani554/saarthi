@@ -698,6 +698,7 @@ class DefaultAgentService : AgentService {
         var previousScreenTexts: Set<String> = emptySet()
         val tokenMonitor = TokenMonitor(config.modelName)
         val stuckDetector = StuckDetector()
+        var minutesSwitchDone = false
         val taskBudget = TaskBudget.fromSettings()
         var softLimitWarned = false
         var hasExecutedTool = false
@@ -974,6 +975,24 @@ class DefaultAgentService : AgentService {
                 if (result.isSuccess) {
                     inAppSearchGuard.recordSuccessfulTool(toolName, params)
                     emailComposeGuard.recordSuccessfulTool(toolName)
+                }
+                // Flipkart's Minutes tab is an image with no text: switch to it in code once per task.
+                if (toolName == "open_app" && result.isSuccess &&
+                    params.values.any { it?.toString()?.contains("flipkart", true) == true } &&
+                    FlipkartMinutesSwitch.wanted(TaskExecutionState.instance.taskGoal) && !minutesSwitchDone
+                ) {
+                    minutesSwitchDone = true
+                    try {
+                        delay(1500) // let the home screen draw
+                        ClawAccessibilityService.getConnectedInstance(1000L)?.let { svc ->
+                            FlipkartMinutesSwitch.ensure(svc)?.let { note ->
+                                delay(1200)
+                                messages.add(UserMessage.from("[System] $note"))
+                            }
+                        }
+                    } catch (e: Exception) {
+                        XLog.w(TAG, "Minutes switch failed: ${e.message}")
+                    }
                 }
 
                 // Outbound message/call parked until the user says yes: end the task with the question
