@@ -1212,6 +1212,9 @@ private fun ChatInputBar(
                         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                             putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak command or message...")
+                            // Ask for 3 s of silence before ending (Google's recogniser may ignore these).
+                            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                            putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
                         }
                         try {
                             speechLauncher.launch(intent)

@@ -22,6 +22,10 @@ object VoiceRecorder {
 
     private const val TAG = "VoiceRecorder"
     private const val SAMPLE_RATE = 16000
+    /** Stop after this much quiet once she has spoken (owner rule 2026-11-14: 3 s). */
+    private const val END_SILENCE_MS = 3000L
+    /** Stop if she never starts speaking. */
+    private const val NO_SPEECH_TIMEOUT_MS = 8000L
     /**
      * Each recording is a session with its own AudioRecord, owned by its worker. A stop/start in
      * quick succession bumps [sessionId]; the old worker then exits and releases only its own
@@ -123,6 +127,7 @@ object VoiceRecorder {
             val buffer = ByteArray(bufferSize)
             val startTime = System.currentTimeMillis()
             var silenceStartTime = -1L
+            var heardSpeech = false
 
             while (isCurrent(session) && ((System.currentTimeMillis() - startTime) < maxDurationMs)) {
                 val read = r.read(buffer, 0, buffer.size)
@@ -144,11 +149,19 @@ object VoiceRecorder {
                     val rms = sqrt(sum / (read / 2))
                     val isSilent = rms < 180.0 // threshold for soft speech vs quiet pause
 
-                    if (isSilent && pcmOutputStream.size() > SAMPLE_RATE * 3) { // At least 1.5s recorded
+                    if (!isSilent) heardSpeech = true
+                    val now = System.currentTimeMillis()
+                    if (!heardSpeech) {
+                        // She has not started yet: wait, but not forever.
+                        if (now - startTime > NO_SPEECH_TIMEOUT_MS) {
+                            XLog.i(TAG, "Auto-stopping: no speech in ${NO_SPEECH_TIMEOUT_MS / 1000}s")
+                            break
+                        }
+                    } else if (isSilent) {
                         if (silenceStartTime == -1L) {
-                            silenceStartTime = System.currentTimeMillis()
-                        } else if ((System.currentTimeMillis() - silenceStartTime) > 1800L) { // 1.8s continuous quiet
-                            XLog.i(TAG, "Auto-stopping recording due to quiet pause (1.8s)")
+                            silenceStartTime = now
+                        } else if (now - silenceStartTime > END_SILENCE_MS) {
+                            XLog.i(TAG, "Auto-stopping recording after ${END_SILENCE_MS / 1000}s of silence")
                             break
                         }
                     } else {

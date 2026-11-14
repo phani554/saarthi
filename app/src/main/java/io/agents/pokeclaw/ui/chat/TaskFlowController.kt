@@ -495,6 +495,23 @@ class TaskFlowController(
         return true
     }
 
+    /** Brings the Saathi chat back over whatever app the task left open. Safe from any thread. */
+    private fun bringChatToFront() {
+        try {
+            // Launch from the accessibility service when bound: it is allowed to start activities
+            // from the background; the activity itself may not be.
+            val ctx: android.content.Context =
+                io.agents.pokeclaw.service.ClawAccessibilityService.getInstance() ?: activity
+            val intent = android.content.Intent(ctx, activity.javaClass).addFlags(
+                android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
+            )
+            ctx.startActivity(intent)
+            XLog.i(TAG, "Brought Saathi chat to front for the yes/no question")
+        } catch (e: Exception) {
+            XLog.w(TAG, "Could not bring Saathi chat to front: ${e.message}")
+        }
+    }
+
     /**
      * Asks the oldest action still waiting behind the confirm gate (marks it asked), then reopens the
      * mic for her yes / no once the question has been spoken. No-op when nothing waits. Main thread.
@@ -600,7 +617,6 @@ class TaskFlowController(
         try {
             when (event) {
                 is TaskEvent.Completed -> {
-                    val fromVoice = currentVoiceState == VoiceInteractionState.TASK_EXECUTING
                     val askingUser = OutboundConfirmGate.peek() != null
                     replaceTypingIndicator(event.answer, event.modelName)
                     // Single owner of the final spoken answer (agent loop no longer speaks it too).
@@ -612,8 +628,14 @@ class TaskFlowController(
                     }
                     cleanupAfterTask()
                     checkAutoReplyConfirmation()
-                    if (askingUser && fromVoice) {
-                        // The answer was "send / call ...? Haan ya na?": open the mic for her reply.
+                    if (askingUser) {
+                        // The task may have left WhatsApp / Flipkart on screen: bring Saathi back so she
+                        // can answer by voice or by typing (it used to stay stuck on the other app).
+                        bringChatToFront()
+                    }
+                    if (askingUser) {
+                        // The answer was "send / call ...? Haan ya na?": open the mic for her reply,
+                        // whether the request was spoken or typed.
                         VoiceManager.onPlaybackFinished = {
                             if (OutboundConfirmGate.peek() != null) {
                                 activity.runOnUiThread { onTriggerVoiceCapture?.invoke() }

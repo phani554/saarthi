@@ -127,6 +127,9 @@ class ComposeChatActivity : ComponentActivity() {
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_PROMPT, "Bolein aapki kya madad karoon...")
+                // Ask for 3 s of silence before ending (Google's recogniser may ignore these).
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
+                putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 3000L)
                 // A fixed Settings › Reply language is also the recogniser language; Auto keeps the phone's.
                 io.agents.pokeclaw.lang.ReplyLanguageState.fixed()?.let { putExtra(RecognizerIntent.EXTRA_LANGUAGE, it.code) }
             }
