@@ -200,6 +200,13 @@ class ComposeChatActivity : ComponentActivity() {
         VoiceManager.init(this)
         taskFlowController.onTriggerVoiceCapture = { triggerVoiceCapture() }
 
+        // Contacts + call log let Saathi map a name or nickname to the right contact on the phone.
+        val contactPerms = arrayOf(android.Manifest.permission.READ_CONTACTS, android.Manifest.permission.READ_CALL_LOG)
+            .filter { androidx.core.content.ContextCompat.checkSelfPermission(this, it) != android.content.pm.PackageManager.PERMISSION_GRANTED }
+        if (contactPerms.isNotEmpty() && savedInstanceState == null) {
+            androidx.core.app.ActivityCompat.requestPermissions(this, contactPerms.toTypedArray(), 201)
+        }
+
         // Hide floating circle only when no task is running
         try {
             if (!appViewModel.isTaskRunning()) {

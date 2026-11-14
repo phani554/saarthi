@@ -425,6 +425,9 @@ class TaskFlowController(
                 val approved = OutboundConfirmGate.approve() ?: return false
                 VoiceManager.onPlaybackFinished = null
                 XLog.i(TAG, "User approved parked ${approved.toolName}")
+                io.agents.pokeclaw.agent.knowledge.ContactAliasResolver.onUserApproved(
+                    (approved.params["contact"] ?: approved.params["target_contact"])?.toString()
+                )
                 executeDirectToolTask(text, DirectDeviceDataGuard.DeterministicToolCall(approved.toolName, approved.params))
             }
             OutboundConfirmGate.Reply.NO -> {

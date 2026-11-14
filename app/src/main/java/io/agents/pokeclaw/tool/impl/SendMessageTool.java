@@ -76,7 +76,8 @@ public class SendMessageTool extends BaseTool {
 
         // Always ask the user before a message goes to a person (she answers haan / na).
         ToolResult ask = io.agents.pokeclaw.agent.OutboundConfirmGate.check(
-                getName(), params, io.agents.pokeclaw.agent.SpokenStrings.confirmSend(rawContact, message));
+                getName(), params, io.agents.pokeclaw.agent.SpokenStrings.confirmSend(
+                        contact.replaceAll("[^0-9]", "").length() >= 7 ? rawContact : contact, message));
         if (ask != null) return ask;
 
         XLog.i(TAG, "Sending message (" + message.length() + " chars) via " + app);

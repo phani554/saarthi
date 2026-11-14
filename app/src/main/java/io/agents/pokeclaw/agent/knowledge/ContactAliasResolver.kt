@@ -41,6 +41,13 @@ object ContactAliasResolver {
             return it
         }
 
+        // A number stays a number.
+        if (clean.count { it.isDigit() } >= 7 && clean.all { it.isDigit() || it in " +-()" }) return clean
+
+        // Name or nickname not in memory: search the phone's contacts (name, then Nickname field).
+        // Several numbers -> the one with the most recent call. No model involved.
+        fromPhoneContacts(clean)?.let { return it }
+
         // Fast path (< 1ms): standard contact names & phone numbers return directly
         if (isPlainNameOrNumber(clean)) {
             XLog.d(TAG, "ContactAliasResolver fast path: '$clean'")
@@ -67,13 +74,53 @@ object ContactAliasResolver {
         }
     }
 
+    /** Display name -> number picked from the call log, so a phone call dials that exact number. */
+    private val pinnedNumbers = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** Number chosen for [displayName] by the last contacts match, or null. */
+    fun pinnedNumber(displayName: String): String? = pinnedNumbers[displayName.trim().lowercase()]
+
+    private fun fromPhoneContacts(phrase: String): String? = try {
+        val core = phrase.replace(FILLER_WORDS, " ").replace(Regex("\\s+"), " ").trim().ifEmpty { phrase }
+        PhoneContactMatcher.find(io.agents.pokeclaw.ClawApplication.instance, core)?.let { m ->
+            if (m.number.isNotBlank()) pinnedNumbers[m.displayName.trim().lowercase()] = m.number
+            if (!m.displayName.equals(core, ignoreCase = true)) {
+                // Remember the mapping as unconfirmed; it is confirmed when she says yes to the message/call.
+                MemoryFactStore.upsert(aliasKey(core), m.displayName, FactSource.TASK, 0.6f, pending = true)
+            }
+            m.displayName
+        }
+    } catch (e: Exception) {
+        XLog.w(TAG, "Phone contact match failed: ${e.message}")
+        null
+    }
+
+    private fun aliasKey(core: String) = MemoryFactStore.normaliseKey("alias:" + core.lowercase().replace(' ', '_'))
+
+    /**
+     * She said yes to a message/call for [rawContact]: a contacts mapping found for it becomes a
+     * confirmed memory fact, so next time it resolves straight from memory.
+     */
+    fun onUserApproved(rawContact: String?) {
+        val raw = rawContact?.trim().orEmpty()
+        if (raw.isEmpty()) return
+        try {
+            val core = raw.lowercase().replace(FILLER_WORDS, " ").replace(Regex("\\s+"), " ").trim()
+            if (core.isEmpty()) return
+            MemoryFactStore.get(aliasKey(core))?.takeIf { it.pending }?.let {
+                MemoryFactStore.confirm(it.id)
+                XLog.i(TAG, "Confirmed contact mapping '$core' -> '${it.value}'")
+            }
+        } catch (_: Exception) { }
+    }
+
     /** Confirmed person:/alias: fact for [phrase], or null. */
     private fun fromMemoryFacts(phrase: String): String? = try {
         val core = phrase.lowercase().replace(FILLER_WORDS, " ").replace(Regex("\\s+"), " ").trim()
         if (core.isEmpty()) null else {
             val rel = FactExtractor.relationOf(core)
             val byRelation = rel?.let { MemoryFactStore.get("person:$it") }?.takeIf { !it.pending }?.value
-            byRelation ?: MemoryFactStore.get("alias:" + core.replace(' ', '_'))?.takeIf { !it.pending }?.value
+            byRelation ?: MemoryFactStore.get(aliasKey(core))?.takeIf { !it.pending }?.value
         }
     } catch (_: Exception) { null }
 

@@ -74,13 +74,13 @@ class PlaceCallTool : BaseTool() {
             return ToolResult.error("Missing required parameter: contact")
         }
 
-        // Always ask the user before calling a person (she answers haan / na).
+        val resolvedContact = ContactAliasResolver.resolve(rawContact)
+        // Always ask the user before calling a person (she answers haan / na). Name the contact found.
         io.agents.pokeclaw.agent.OutboundConfirmGate.check(
-            getName(), params, io.agents.pokeclaw.agent.SpokenStrings.confirmCall(rawContact, callType)
+            getName(), params, io.agents.pokeclaw.agent.SpokenStrings.confirmCall(spokenName(rawContact, resolvedContact), callType)
         )?.let { return it }
 
         val context = ClawApplication.instance
-        val resolvedContact = ContactAliasResolver.resolve(rawContact)
         XLog.i("PlaceCallTool", "Placing $callType call to '$resolvedContact' (raw: '$rawContact')")
 
         return try {
@@ -182,9 +182,15 @@ class PlaceCallTool : BaseTool() {
     }
 
     /** Number for a name from the care profile (name or relation), then phone contacts (exact, then partial). */
+    /** The contact's saved name when the resolver found one, else what she said (never a raw number). */
+    private fun spokenName(raw: String, resolved: String): String =
+        if (resolved.isBlank() || resolved.count { it.isDigit() } >= 7) raw else resolved
+
     private fun lookupNumber(context: Context, name: String): String? {
         val n = name.trim()
         if (n.isEmpty()) return null
+        // Number picked from the call log when this name had several.
+        ContactAliasResolver.pinnedNumber(n)?.let { return it }
         try {
             CareProfileStore.get().contacts.firstOrNull {
                 it.hasPhone && (it.name.equals(n, true) || it.relation.equals(n, true))
