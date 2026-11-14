@@ -100,16 +100,27 @@ class LlmConfigActivity : BaseActivity() {
         val btnSaveSarvam = findViewById<View>(R.id.btnSaveSarvamConfig)
 
         etSarvamKey?.setText(KVUtils.getSarvamApiKey())
-        etSarvamLang?.setText(KVUtils.getSarvamLanguageCode())
         etSarvamSpeaker?.setText(KVUtils.getSarvamSpeaker())
+
+        // The old free-text language code box is now the Reply language chooser
+        // (Auto / English / Hindi / Marathi / Telugu); it saves as soon as she picks.
+        etSarvamLang?.apply {
+            isFocusable = false
+            isFocusableInTouchMode = false
+            isCursorVisible = false
+            setText(io.agents.pokeclaw.lang.ReplyLanguageState.choiceLabel())
+            setOnClickListener {
+                io.agents.pokeclaw.lang.ReplyLanguageState.showChooser(this@LlmConfigActivity) {
+                    setText(io.agents.pokeclaw.lang.ReplyLanguageState.choiceLabel())
+                }
+            }
+        }
 
         btnSaveSarvam?.setOnClickListener {
             val key = etSarvamKey?.text?.toString()?.trim().orEmpty()
-            val lang = etSarvamLang?.text?.toString()?.trim().orEmpty().ifBlank { "hi-IN" }
             val speaker = etSarvamSpeaker?.text?.toString()?.trim().orEmpty().ifBlank { "shubh" }
 
             KVUtils.setSarvamApiKey(key)
-            KVUtils.setSarvamLanguageCode(lang)
             KVUtils.setSarvamSpeaker(speaker)
 
             Toast.makeText(this, "Sarvam Voice Engine settings saved!", Toast.LENGTH_SHORT).show()

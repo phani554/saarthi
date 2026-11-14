@@ -85,15 +85,15 @@ object MemoryManager {
         return body + care
     }
 
+    /**
+     * Only a fixed Settings › Reply language is a standing fact. In Auto (default) the reply language
+     * follows each turn, so nothing is added here (a cached "Hindi" line used to pull English turns
+     * into Hindi).
+     */
     private fun languageLine(): String {
-        val code = try { io.agents.pokeclaw.utils.KVUtils.getSarvamLanguageCode() } catch (_: Exception) { "" }
-        val name = when (code.substringBefore('-').lowercase()) {
-            "hi" -> "Hindi"; "te" -> "Telugu"; "en" -> "English"; "mr" -> "Marathi"; "ta" -> "Tamil"
-            "kn" -> "Kannada"; "bn" -> "Bengali"; "gu" -> "Gujarati"; "ml" -> "Malayalam"; "pa" -> "Punjabi"
-            "" -> return ""
-            else -> code
-        }
-        return "Voice language setting: $name"
+        val fixed = try { io.agents.pokeclaw.lang.ReplyLanguageState.fixed() } catch (_: Throwable) { null }
+            ?: return ""
+        return "Reply language setting: ${fixed.englishName} (${fixed.script} script)"
     }
 
     fun invalidateCache() { cachedMemoryPrompt = null }

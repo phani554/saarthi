@@ -11,6 +11,9 @@ import android.speech.tts.TextToSpeech
 import android.util.Base64
 import io.agents.pokeclaw.agent.AgentTaskState
 import io.agents.pokeclaw.agent.TaskExecutionState
+import io.agents.pokeclaw.lang.ReplyLanguage
+import io.agents.pokeclaw.lang.ReplyLanguageState
+import io.agents.pokeclaw.lang.SpeechNumbers
 import io.agents.pokeclaw.utils.KVUtils
 import io.agents.pokeclaw.utils.XLog
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -59,8 +62,13 @@ object VoiceManager : TextToSpeech.OnInitListener {
     var isVoiceOutputEnabled = true
     var onPlaybackFinished: (() -> Unit)? = null
 
-    @Volatile
-    var lastDetectedLanguageCode: String = "hi-IN"
+    /**
+     * The current reply language code (en-IN / hi-IN / mr-IN / te-IN). Kept for older callers; the
+     * source of truth is [ReplyLanguageState]. Setting it only accepts those four codes.
+     */
+    var lastDetectedLanguageCode: String
+        get() = ReplyLanguageState.replyLanguage().code
+        set(value) { ReplyLanguage.fromCode(value)?.let { ReplyLanguageState.current = it } }
 
     private var mediaPlayer: MediaPlayer? = null
     /** Temp WAV backing the current Sarvam clip; deleted on completion, error, failure or stop. */
@@ -196,8 +204,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
      */
     fun speak(text: String, flush: Boolean = false) {
         if (!isVoiceOutputEnabled || text.isBlank()) return
-        val cleanText = cleanTextForSpeech(text).take(400)
-        if (cleanText.isBlank()) return
+        val (cleanText, lang) = prepareForSpeech(text) ?: return
 
         var myGeneration = 0L
         var sarvamKey = ""
@@ -212,7 +219,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
             if (isExecutingState) {
                 XLog.i(TAG, "Task is EXECUTING -> FORCE Native Local TTS (0ms cloud latency)")
                 if (isTtsInitialized) {
-                    speakNativeInternal(cleanText, flush)
+                    speakNativeInternal(cleanText, flush, lang)
                 }
                 return
             }
@@ -220,7 +227,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
             sarvamKey = KVUtils.getSarvamApiKey().trim()
             if (sarvamKey.isEmpty()) {
                 if (isTtsInitialized) {
-                    speakNativeInternal(cleanText, flush)
+                    speakNativeInternal(cleanText, flush, lang)
                 }
                 return
             }
@@ -231,7 +238,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
         // The Sarvam HTTP call (up to ~25 s) runs OUTSIDE speakLock, so stop(), voice capture
         // and SOS speakNative(flush=true) never wait on the network. The generation check below
         // drops the clip if anything newer started or a stop happened meanwhile.
-        val base64Audio = fetchSarvamTtsAudio(cleanText, sarvamKey)
+        val base64Audio = fetchSarvamTtsAudio(cleanText, sarvamKey, lang)
 
         synchronized(speakLock) {
             if (myGeneration != speechGeneration) {
@@ -244,7 +251,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
             }
             isPlayingAudio = false
             if (isTtsInitialized) {
-                speakNativeInternal(cleanText, flush)
+                speakNativeInternal(cleanText, flush, lang)
             } else {
                 _engineState.value = VoiceEngineState.Error("Sarvam TTS failed")
             }
@@ -253,8 +260,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
 
     fun speakNative(text: String, flush: Boolean = false) {
         if (!isVoiceOutputEnabled || text.isBlank()) return
-        val cleanText = cleanTextForSpeech(text).take(400)
-        if (cleanText.isBlank()) return
+        val (cleanText, lang) = prepareForSpeech(text) ?: return
         synchronized(speakLock) {
             if (isSarvamClipPlaying && !flush) {
                 // Low-priority progress narration: never talk over (or cut) a Sarvam reply.
@@ -263,22 +269,35 @@ object VoiceManager : TextToSpeech.OnInitListener {
             }
             stopAudioPlayback()
             if (isTtsInitialized) {
-                speakNativeInternal(cleanText, flush)
+                speakNativeInternal(cleanText, flush, lang)
             }
         }
     }
 
-    private fun speakNativeInternal(cleanText: String, flush: Boolean) {
+    /**
+     * Cleans [raw] for speech, picks the voice language from the text itself (Telugu script -> te,
+     * Devanagari -> current hi/mr, Latin -> en; LanguageDetector.ttsLanguageFor) and rewrites numbers
+     * for that language (phone digits, rupees, commas; SpeechNumbers). Null when nothing is left.
+     */
+    private fun prepareForSpeech(raw: String): Pair<String, ReplyLanguage>? {
+        val clean = cleanTextForSpeech(raw)
+        if (clean.isBlank()) return null
+        val lang = try { ReplyLanguageState.ttsLanguageFor(clean) } catch (_: Throwable) { ReplyLanguage.HI }
+        val spoken = try { SpeechNumbers.normalize(clean, lang) } catch (_: Throwable) { clean }
+        return Pair(spoken.take(400), lang)
+    }
+
+    private fun localeFor(lang: ReplyLanguage): Locale = when (lang) {
+        ReplyLanguage.EN -> Locale("en", "IN")
+        ReplyLanguage.HI -> Locale("hi", "IN")
+        ReplyLanguage.MR -> Locale("mr", "IN")
+        ReplyLanguage.TE -> Locale("te", "IN")
+    }
+
+    private fun speakNativeInternal(cleanText: String, flush: Boolean, lang: ReplyLanguage) {
         isPlayingAudio = true
         _engineState.value = VoiceEngineState.Speaking
-        val locale = when (lastDetectedLanguageCode) {
-            "en-IN" -> Locale.ENGLISH
-            "hi-IN" -> Locale("hi", "IN")
-            "te-IN" -> Locale("te", "IN")
-            "ta-IN" -> Locale("ta", "IN")
-            "bn-IN" -> Locale("bn", "IN")
-            else -> Locale.getDefault()
-        }
+        val locale = localeFor(lang)
 
         val myGeneration = speechGeneration
         mainHandler.post {
@@ -287,7 +306,17 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 return@post
             }
             try {
-                tts?.language = locale
+                val result = tts?.setLanguage(locale) ?: TextToSpeech.LANG_NOT_SUPPORTED
+                if (result < TextToSpeech.LANG_AVAILABLE) {
+                    // Phone has no voice for this language: Marathi falls back to Hindi (same script),
+                    // English to the generic English voice.
+                    val fallback = when (lang) {
+                        ReplyLanguage.MR -> Locale("hi", "IN")
+                        ReplyLanguage.EN -> Locale.ENGLISH
+                        else -> null
+                    }
+                    if (fallback != null) tts?.setLanguage(fallback)
+                }
             } catch (_: Exception) {}
             val mode = if (flush) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD
             tts?.speak(cleanText, mode, null, "saarthi_native_" + System.currentTimeMillis())
@@ -306,17 +335,18 @@ object VoiceManager : TextToSpeech.OnInitListener {
      * Blocking Sarvam TTS request. Returns the base64 audio, or null on any failure.
      * Must be called without holding speakLock.
      */
-    private fun fetchSarvamTtsAudio(text: String, apiKey: String): String? {
+    private fun fetchSarvamTtsAudio(text: String, apiKey: String, lang: ReplyLanguage): String? {
         return try {
+            // Current Sarvam REST contract (docs.sarvam.ai, checked 2026-11-14): "text" + "language_code".
+            // bulbul:v3 preprocesses numbers itself and does not take enable_preprocessing (v2 only).
+            // The language comes from the reply text, so an English reply never gets the hi-IN voice.
             val jsonBody = JSONObject().apply {
-                put("inputs", JSONArray().apply { put(text) })
-                val targetLang = if (lastDetectedLanguageCode.isNotBlank()) lastDetectedLanguageCode else KVUtils.getSarvamLanguageCode().ifBlank { "hi-IN" }
-                put("target_language_code", targetLang)
+                put("text", text)
+                put("language_code", lang.code)
                 put("speaker", KVUtils.getSarvamSpeaker().ifBlank { "shubh" })
                 put("model", "bulbul:v3")
                 put("pace", 1.0)
                 put("speech_sample_rate", 22050)
-                put("enable_preprocessing", true)
             }
 
             val request = Request.Builder()
@@ -335,7 +365,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
                         return base64Audio
                     }
                 }
-                XLog.w(TAG, "Sarvam TTS request failed (${response.code}, ${responseStr.length} bytes), falling back to native TTS")
+                XLog.w(TAG, "Sarvam TTS request failed (${response.code}, ${responseStr.length} bytes, lang=${lang.code}), falling back to native TTS")
                 null
             }
         } catch (e: Exception) {
@@ -482,7 +512,9 @@ object VoiceManager : TextToSpeech.OnInitListener {
                 .addFormDataPart("file", "recording.wav", audioRequestBody)
                 .addFormDataPart("model", "saaras:v3")
                 .addFormDataPart("mode", "codemix")
-                .addFormDataPart("language_code", "hi-IN")
+                // "unknown" = Sarvam auto-detects (and returns language_probability); a fixed
+                // Settings › Reply language sends that language instead.
+                .addFormDataPart("language_code", ReplyLanguageState.sttLanguageCode())
                 .build()
 
             val request = Request.Builder()
@@ -507,10 +539,11 @@ object VoiceManager : TextToSpeech.OnInitListener {
                             if (resp.isSuccessful && respStr.isNotEmpty()) {
                                 val jsonObj = JSONObject(respStr)
                                 transcript = jsonObj.optString("transcript", "").trim()
-                                val detectedLang = jsonObj.optString("language_code", "").trim()
-                                if (detectedLang.isNotEmpty()) {
-                                    lastDetectedLanguageCode = detectedLang
-                                }
+                                val detectedLang = if (jsonObj.isNull("language_code")) "" else jsonObj.optString("language_code", "").trim()
+                                val probability = if (jsonObj.has("language_probability") && !jsonObj.isNull("language_probability"))
+                                    jsonObj.optDouble("language_probability").takeIf { !it.isNaN() } else null
+                                // Only en/hi/mr/te switch the reply language; short or unsure turns keep it.
+                                ReplyLanguageState.onSpeech(detectedLang, probability, transcript)
                                 XLog.i(TAG, "Sarvam STT transcription successful (${transcript.length} chars)")
                             } else {
                                 XLog.e(TAG, "Sarvam STT API error HTTP ${resp.code} (${respStr.length} bytes)")
@@ -574,6 +607,7 @@ object VoiceManager : TextToSpeech.OnInitListener {
                             val content = firstCandidate?.optJSONObject("content")
                             val parts = content?.optJSONArray("parts")
                             transcript = parts?.optJSONObject(0)?.optString("text", "")?.trim().orEmpty()
+                            if (transcript.isNotBlank()) ReplyLanguageState.onText(transcript)
                             XLog.i(TAG, "Gemini STT transcription successful (${transcript.length} chars)")
                         } else {
                             XLog.e(TAG, "Gemini STT API error HTTP ${resp.code} (${respStr.length} bytes)")

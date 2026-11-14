@@ -88,7 +88,7 @@ object DistressEscalator {
         lastTriggerPlacedCall = false
         val order = CareProfileStore.get().distressOrder()
         if (order.isEmpty()) {
-            speak("No emergency number is saved. Please add one in Care profile.", flush = true)
+            speak(io.agents.pokeclaw.agent.SpokenStrings.sosNoNumber(), flush = true)
             return "No emergency contacts are saved yet. Add them in Settings → Care profile."
         }
         if (isActive) {
@@ -108,7 +108,7 @@ object DistressEscalator {
 
         if (!canCall) {
             // Only the dialer can be opened: the user must press call. Nothing stays "active".
-            speak("Please press the green call button to call ${first.label()}.", flush = true)
+            speak(io.agents.pokeclaw.agent.SpokenStrings.sosPressGreen(first.label()), flush = true)
             openCall(app, first, direct = false)
             unwatchedAt = System.currentTimeMillis()
             unwatchedNextIndex = startIndex + 1
@@ -119,7 +119,7 @@ object DistressEscalator {
         isActive = true
         main.postDelayed({ cancel(app, "timeout") }, GIVE_UP_AFTER_MS)
         val watching = listenForCallEnd(app)
-        speak("Calling ${first.label()} for help.", flush = true)
+        speak(io.agents.pokeclaw.agent.SpokenStrings.sosCallingForHelp(first.label()), flush = true)
         val placed = openCall(app, first, direct = true)
         lastTriggerPlacedCall = placed
         if (!placed) {
@@ -290,6 +290,8 @@ object DistressEscalator {
         "bachao", "bachaao", "bachaoo", "bachalo", "बचाओ", "बचा लो", "बचालो",
         "help help", "madad madad", "मदद मदद",
         "కాపాడండి", "కాపాడు", "కాపాడండీ", "kapadandi", "kaapaadandi", "kaapaadu", "kaapadu",
+        // Marathi
+        "वाचवा", "vachva", "vaachva",
     )
 
     /** Distress words that count only when they are (nearly) the whole utterance. */
@@ -298,6 +300,8 @@ object DistressEscalator {
         "ambulance", "एम्बुलेंस", "एंबुलेंस", "అంబులెన్స్", "i fell", "i have fallen", "i fell down",
         "gir gayi", "gir gaya", "gir gai", "गिर गई", "गिर गयी", "गिर गया", "sahayam", "sahaayam", "సహాయం",
         "padipoyanu", "పడిపోయాను",
+        // Marathi
+        "मदत", "padle", "padlo", "पडले", "पडलो",
     )
 
     /** Words allowed around a short distress word ("please help me", "jaldi madad karo"). */
@@ -306,6 +310,7 @@ object DistressEscalator {
         "mujhe", "koi", "karo", "kijiye", "chahiye", "jaldi", "ji", "arre", "are", "hai", "ho", "main", "mai",
         "मुझे", "कोई", "करो", "कीजिए", "करिए", "चाहिए", "जल्दी", "जी", "अरे", "है", "मैं",
         "nenu", "నేను", "naaku", "నాకు", "kavali", "కావాలి", "ra", "andi",
+        "mala", "मला", "kara", "करा", "mi", "मी", "lavkar", "लवकर", "pahije", "पाहिजे",
     )
 
     /** "No emergency", "I'm fine", "stop": never an SOS, and cancels a running SOS. */
@@ -315,6 +320,7 @@ object DistressEscalator {
         "theek hoon", "theek hu", "thik hu", "thik hoon", "theek hai", "band karo", "ruko", "mat karo",
         "ठीक हूँ", "ठीक हूं", "ठीक है", "बंद करो", "रुको", "मत करो",
         "vaddu", "వద్దు", "aapu", "ఆపు", "ఆపండి", "బాగున్నాను", "baagunnanu",
+        "ठीक आहे", "बरी आहे", "बरा आहे", "थांबा", "नको", "theek aahe", "bari aahe", "bara aahe", "thamba", "nako",
     )
 
     /** Negations and setup talk ("add emergency contact", "emergency number kya hai"). */

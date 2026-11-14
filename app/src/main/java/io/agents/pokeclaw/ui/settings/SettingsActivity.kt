@@ -315,6 +315,21 @@ class SettingsActivity : BaseActivity() {
             setTrailingText(if (key.isNotEmpty()) "Configured" else "Not set")
         }
 
+        // Reply language: Auto follows the language she speaks or types; a fixed choice overrides it.
+        var replyLangItem: MenuItem? = null
+        replyLangItem = modelGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_sort_alphabetically,
+            title = "Reply language",
+            onClick = {
+                io.agents.pokeclaw.lang.ReplyLanguageState.showChooser(this) {
+                    replyLangItem?.setTrailingText(io.agents.pokeclaw.lang.ReplyLanguageState.choiceLabel())
+                }
+            },
+            showDivider = true
+        ).apply {
+            setTrailingText(io.agents.pokeclaw.lang.ReplyLanguageState.choiceLabel())
+        }
+
         var mem0MenuItem: MenuItem? = null
         mem0MenuItem = modelGroup.addMenuItem(
             leadingIcon = android.R.drawable.ic_menu_save,

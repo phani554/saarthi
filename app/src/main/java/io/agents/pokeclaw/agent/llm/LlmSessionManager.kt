@@ -177,7 +177,7 @@ object LlmSessionManager {
         if (authFailure || msg.contains("Unauthorized") || msg.contains("Payment Required")) {
             val report = "API Key Expired or Quota Exceeded (HTTP 401/402/403). Please check Settings."
             XLog.e(TAG, report, e)
-            VoiceManager.speakNative("API Key Expired or Quota Exceeded. Please update your key in Settings.")
+            VoiceManager.speakNative(io.agents.pokeclaw.agent.SpokenStrings.apiKeyProblem())
         }
     }
 

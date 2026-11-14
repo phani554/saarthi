@@ -6,6 +6,8 @@ package io.agents.pokeclaw.agent
 import io.agents.pokeclaw.agent.knowledge.MemoryManager
 import io.agents.pokeclaw.agent.llm.LlmSessionManager
 import io.agents.pokeclaw.data.memory.HybridMemoryRepository
+import io.agents.pokeclaw.lang.ReplyLanguageState
+import io.agents.pokeclaw.lang.ReplyLocalizer
 import io.agents.pokeclaw.utils.XLog
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -26,7 +28,7 @@ object PromptRewriter {
 
     /** Whole-word confirmation at the start of the utterance (fallback path only). */
     private val CONFIRM_PATTERN = Regex(
-        """^\s*(yes|ok|okay|haa?n?|ha+n?\s*ji|proceed|go\s+ahead|start|sahi\s+hai|theek\s+hai|thik\s+hai|avunu|cheyyi|seri|sare)\b""",
+        """^\s*(yes|ok|okay|haa?n?|ha+n?\s*ji|proceed|go\s+ahead|start|sahi\s+hai|theek\s+hai|thik\s+hai|avunu|cheyyi|seri|sare|hoy|ho|chalel|हाँ|हां|हा|जी|ठीक|होय|हो|चालेल|అవును|సరే|చేయి)(?![\p{L}\p{M}])""",
         RegexOption.IGNORE_CASE
     )
 
@@ -58,7 +60,7 @@ object PromptRewriter {
         val raw = userSpeech.trim()
         if (raw.isBlank()) {
             return InteractionResult(
-                spokenResponse = "Mujhe aapki aawaz nahi aayi. Kripya dobara bolein.",
+                spokenResponse = SpokenStrings.didNotHear(),
                 isConfirmed = false,
                 cleanedEnglishTask = "",
                 isCancelled = false
@@ -70,20 +72,22 @@ object PromptRewriter {
         if (!hasPriorProposal) pendingCleanedTask = ""
 
         val memorySection = MemoryManager.getMemoryPromptSection()
+        // Decided from this turn's speech / text before we get here (ReplyLanguageState).
+        val replyLang = ReplyLanguageState.replyLanguage()
 
         return try {
             val systemPrompt = """You are Saarthi, a friendly AI voice assistant.
 $memorySection
 
 Rules:
-1. Strict Language Auto-Switching: Match the EXACT language/dialect of the user's LATEST speech turn!
+1. Reply language: write spokenResponse in ${replyLang.englishName}. ${replyLang.promptInstruction()} Do not switch language because of names, app names or English product words in the request.
 2. Exit & Cancellation Intent: Check if user wants to cancel, exit, or declines adding anything else!
-   - IF user declines/cancels: set isCancelled=true, isConfirmed=false, spokenResponse="Okay, no problem! Let me know if you need anything else.", cleanedEnglishTask="".
+   - IF user declines/cancels: set isCancelled=true, isConfirmed=false, spokenResponse="${SpokenStrings.cancelledOk()}", cleanedEnglishTask="".
 3. Pre-Task Confirmation & Intent:
-   - Check if user is confirming: 'proceed', 'go ahead', 'yes', 'start', 'ha', 'sahi hai', 'sare', 'avunu', 'cheyyi', 'seri', 'ok'.
+   - Check if user is confirming: 'proceed', 'go ahead', 'yes', 'start', 'ha', 'sahi hai', 'sare', 'avunu', 'cheyyi', 'seri', 'ok', 'ho', 'hoy', 'chalel'.
    - IF confirmed: set isConfirmed=true, isCancelled=false, spokenResponse="Starting task now.", cleanedEnglishTask="<Clean English Instruction for GLM 5.3>".
    - cleanedEnglishTask is always English, EXCEPT the text of a message the user wants sent: keep that exactly in the user's own words and language, in quotes (e.g. Send message to Ravi: "main aa rahi hoon"). Never translate it.
-   - IF initial request or changes: set isConfirmed=false, isCancelled=false, respond in user's language asking for confirmation.
+   - IF initial request or changes: set isConfirmed=false, isCancelled=false, spokenResponse asks for confirmation in ${replyLang.englishName} (${replyLang.script} script).
 4. Output ONLY a valid JSON object with keys: "spokenResponse", "isConfirmed", "isCancelled", "cleanedEnglishTask"."""
 
             val prompt = """Mode: ${mode.name}
@@ -119,11 +123,17 @@ Return JSON object:"""
                     pendingCleanedTask = if (cancelled || confirmed) "" else finalTask
 
                     XLog.i(TAG, "Interaction turn: confirmed=$confirmed, cancelled=$cancelled, taskLen=${finalTask.length}")
+                    // The model sometimes answers in the wrong language or script: fix it (no call when right).
+                    val question = if (spoken.isBlank()) SpokenStrings.askConfirm()
+                        else ReplyLocalizer.localize(spoken, replyLang)
                     return InteractionResult(
-                        // Start line in her language ("Theek hai, WhatsApp khol rahi hoon"); the model's
+                        // Start line in her language ("ठीक है, WhatsApp खोल रही हूँ"); the model's
                         // own confirmed line was often the English "Starting task now."
-                        spokenResponse = if (confirmed) SpokenStrings.taskStart(SpokenStrings.appNameIn(finalTask))
-                            else spoken.ifBlank { "Kya main yeh karoon? Haan ya nahi boliye." },
+                        spokenResponse = when {
+                            confirmed -> SpokenStrings.taskStart(SpokenStrings.appNameIn(finalTask))
+                            cancelled -> SpokenStrings.cancelledOk()
+                            else -> question
+                        },
                         isConfirmed = confirmed,
                         cleanedEnglishTask = finalTask,
                         isCancelled = cancelled
@@ -143,7 +153,8 @@ Return JSON object:"""
         val isCancelled = lower.contains("no thanks") || lower.contains("nothing else") ||
                 lower.contains("cancel") || lower.contains("stop") ||
                 lower.contains("nahi") || lower.contains("nayi") || lower.contains("vaddu") ||
-                lower.contains("exit") || lower.contains("kuch nahi")
+                lower.contains("exit") || lower.contains("kuch nahi") || lower.contains("nako") ||
+                lower.contains("नहीं") || lower.contains("नको") || lower.contains("नाही") || lower.contains("వద్దు")
 
         // Whole-word yes/haan/ok at the start, only after a proposal, and only with a task to run.
         val isConfirmed = !isCancelled && hasPriorProposal && pendingCleanedTask.isNotBlank() &&
@@ -156,9 +167,9 @@ Return JSON object:"""
         }
         pendingCleanedTask = if (isCancelled || isConfirmed) "" else optimized
         val spoken = when {
-            isCancelled -> "Okay, no problem! Let me know if you need anything else."
+            isCancelled -> SpokenStrings.cancelledOk()
             isConfirmed -> SpokenStrings.taskStart(SpokenStrings.appNameIn(optimized))
-            else -> "Maine samjha: $optimized. 'Proceed' boleine start karne ke liye."
+            else -> SpokenStrings.understoodAskYes(optimized)
         }
 
         return InteractionResult(

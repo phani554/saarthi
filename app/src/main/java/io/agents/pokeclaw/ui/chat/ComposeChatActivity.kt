@@ -70,6 +70,8 @@ class ComposeChatActivity : ComponentActivity() {
         if (result.resultCode == RESULT_OK) {
             val spokenText = result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
             if (!spokenText.isNullOrBlank()) {
+                // Android's recogniser gives no language code: judge the reply language from the text.
+                io.agents.pokeclaw.lang.ReplyLanguageState.onText(spokenText)
                 taskFlowController.processVoiceTurn(spokenText)
             }
         }
@@ -122,6 +124,8 @@ class ComposeChatActivity : ComponentActivity() {
             val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
                 putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                 putExtra(RecognizerIntent.EXTRA_PROMPT, "Bolein aapki kya madad karoon...")
+                // A fixed Settings › Reply language is also the recogniser language; Auto keeps the phone's.
+                io.agents.pokeclaw.lang.ReplyLanguageState.fixed()?.let { putExtra(RecognizerIntent.EXTRA_LANGUAGE, it.code) }
             }
             try {
                 speechLauncher.launch(intent)
@@ -227,7 +231,11 @@ class ComposeChatActivity : ComponentActivity() {
                 sessionTokens = _sessionTokens.value,
                 sessionCost = _sessionCost.value,
                 onSendChat = { sendChat(it) },
-                onSendTask = { taskFlowController.sendTask(it) },
+                onSendTask = {
+                    // Typed text sets the reply language too (typed English gets English replies).
+                    io.agents.pokeclaw.lang.ReplyLanguageState.onText(it)
+                    taskFlowController.sendTask(it)
+                },
                 onVoiceInputTap = { triggerVoiceCapture() },
                 onStartMonitor = { target -> taskFlowController.startMonitor(target) },
                 onSendDirectMessage = { contact, app, message ->
@@ -361,6 +369,7 @@ class ComposeChatActivity : ComponentActivity() {
     // ==================== CHAT ====================
 
     private fun sendChat(text: String) {
+        io.agents.pokeclaw.lang.ReplyLanguageState.onText(text)
         // "haan" / "na" to a parked message or call (asked at the end of a task) is not a chat turn.
         if (taskFlowController.handleConfirmationReply(text)) return
         chatSessionController.sendChat(text)

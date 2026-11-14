@@ -304,6 +304,7 @@ object KVUtils {
 
     private const val KEY_SARVAM_API_KEY = "KEY_SARVAM_API_KEY"
     private const val KEY_SARVAM_LANGUAGE = "KEY_SARVAM_LANGUAGE"
+    private const val KEY_REPLY_LANGUAGE = "KEY_REPLY_LANGUAGE"
     private const val KEY_SARVAM_SPEAKER = "KEY_SARVAM_SPEAKER"
     private const val KEY_INTERACTION_MODEL = "KEY_INTERACTION_MODEL"
     private const val KEY_MEM0_API_KEY = "KEY_MEM0_API_KEY"
@@ -337,6 +338,9 @@ object KVUtils {
     fun setSarvamApiKey(value: String) = putString(KEY_SARVAM_API_KEY, value)
     fun getSarvamLanguageCode(): String = getString(KEY_SARVAM_LANGUAGE, "hi-IN")
     fun setSarvamLanguageCode(value: String) = putString(KEY_SARVAM_LANGUAGE, value)
+    /** "auto" (follow the language the user speaks or types; default) or en-IN / hi-IN / mr-IN / te-IN. */
+    fun getReplyLanguage(): String = getString(KEY_REPLY_LANGUAGE, "auto")
+    fun setReplyLanguage(value: String) = putString(KEY_REPLY_LANGUAGE, value)
     fun getSarvamSpeaker(): String = getString(KEY_SARVAM_SPEAKER, "shubh")
     fun setSarvamSpeaker(value: String) = putString(KEY_SARVAM_SPEAKER, value)
     fun getInteractionModelId(): String = getString(KEY_INTERACTION_MODEL, "gemini-3.5-flash-lite")

@@ -238,14 +238,14 @@ class PlaceCallTool : BaseTool() {
                 context.startActivity(Intent(Intent.ACTION_DIAL, Uri.parse("tel:$number")).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 })
-                VoiceManager.speakNative("I have put $number on the dialer. Please check it and press call.", flush = true)
+                VoiceManager.speakNative(io.agents.pokeclaw.agent.SpokenStrings.numberOnDialer(number), flush = true)
                 CallOutcome(ToolResult.success("Opened the dialer with $number for $rawContact (not a saved number, so not called automatically). The user must tap Call."), false)
             } catch (e: Exception) {
                 CallOutcome(ToolResult.error("Could not open the dialer: ${e.message}"), false)
             }
         }
 
-        VoiceManager.speakNative("Calling $contact now...", flush = true)
+        VoiceManager.speakNative(io.agents.pokeclaw.agent.SpokenStrings.callingNow(contact), flush = true)
         val callIntent = Intent(Intent.ACTION_CALL, Uri.parse("tel:$number")).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         }
@@ -270,7 +270,7 @@ class PlaceCallTool : BaseTool() {
 
     private fun executeWhatsAppCall(context: Context, contact: String, isVideo: Boolean): CallOutcome {
         val modeText = if (isVideo) "WhatsApp Video Call" else "WhatsApp Voice Call"
-        VoiceManager.speakNative("Starting $modeText with $contact...", flush = true)
+        VoiceManager.speakNative(io.agents.pokeclaw.agent.SpokenStrings.whatsAppCallStart(contact, isVideo), flush = true)
 
         val service = ClawAccessibilityService.getConnectedInstance(4000L)
         if (service != null) {

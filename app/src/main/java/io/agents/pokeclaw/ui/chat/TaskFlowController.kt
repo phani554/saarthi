@@ -23,6 +23,8 @@ import io.agents.pokeclaw.agent.PipelineRouter
 import io.agents.pokeclaw.agent.TaskPromptEnvelope
 import io.agents.pokeclaw.agent.llm.LlmSessionManager
 import io.agents.pokeclaw.agent.llm.ModelConfigRepository
+import io.agents.pokeclaw.lang.ReplyLanguageState
+import io.agents.pokeclaw.lang.ReplyLocalizer
 import io.agents.pokeclaw.service.ClawAccessibilityService
 import io.agents.pokeclaw.service.ForegroundService
 import io.agents.pokeclaw.service.AutoReplyManager
@@ -86,6 +88,8 @@ class TaskFlowController(
 
     // Bumped when SOS starts or voice state is reset, so an in-flight rewriter turn is dropped.
     private val voiceGeneration = AtomicInteger(0)
+    /** Bumped when a new request starts, so a late translated answer is not spoken over it. */
+    private val replySeq = AtomicInteger(0)
 
     private var sendTaskRetryCount = 0
     private var lastMonitorStatusNote: String? = null
@@ -115,6 +119,7 @@ class TaskFlowController(
 
     fun processVoiceTurn(userSpeech: String) {
         if (userSpeech.isBlank()) return
+        replySeq.incrementAndGet()
 
         // Distress heard: DistressEscalator decides whether this is a short distress phrase.
         // Only then skip the confirm turn and start the SOS call chain immediately.
@@ -141,7 +146,7 @@ class TaskFlowController(
         if (io.agents.pokeclaw.care.DistressEscalator.isActive &&
             io.agents.pokeclaw.care.DistressEscalator.isCancelUtterance(userSpeech)) {
             io.agents.pokeclaw.care.DistressEscalator.cancel(activity, "user said stop")
-            VoiceManager.speakAsync("Theek hai, SOS band kar diya.", flush = true)
+            VoiceManager.speakAsync(SpokenStrings.sosStopped(), flush = true)
             activity.runOnUiThread { addSystem("SOS stopped.") }
             return
         }
@@ -231,7 +236,7 @@ class TaskFlowController(
                             appViewModel.stopTask()
                             currentVoiceState = VoiceInteractionState.IDLE
                             clearPreTaskHistory()
-                            VoiceManager.speak("Task stopped.")
+                            VoiceManager.speak(SpokenStrings.taskStopped())
                             activity.runOnUiThread {
                                 addSystem("Task cancelled via voice command.")
                             }
@@ -365,6 +370,7 @@ class TaskFlowController(
         isTaskExecutingLock = true
 
         val agentPromptOverride = buildAgentPromptOverride(text)
+        replySeq.incrementAndGet()
         addUser(text)
         // One short start line (voice turns already spoke theirs in PromptRewriter); no per-step speech.
         if (currentVoiceState != VoiceInteractionState.TASK_EXECUTING) {
@@ -448,15 +454,18 @@ class TaskFlowController(
         uiState.isTaskRunning.value = false
         uiState.messages.add(ChatMessage(ChatMessage.Role.ASSISTANT, "..."))
 
+        replySeq.incrementAndGet()
         runOffMain {
             try {
                 val result = ToolRegistry.getInstance().executeTool(toolCall.toolName, toolCall.params)
+                val english = if (result.isSuccess) {
+                    result.data ?: "Done."
+                } else {
+                    "Failed: ${result.error ?: "unknown error"}"
+                }
+                // Tool results are English (the agent reads them); the user hears her reply language.
+                val answer = ReplyLocalizer.localize(english)
                 activity.runOnUiThread {
-                    val answer = if (result.isSuccess) {
-                        result.data ?: "Done."
-                    } else {
-                        "Failed: ${result.error ?: "unknown error"}"
-                    }
                     replaceTypingIndicator(answer)
                     VoiceManager.speakAsync(answer, flush = true)
                     cleanupAfterTask()
@@ -533,7 +542,29 @@ class TaskFlowController(
 
     // "Done." is the orchestrator's placeholder when the agent gave no answer: don't claim success in words.
     private fun cleanSpokenAnswer(raw: String): String =
-        if (raw.isBlank() || raw.trim() == "Done.") "Ho gaya, screen dekh lijiye." else raw
+        if (raw.isBlank() || raw.trim() == "Done.") SpokenStrings.doneCheckScreen() else raw
+
+    /**
+     * Speaks the agent's final answer in the reply language. The agent writes English; when the user
+     * spoke or typed another language the answer is rewritten (off the main thread) and the chat
+     * bubble is updated to the same text. Skipped if a newer request started meanwhile.
+     */
+    private fun speakAnswerInReplyLanguage(answer: String) {
+        val seq = replySeq.get()
+        runOffMain {
+            val spoken = ReplyLocalizer.localize(cleanSpokenAnswer(answer))
+            activity.runOnUiThread {
+                if (spoken != answer && answer.isNotBlank()) {
+                    val idx = uiState.messages.indexOfLast { it.role == ChatMessage.Role.ASSISTANT && it.content == answer }
+                    if (idx >= 0) {
+                        uiState.messages[idx] = uiState.messages[idx].copy(content = spoken)
+                        onPersistConversation()
+                    }
+                }
+                if (seq == replySeq.get()) VoiceManager.speakAsync(spoken, flush = true)
+            }
+        }
+    }
 
     private fun handleTaskEvent(event: TaskEvent) {
         try {
@@ -543,7 +574,12 @@ class TaskFlowController(
                     val askingUser = OutboundConfirmGate.peek() != null
                     replaceTypingIndicator(event.answer, event.modelName)
                     // Single owner of the final spoken answer (agent loop no longer speaks it too).
-                    VoiceManager.speakAsync(cleanSpokenAnswer(event.answer), flush = true)
+                    if (askingUser) {
+                        // Already in her language (SpokenStrings confirmation question).
+                        VoiceManager.speakAsync(cleanSpokenAnswer(event.answer), flush = true)
+                    } else {
+                        speakAnswerInReplyLanguage(event.answer)
+                    }
                     cleanupAfterTask()
                     checkAutoReplyConfirmation()
                     if (askingUser && fromVoice) {
@@ -675,11 +711,12 @@ class TaskFlowController(
 
     private fun explainTaskErrorWithAi(technicalError: String): String {
         return try {
-            val systemPrompt = "You are Saarthi, an empathetic AI assistant. Explain phone automation errors to the user in simple, conversational language matching their dialect (Telugu, Hindi, Hinglish, English)."
+            val lang = ReplyLanguageState.replyLanguage()
+            val systemPrompt = "You are Saarthi, an empathetic AI assistant. Explain phone automation errors to an elderly user in simple, conversational language. ${lang.promptInstruction()}"
             val prompt = """The user's phone task encountered this technical error:
 "$technicalError"
 
-Explain what went wrong in 1-2 friendly, simple sentences in user's language/dialect:"""
+Explain what went wrong in 1-2 friendly, simple sentences in ${lang.englishName} (${lang.script} script):"""
             val explanation = LlmSessionManager.singleShotInteraction(systemPrompt, prompt, 0.3)
             explanation?.trim() ?: "Task execution failed: $technicalError"
         } catch (e: Exception) {

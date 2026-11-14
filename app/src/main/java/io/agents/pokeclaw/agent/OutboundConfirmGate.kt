@@ -187,18 +187,19 @@ object OutboundConfirmGate {
 
     private val NO_WORDS = setOf(
         "no", "nope", "nahi", "nahin", "nai", "na", "naa", "mat", "nako", "cancel", "stop", "ruko", "rehne",
-        "vaddu", "vadhu", "kaadu", "ledu", "venda",
-        "नहीं", "नही", "ना", "मत", "रुको", "రద్దు", "వద్దు", "కాదు", "లేదు"
+        "vaddu", "vadhu", "kaadu", "ledu", "venda", "naahi", "thamba",
+        "नहीं", "नही", "ना", "मत", "रुको", "नाही", "नको", "थांबा", "రద్దు", "వద్దు", "కాదు", "లేదు"
     )
     private val YES_WORDS = setOf(
         "yes", "yeah", "yep", "ok", "okay", "okk", "sure", "haan", "han", "haa", "ha", "haanji", "hanji", "ji",
         "theek", "thik", "sahi", "bhejo", "bhej", "karo", "kar", "lagao", "milao", "avunu", "sare", "seri",
-        "cheyyi", "pampu", "pampandi",
+        "cheyyi", "pampu", "pampandi", "ho", "hoy", "pathva", "kara", "lava",
         "हाँ", "हां", "हा", "जी", "ठीक", "सही", "भेजो", "भेज", "करो", "लगाओ", "मिलाओ",
+        "हो", "होय", "पाठवा", "करा", "लावा",
         "అవును", "సరే", "పంపు", "పంపండి", "చెయ్యి"
     )
 
-    /** Short yes / no in Hindi, Telugu or English. Long or unclear replies are OTHER. */
+    /** Short yes / no in Hindi, Marathi, Telugu or English. Long or unclear replies are OTHER. */
     @JvmStatic
     fun classify(text: String): Reply {
         val tokens = text.lowercase()
