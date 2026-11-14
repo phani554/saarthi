@@ -52,12 +52,15 @@ object MemoryManager {
         // (with no Mem0 key) called back into this function: infinite recursion / StackOverflowError.
         // Cloud Mem0 results are added separately by callers that have a real query.
         val text = localMemoryText()
+        val care = try { io.agents.pokeclaw.care.CareProfileStore.get().promptSection() } catch (_: Exception) { "" }
 
-        val formatted = if (text.isBlank()) "" else "\n\n## User Preferences & Memory\nThese are user preferences and personal facts learned from previous chats. Use them to personalize actions and answers:\n\n$text"
+        val formatted = (if (text.isBlank()) "" else "\n\n## User Preferences & Memory\nThese are user preferences and personal facts learned from previous chats. Use them to personalize actions and answers:\n\n$text") + care
         cachedMemoryPrompt = formatted
         lastCacheTime = now
         return formatted
     }
+
+    fun invalidateCache() { cachedMemoryPrompt = null }
 
     /** Raw local memory file (no network, no recursion). Used by HybridMemoryRepository fallback. */
     fun localMemoryText(): String =
@@ -85,6 +88,9 @@ object MemoryManager {
             }
         }
 
+        // Fast, offline: "watchman ka number 98..." -> care profile right away.
+        try { io.agents.pokeclaw.care.CareMemoryLearner.learnFast(raw) } catch (e: Exception) { XLog.w(TAG, "care fast-learn failed: ${e.message}") }
+
         // AI extraction runs off the caller's thread: it used to add a full LLM round-trip
         // before every task started.
         extractionExecutor.submit { extractWithAi(raw, timestamp) }
@@ -96,14 +102,14 @@ object MemoryManager {
             val prompt = """Analyze this user message for personal facts or relationships:
 "$raw"
 
-Rules:
-1. If the user states a personal preference, friend, family relation, address, contact mapping, or project group name:
-   - Extract a single, concise English fact statement.
-2. If NO personal fact is in the message, output ONLY 'NONE'.
-3. Output ONLY the clean fact statement or 'NONE'. No preamble."""
+The message may be Hindi, Telugu, Marathi or mixed. "fact" = a personal preference, family relation,
+address, contact mapping or group name as one concise English sentence, or NONE.
+${io.agents.pokeclaw.care.CareMemoryLearner.AI_SCHEMA}"""
 
-            val extracted = LlmSessionManager.singleShotInteraction(systemPrompt, prompt, 0.1)
-                ?.trim()?.removeSurrounding("\"")?.removeSurrounding("'")
+            val rawJson = LlmSessionManager.singleShotInteraction(systemPrompt, prompt, 0.1).orEmpty()
+            // Care contacts (watchman, doctor, chemist, loved one), conditions and medicines go into the
+            // structured care profile; the plain fact goes to the memory vault as before.
+            val extracted = io.agents.pokeclaw.care.CareMemoryLearner.applyAiJson(rawJson)
 
             if (!extracted.isNullOrBlank() && !extracted.equals("NONE", ignoreCase = true) && extracted.length > 5) {
                 savePreference("- [$timestamp] $extracted")

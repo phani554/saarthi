@@ -36,7 +36,9 @@ object DistressEscalator {
     private const val GIVE_UP_AFTER_MS = 15 * 60_000L
 
     private val main = Handler(Looper.getMainLooper())
-    @Volatile var isActive = false; private set
+    @Volatile
+    var isActive = false
+        private set
     private var queue: List<CareContact> = emptyList()
     private var index = 0
     private var offhookAt = 0L

@@ -78,6 +78,24 @@ class TaskFlowController(
     fun processVoiceTurn(userSpeech: String) {
         if (userSpeech.isBlank()) return
 
+        // Distress heard: skip the confirm turn and start the SOS call chain immediately.
+        if (io.agents.pokeclaw.care.DistressEscalator.isDistressUtterance(userSpeech)) {
+            if (appViewModel.isTaskRunning()) appViewModel.stopTask()
+            currentVoiceState = VoiceInteractionState.IDLE
+            preTaskHistoryBuilder.clear()
+            val msg = io.agents.pokeclaw.care.DistressEscalator.trigger(activity, "voice")
+            activity.runOnUiThread { addUser(userSpeech); addSystem("SOS: $msg") }
+            return
+        }
+        // "I'm fine / stop" while SOS is calling people.
+        if (io.agents.pokeclaw.care.DistressEscalator.isActive &&
+            Regex("""\b(stop|cancel|theek hoon|thik hu|i am fine|i'm fine|band karo|vaddu)\b""", RegexOption.IGNORE_CASE).containsMatchIn(userSpeech)) {
+            io.agents.pokeclaw.care.DistressEscalator.cancel(activity, "user said stop")
+            VoiceManager.speakAsync("Theek hai, SOS band kar diya.", flush = true)
+            activity.runOnUiThread { addSystem("SOS stopped.") }
+            return
+        }
+
         executor.submit {
             try {
                 when (currentVoiceState) {

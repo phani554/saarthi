@@ -466,6 +466,21 @@ private fun ChatTopBar(
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
                     )
                 }
+                // One-tap SOS: texts and calls the care contacts in priority order.
+                // Two taps within 4 s, so a stray touch in the toolbar never phones anyone.
+                val sosContext = androidx.compose.ui.platform.LocalContext.current
+                var sosArmedAt by remember { mutableStateOf(0L) }
+                TextButton(onClick = {
+                    val now = System.currentTimeMillis()
+                    if (now - sosArmedAt < 4_000L) {
+                        sosArmedAt = 0L
+                        val msg = io.agents.pokeclaw.care.DistressEscalator.trigger(sosContext, "chat button")
+                        android.widget.Toast.makeText(sosContext, msg, android.widget.Toast.LENGTH_LONG).show()
+                    } else {
+                        sosArmedAt = now
+                        android.widget.Toast.makeText(sosContext, "Tap SOS again to call for help", android.widget.Toast.LENGTH_SHORT).show()
+                    }
+                }) { Text("SOS", color = Color(0xFFC62828), fontWeight = FontWeight.Bold) }
                 IconButton(onClick = onSettings) {
                     Icon(Icons.Default.Settings, contentDescription = "Settings")
                 }

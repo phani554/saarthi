@@ -25,6 +25,15 @@ object ContactAliasResolver {
         val clean = rawName.trim()
         if (clean.isBlank()) return clean
 
+        // Care roles ("watchman", "chemist", "family doctor", "my emergency contact") -> saved number.
+        // Only when the phrase is basically the role itself ("call Dr Sharma" must stay a name lookup).
+        if (clean.split(Regex("\\s+")).size <= 3) io.agents.pokeclaw.care.CareRoles.fromWords(clean)?.let { role ->
+            io.agents.pokeclaw.care.CareProfileStore.get().first(role)?.takeIf { it.hasPhone }?.let {
+                XLog.i(TAG, "ContactAliasResolver care role: '$clean' -> $role")
+                return it.digits
+            }
+        }
+
         // Fast path (< 1ms): standard contact names & phone numbers return directly
         if (isPlainNameOrNumber(clean)) {
             XLog.d(TAG, "ContactAliasResolver fast path: '$clean'")

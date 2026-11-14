@@ -131,6 +131,7 @@ object CareProfileStore {
     fun save(profile: CareProfile) {
         cache = profile
         KVUtils.putString(KEY, gson.toJson(profile))
+        io.agents.pokeclaw.agent.knowledge.MemoryManager.invalidateCache() // prompt shows the new profile
     }
 
     @Synchronized

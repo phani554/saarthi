@@ -349,6 +349,13 @@ class SettingsActivity : BaseActivity() {
         toolsGroup.setTitle("Tools")
 
         toolsGroup.addMenuItem(
+            leadingIcon = android.R.drawable.ic_menu_my_calendar,
+            title = "Care profile & SOS",
+            onClick = { startActivity(Intent(this, io.agents.pokeclaw.ui.care.CareProfileActivity::class.java)) },
+            showDivider = true
+        )
+
+        toolsGroup.addMenuItem(
             leadingIcon = android.R.drawable.ic_menu_manage,
             title = "Manage Tools",
             onClick = {
