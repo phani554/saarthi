@@ -47,6 +47,10 @@ object BenchmarkRecorder {
     /** Speech-to-text that came just before a task (attached by [startTask] when recent). */
     @Volatile private var lastStt: VoiceRec? = null
     @Volatile private var lastSttAtMs: Long = 0L
+    /** What the mic heard in the turns before a task (her words, then Saathi's reply), newest last. */
+    private val heardTurns = ArrayDeque<HeardTurn>()
+    private const val HEARD_MAX = 6
+    private const val HEARD_WINDOW_MS = 120_000L
     private const val KEY_REDACT = "BENCHMARK_REDACT"
 
     /** Last engine load seen in this process (set by EngineHolder on every successful load). */
@@ -114,6 +118,7 @@ object BenchmarkRecorder {
             b.language = try { io.agents.pokeclaw.lang.ReplyLanguageState.replyLanguage().code } catch (_: Throwable) { null }
             if (System.currentTimeMillis() - lastSttAtMs < 60_000L) b.stt = lastStt
             lastStt = null
+            b.heard = takeHeard()
             current = b
             TreeCompressionTrace.startRun()
             id
@@ -150,6 +155,25 @@ object BenchmarkRecorder {
     fun noteStuck(level: String, description: String) {
         val b = current ?: return
         synchronized(b) { b.stuckSignals++; b.lastStuck = "$level: ${description.take(80)}" }
+    }
+
+    /**
+     * A voice turn: what the mic heard and what Saathi did with it ("confirm", "redirect", "ignored").
+     * Kept so a run shows the words that started it (a doctor call from a dress chat was untraceable).
+     */
+    fun noteHeard(text: String, action: String, reply: String? = null) {
+        if (!isEnabled()) return
+        synchronized(heardTurns) {
+            heardTurns.addLast(HeardTurn(text.take(200), action, reply?.take(200), System.currentTimeMillis()))
+            while (heardTurns.size > HEARD_MAX) heardTurns.removeFirst()
+        }
+    }
+
+    private fun takeHeard(): List<HeardTurn>? = synchronized(heardTurns) {
+        val now = System.currentTimeMillis()
+        val list = heardTurns.filter { now - it.atMs <= HEARD_WINDOW_MS }
+        heardTurns.clear()
+        list.ifEmpty { null }
     }
 
     /** Speech-to-text finished (before the task starts). */
@@ -366,6 +390,7 @@ object BenchmarkRecorder {
         ),
         confirm = r.confirm?.copy(actionDetail = r.confirm.actionDetail?.let { BenchmarkTagging.HIDDEN }),
         failure = r.failure?.copy(detail = r.failure.detail?.let { BenchmarkTagging.HIDDEN }),
+        heard = r.heard?.map { it.copy(text = BenchmarkTagging.HIDDEN, reply = it.reply?.let { BenchmarkTagging.HIDDEN }) },
         treeTraceFile = null,
         redacted = true,
     )
@@ -517,6 +542,7 @@ object BenchmarkRecorder {
         var chargeStartUah: Long? = null
         var language: String? = null
         var stt: VoiceRec? = null
+        var heard: List<HeardTurn>? = null
         var stuckSignals = 0
         var lastStuck: String? = null
 
@@ -599,6 +625,7 @@ object BenchmarkRecorder {
                 language = language,
                 battery = battery,
                 voice = stt,
+                heard = heard,
                 failure = failure,
                 timestamp = BenchmarkRecorder.istTimestamp(startMs),
                 timestampMs = startMs,
@@ -645,6 +672,7 @@ data class RunRecord(
     @SerializedName("failure") val failure: FailureRec? = null,
     @SerializedName("confirm") val confirm: ConfirmRec? = null,
     @SerializedName("voice") val voice: VoiceRec? = null,
+    @SerializedName("heard") val heard: List<HeardTurn>? = null,
     @SerializedName("language") val language: String? = null,
     @SerializedName("network") val network: String? = null,
     @SerializedName("battery") val battery: BatteryRec? = null,
@@ -751,4 +779,12 @@ data class RunSummary(
     val taskId: String? = null,
     val userVerdict: String? = null,
     val failureReason: String? = null,
+)
+
+/** One voice turn before a task: her transcript, what Saathi did ("confirm" / "redirect" / "ignored"), its reply. */
+data class HeardTurn(
+    @SerializedName("text") val text: String,
+    @SerializedName("action") val action: String,
+    @SerializedName("reply") val reply: String? = null,
+    @SerializedName("atMs") val atMs: Long,
 )

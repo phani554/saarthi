@@ -65,10 +65,6 @@ class TaskFlowController(
         // Status text ChatSessionController shows when the selected tab has no model.
         private const val NO_MODEL_STATUS = "No model selected"
 
-        private val CANCEL_WORDS = Regex(
-            """\b(stop|cancel|wait|rok do|ruko|bhai ruk|vaddu|halt)\b""",
-            RegexOption.IGNORE_CASE
-        )
 
     }
 
@@ -192,9 +188,17 @@ class TaskFlowController(
                         synchronized(preTaskHistoryBuilder) {
                             preTaskHistoryBuilder.append("Saarthi: ").append(result.spokenResponse).append("\n")
                         }
+                        io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteHeard(
+                            userSpeech,
+                            when { result.isCancelled -> "cancel"; result.isConfirmed -> "yes"; else -> "confirm" },
+                            result.spokenResponse
+                        )
                         io.agents.pokeclaw.service.VoiceManager.speakAsync(result.spokenResponse, flush = true)
 
                         activity.runOnUiThread {
+                            // Her words as a bubble: before this only Saathi's question showed, so a request
+                            // the mic misheard looked like Saathi made it up.
+                            addUser(userSpeech)
                             addSystem(result.spokenResponse)
                         }
 
@@ -226,11 +230,16 @@ class TaskFlowController(
                     }
                     VoiceInteractionState.TASK_EXECUTING -> {
                         XLog.i(TAG, "Speech input received during active task execution: '$userSpeech'")
-                        val lower = userSpeech.lowercase().trim()
-                        // Whole words only, and only in a short utterance ("bus stop ke paas" is not a cancel).
-                        val isCancelCommand = CANCEL_WORDS.containsMatchIn(lower) &&
-                                lower.split(Regex("\\s+")).size <= 4
+                        val kind = io.agents.pokeclaw.agent.MidTaskSpeechFilter.classify(userSpeech)
+                        io.agents.pokeclaw.benchmark.BenchmarkRecorder.noteHeard(userSpeech, kind.name.lowercase())
+                        val isCancelCommand = kind == io.agents.pokeclaw.agent.MidTaskSpeechFilter.Kind.CANCEL
 
+                        if (kind == io.agents.pokeclaw.agent.MidTaskSpeechFilter.Kind.IGNORE) {
+                            // Noise, a cough or half a word: keep the task running, don't turn it into a request.
+                            XLog.i(TAG, "Ignoring unclear speech during a running task (${userSpeech.length} chars)")
+                            activity.runOnUiThread { addUser(userSpeech) }
+                            return@runOffMain
+                        }
                         if (isCancelCommand) {
                             XLog.w(TAG, "Voice stop command received during task execution — cancelling task immediately")
                             appViewModel.stopTask()

@@ -91,7 +91,9 @@ object PromptRewriter {
         // asked the same thing again and again. Repeat her words back and wait for a yes (or a no).
         if (LlmSessionManager.isLocalOnly()) return fallbackResult(raw, hasPriorProposal, useModel = false)
 
-        val memorySection = MemoryManager.getMemoryPromptSection()
+        // Facts that match her words only (was the whole profile + care contacts, so a doctor's name could
+        // turn up in a request that never mentioned a doctor).
+        val memorySection = MemoryManager.getMemoryPromptSection(raw)
         // Decided from this turn's speech / text before we get here (ReplyLanguageState).
         val replyLang = ReplyLanguageState.replyLanguage()
 
@@ -100,6 +102,7 @@ object PromptRewriter {
 $memorySection
 
 Rules:
+0. Only act on what the user actually said (Latest User Speech, or the request she is confirming in the history). Never add or invent a task, person, doctor, app or product she did not mention. Use memory only to resolve a name or word she used (e.g. "doctor" -> the doctor's name). If the speech is unclear, noise, or not a request, set isConfirmed=false, isCancelled=false, cleanedEnglishTask="" and in spokenResponse ask what she would like to do.
 1. Reply language: write spokenResponse in ${replyLang.englishName}. ${replyLang.promptInstruction()} Do not switch language because of names, app names or English product words in the request.
 2. Exit & Cancellation Intent: Check if user wants to cancel, exit, or declines adding anything else!
    - IF user declines/cancels: set isCancelled=true, isConfirmed=false, spokenResponse="${SpokenStrings.cancelledOk()}", cleanedEnglishTask="".
@@ -245,7 +248,8 @@ Rules:
    - If user mentions a contact nickname or group (e.g. "Mom" or "project group") that has a display name in memory (e.g. "Sarita (Mom)" or "Final Year Project"), explicitly use that display name!
 3. Combine multi-clause messaging into ONE clear instruction, but keep the message text itself exactly in the user's own words and language, in quotes, never translated (e.g. "Ravi ko bolo main aa rahi hoon" -> Send message to Ravi: "main aa rahi hoon").
 4. Preserve size/quantity/volume constraints (e.g. "1L amul milk", "pepsi 250ml").
-5. Output ONLY the optimized English action task. No preamble."""
+5. Never add an action, contact, doctor, app or product the request does not mention. Memory only resolves names or words that are in the request. If the request is unclear, return it unchanged.
+6. Output ONLY the optimized English action task. No preamble."""
 
             val result = LlmSessionManager.singleShotInteraction(systemPrompt, prompt, 0.2)
                 ?: if (LlmSessionManager.isLocalOnly()) null else LlmSessionManager.singleShotLocal(systemPrompt, prompt, 0.2)

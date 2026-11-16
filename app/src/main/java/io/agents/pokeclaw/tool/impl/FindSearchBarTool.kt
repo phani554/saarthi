@@ -24,7 +24,7 @@ class FindSearchBarTool : BaseTool() {
         "快速在 WhatsApp、Blinkit、Amazon、Flipkart 或任何应用中导航至搜索栏。传递 query 参数可直接输入。"
 
     override fun getParameters(): List<ToolParameter> = listOf(
-        ToolParameter("query", "string", "Optional search query to type directly into search bar", false)
+        ToolParameter("query", "string", "Optional search text: only the product or name words, at most 6 (e.g. 'red dress for women'), never the whole instruction", false)
     )
 
     override fun execute(params: Map<String, Any>): ToolResult {
@@ -34,6 +34,7 @@ class FindSearchBarTool : BaseTool() {
         val query = optionalString(params, "query", "").trim()
 
         if (query.isNotEmpty()) {
+            io.agents.pokeclaw.agent.SearchQueryGuard.check(query)?.let { return ToolResult.error(it) }
             val fastResult = EcommerceAutomationHelper.fastSearch(service, query)
             if (fastResult.isSuccess) {
                 return fastResult
