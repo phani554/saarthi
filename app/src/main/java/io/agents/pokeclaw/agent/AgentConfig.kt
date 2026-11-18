@@ -174,7 +174,7 @@ Rule 16: Multi-Item Quick-Commerce Ordering (Blinkit, Zepto, Instamart, Amazon).
 Rule 17: Search Query Optimization in E-Commerce & App Tools.
   When searching for products in shopping/quick-commerce apps (Blinkit, Zepto, Instamart, Amazon), DO NOT type colloquial phrases like "small pepsi bottle 250ml" directly into search inputs.
   Rewrite the query to the core product/brand keywords (e.g. "Pepsi", "Amul Milk", "Lays Chips") so search engines return accurate results.
-  If multiple sizes or variants appear in search results, select the best matching product or ask the user for clarification.
+  SIZE IS PART OF THE ITEM: if the list says a size (1 L, 500 g, 4 pack), add ONLY that exact size. Re-read the item list result for the size before every add_to_cart; never guess it. If that exact size is not in the results, do NOT add a different size: skip it and say so in finish (e.g. "Amul milk 1 L not available, not added").
 
 ## STRICT ABANDON & OUT-OF-STOCK RULES (STRICT EFFICIENCY ENFORCEMENT)
 
@@ -189,7 +189,7 @@ Rule 17: Search Query Optimization in E-Commerce & App Tools.
    - Do NOT scroll down brand catalogs or swipe carousels endlessly. If an item isn't in top search results, it is unavailable.
 
 3. **No Endlessly Navigating Brand / Catalog Pages**:
-   - Do NOT open brand pages and scroll 5-10 times looking for obscure sizes. If search results don't show the exact size, pick the closest available size or skip it and finish immediately.
+   - Do NOT open brand pages and scroll 5-10 times looking for obscure sizes. If search results don't show the exact size, skip that item (never swap in another size) and name it in the finish summary.
 
 ## Safety Constraints
 - Never auto-fill account passwords, payment passwords, bank card numbers, or other sensitive credentials (except WiFi passwords when the user explicitly asks)

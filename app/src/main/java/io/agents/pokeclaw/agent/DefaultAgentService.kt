@@ -545,35 +545,11 @@ class DefaultAgentService : AgentService {
     /** Compress Tool Result: use placeholder for observation tools, truncate summary for others */
     private fun compressToolResultMessage(messages: MutableList<ChatMessage>, index: Int) {
         val msg = messages[index] as ToolExecutionResultMessage
-        val text = msg.text()
-        if (text.length <= 100) return // already short enough, no need to compress
-
-        val placeholder = OBSERVATION_PLACEHOLDERS[msg.toolName()]
-        if (placeholder != null) {
-            messages[index] = ToolExecutionResultMessage.from(msg.id(), msg.toolName(), placeholder)
-            return
-        }
-
-        // Other tools: parse JSON to extract a summary
-        val compressed = summarizeToolResult(text)
-        messages[index] = ToolExecutionResultMessage.from(msg.id(), msg.toolName(), compressed)
-    }
-
-    /** Compress ToolResult JSON into a one-line summary */
-    private fun summarizeToolResult(resultJson: String): String {
-        return try {
-            val mapType = object : TypeToken<Map<String, Any?>>() {}.type
-            val map: Map<String, Any?> = GSON.fromJson(resultJson, mapType)
-            val isSuccess = map["isSuccess"] as? Boolean ?: false
-            if (isSuccess) {
-                val data = map["data"]?.toString() ?: "ok"
-                "✓ " + if (data.length > 80) data.take(80) + "..." else data
-            } else {
-                val error = map["error"]?.toString() ?: "failed"
-                "✗ " + if (error.length > 80) error.take(80) + "..." else error
-            }
-        } catch (_: Exception) {
-            if (resultJson.length > 80) resultJson.take(80) + "..." else resultJson
+        val compressed = ToolResultCompressor.compress(
+            msg.toolName(), msg.text(), OBSERVATION_PLACEHOLDERS[msg.toolName()]
+        )
+        if (compressed != msg.text()) {
+            messages[index] = ToolExecutionResultMessage.from(msg.id(), msg.toolName(), compressed)
         }
     }
 
